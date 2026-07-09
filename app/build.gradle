@@ -11,6 +11,7 @@ if (localProps.exists()) {
 def neshanApiKey = props.getProperty("NESHAN_API_KEY", System.getenv("NESHAN_API_KEY") ?: "")
 def mapIrApiKey = props.getProperty("MAPIR_API_KEY", System.getenv("MAPIR_API_KEY") ?: "")
 def aiApiKey = props.getProperty("AI_API_KEY", System.getenv("AI_API_KEY") ?: "")
+def keysDecryptSecret = props.getProperty("KEYS_DECRYPTION_SECRET", System.getenv("KEYS_DECRYPTION_SECRET") ?: "")
 
 android {
     namespace "ai.drivemate"
@@ -30,6 +31,7 @@ android {
         buildConfigField "String", "NESHAN_API_KEY", "\"${neshanApiKey}\""
         buildConfigField "String", "MAPIR_API_KEY", "\"${mapIrApiKey}\""
         buildConfigField "String", "AI_API_KEY", "\"${aiApiKey}\""
+        buildConfigField "String", "KEYS_DECRYPTION_SECRET", "\"${keysDecryptSecret}\""
     }
 
     sourceSets {

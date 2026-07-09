@@ -6,10 +6,16 @@ import org.json.JSONObject;
 import ai.drivemate.model.RouteResult;
 
 public class NeshanRoutingProvider implements RoutingProvider {
-    private final String apiKey;
+    private String apiKey;
 
     public NeshanRoutingProvider(String apiKey) {
         this.apiKey = apiKey;
+    }
+
+    public void setApiKey(String apiKey) {
+        if (apiKey != null && !apiKey.trim().isEmpty()) {
+            this.apiKey = apiKey.trim();
+        }
     }
 
     @Override

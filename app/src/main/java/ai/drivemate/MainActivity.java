@@ -2,20 +2,22 @@ package ai.drivemate;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.location.Location;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.speech.RecognizerIntent;
-import android.view.View;
-import android.widget.Button;
 import android.widget.TextView;
+import android.widget.EditText;
 import android.widget.Toast;
 
 import java.util.ArrayList;
 import java.util.Locale;
 
 import ai.drivemate.ai.AiAssistant;
+import ai.drivemate.ai.RuntimeKeys;
 import ai.drivemate.location.DeviceLocationTracker;
 import ai.drivemate.model.SavedPlace;
 import ai.drivemate.routing.MapIrRoutingProvider;
@@ -35,9 +37,12 @@ public class MainActivity extends Activity {
     private PlaceStore placeStore;
     private VoiceGuidancePlayer voicePlayer;
     private DeviceLocationTracker locationTracker;
+    private NeshanRoutingProvider neshanRoutingProvider;
+    private MapIrRoutingProvider mapIrRoutingProvider;
     private RouteRepository routeRepository;
     private VoiceCommandParser commandParser;
     private AiAssistant aiAssistant;
+    private RuntimeKeys runtimeKeys = new RuntimeKeys();
     private String lastInstruction = "start_navigation";
 
     @Override
@@ -50,10 +55,9 @@ public class MainActivity extends Activity {
         placeStore = new PlaceStore(this);
         voicePlayer = new VoiceGuidancePlayer(this);
         locationTracker = new DeviceLocationTracker(this);
-        routeRepository = new RouteRepository(
-                new NeshanRoutingProvider(BuildConfig.NESHAN_API_KEY),
-                new MapIrRoutingProvider(BuildConfig.MAPIR_API_KEY)
-        );
+        neshanRoutingProvider = new NeshanRoutingProvider(BuildConfig.NESHAN_API_KEY);
+        mapIrRoutingProvider = new MapIrRoutingProvider(BuildConfig.MAPIR_API_KEY);
+        routeRepository = new RouteRepository(neshanRoutingProvider, mapIrRoutingProvider);
         commandParser = new VoiceCommandParser();
         aiAssistant = new AiAssistant(BuildConfig.AI_API_KEY);
 
@@ -61,11 +65,13 @@ public class MainActivity extends Activity {
         requestCorePermissions();
         refreshList();
         voicePlayer.play("welcome");
+        loadRuntimeKeys();
+        promptEnableLocationIfNeeded();
     }
 
     private void wireButtons() {
         findViewById(R.id.voiceButton).setOnClickListener(v -> startVoiceInput());
-        findViewById(R.id.saveButton).setOnClickListener(v -> saveCurrentPlace("مکان جدید", "custom"));
+        findViewById(R.id.saveButton).setOnClickListener(v -> promptSaveCurrentPlace());
         findViewById(R.id.homeButton).setOnClickListener(v -> navigateToKnownPlace("home"));
         findViewById(R.id.workButton).setOnClickListener(v -> navigateToKnownPlace("work"));
         findViewById(R.id.favoritesButton).setOnClickListener(v -> showPlaces(true));
@@ -154,9 +160,26 @@ public class MainActivity extends Activity {
                 askAi(text);
                 break;
             default:
-                voicePlayer.play("command_unknown");
-                setStatus("فرمان را متوجه نشدم.");
+                SavedPlace namedPlace = placeStore.findByNameInText(text);
+                if (namedPlace != null) {
+                    startNavigation(namedPlace);
+                } else {
+                    voicePlayer.play("command_unknown");
+                    askAi(text);
+                }
         }
+    }
+
+    private void promptSaveCurrentPlace() {
+        final EditText input = new EditText(this);
+        input.setHint("مثلاً خانه مادر، باشگاه، مدرسه");
+        input.setText("مکان جدید");
+        new AlertDialog.Builder(this)
+                .setTitle("نام مکان ذخیره‌شده")
+                .setView(input)
+                .setPositiveButton("ذخیره", (dialog, which) -> saveCurrentPlace(input.getText().toString(), "custom_" + System.currentTimeMillis()))
+                .setNegativeButton("انصراف", null)
+                .show();
     }
 
     private void saveCurrentPlace(String name, String kind) {
@@ -167,7 +190,7 @@ public class MainActivity extends Activity {
             return;
         }
         SavedPlace place = new SavedPlace(
-                name,
+                (name == null || name.trim().isEmpty()) ? "مکان جدید" : name.trim(),
                 kind,
                 location.getLatitude(),
                 location.getLongitude(),
@@ -213,6 +236,30 @@ public class MainActivity extends Activity {
                 }));
     }
 
+    private void loadRuntimeKeys() {
+        new Thread(() -> {
+            runtimeKeys = RuntimeKeys.fetch(new String[]{
+                    "https://abrehamrahi.ir/o/public/eUFcsXOX",
+                    "https://gist.githubusercontent.com/ghadirb/626a804df3009e49045a2948dad89fe5/raw/c93c06d1b2f38c65ee30f092c134a89998326d12/keys.txt"
+            }, BuildConfig.KEYS_DECRYPTION_SECRET);
+            aiAssistant.setRuntimeKeys(runtimeKeys);
+            neshanRoutingProvider.setApiKey(runtimeKeys.get("NESHAN_API_KEY"));
+            mapIrRoutingProvider.setApiKey(runtimeKeys.get("MAPIR_API_KEY"));
+            runOnUiThread(() -> setStatus(runtimeKeys.has("GAPGPT_API_KEY") || runtimeKeys.has("AI_API_KEY") ? "کلیدهای آنلاین فعال شدند." : "کلید آنلاین دریافت نشد؛ حالت آفلاین فعال است."));
+        }).start();
+    }
+
+    private void promptEnableLocationIfNeeded() {
+        if (!locationTracker.isLocationEnabled()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("فعال‌سازی مکان گوشی")
+                    .setMessage("برای ذخیره و مسیریابی، مکان/GPS گوشی را روشن کنید.")
+                    .setPositiveButton("باز کردن تنظیمات", (d, w) -> startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)))
+                    .setNegativeButton("بعداً", null)
+                    .show();
+        }
+    }
+
     private void askAi(String question) {
         setStatus("در حال آماده کردن پاسخ هوشمند...");
         aiAssistant.answer(question, answer -> runOnUiThread(() -> setStatus(answer)));
@@ -225,21 +272,50 @@ public class MainActivity extends Activity {
     }
 
     private void showPlaces(boolean favoritesOnly) {
+        ArrayList<SavedPlace> places = new ArrayList<>();
+        for (SavedPlace place : placeStore.allPlaces()) if (!favoritesOnly || place.favorite) places.add(place);
         StringBuilder builder = new StringBuilder();
-        for (SavedPlace place : placeStore.allPlaces()) {
-            if (!favoritesOnly || place.favorite) {
-                builder.append("• ").append(place.name).append(" - ").append(place.address).append("\n");
-            }
+        for (int i = 0; i < places.size(); i++) {
+            SavedPlace place = places.get(i);
+            builder.append(i + 1).append(". ").append(place.name).append(" - ").append(place.address).append("\n");
         }
-        listText.setText(builder.length() == 0 ? "هنوز مقصد محبوبی ذخیره نشده است." : builder.toString());
+        listText.setText(builder.length() == 0 ? "هنوز مقصدی ذخیره نشده است." : builder.toString());
+        listText.setOnClickListener(v -> choosePlace(places));
+    }
+
+    private void choosePlace(ArrayList<SavedPlace> places) {
+        if (places.isEmpty()) return;
+        String[] names = new String[places.size()];
+        for (int i = 0; i < places.size(); i++) names[i] = places.get(i).name;
+        new AlertDialog.Builder(this)
+                .setTitle("انتخاب مکان")
+                .setItems(names, (d, which) -> editOrNavigatePlace(places.get(which)))
+                .show();
+    }
+
+    private void editOrNavigatePlace(SavedPlace place) {
+        final EditText input = new EditText(this);
+        input.setText(place.name);
+        new AlertDialog.Builder(this)
+                .setTitle("ویرایش یا مسیریابی")
+                .setView(input)
+                .setPositiveButton("مسیریابی", (d, w) -> startNavigation(place))
+                .setNeutralButton("ذخیره نام", (d, w) -> {
+                    placeStore.upsert(new SavedPlace(input.getText().toString(), place.kind, place.latitude, place.longitude, place.address, System.currentTimeMillis(), place.favorite));
+                    refreshList();
+                })
+                .setNegativeButton("انصراف", null)
+                .show();
     }
 
     private void showRecent() {
+        ArrayList<SavedPlace> recent = new ArrayList<>(placeStore.recentPlaces());
         StringBuilder builder = new StringBuilder();
-        for (SavedPlace place : placeStore.recentPlaces()) {
-            builder.append("• ").append(place.name).append("\n");
+        for (int i = 0; i < recent.size(); i++) {
+            builder.append(i + 1).append(". ").append(recent.get(i).name).append("\n");
         }
         listText.setText(builder.length() == 0 ? "هنوز مقصد اخیری وجود ندارد." : builder.toString());
+        listText.setOnClickListener(v -> choosePlace(recent));
     }
 
     private void refreshList() {

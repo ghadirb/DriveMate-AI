@@ -44,6 +44,20 @@ public class PlaceStore {
         return null;
     }
 
+    public SavedPlace findByNameInText(String text) {
+        if (text == null) {
+            return null;
+        }
+        String normalized = text.trim().replace('ي', 'ی').replace('ك', 'ک');
+        for (SavedPlace place : allPlaces()) {
+            String name = place.name == null ? "" : place.name.trim().replace('ي', 'ی').replace('ك', 'ک');
+            if (!name.isEmpty() && normalized.contains(name)) {
+                return place;
+            }
+        }
+        return null;
+    }
+
     public List<SavedPlace> allPlaces() {
         List<SavedPlace> places = readList(KEY_PLACES);
         places.sort(Comparator.comparingLong(place -> -place.updatedAt));

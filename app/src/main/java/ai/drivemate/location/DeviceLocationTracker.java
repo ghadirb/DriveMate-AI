@@ -29,6 +29,11 @@ public class DeviceLocationTracker implements LocationListener {
         locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 5000L, 15f, this);
     }
 
+    public boolean isLocationEnabled() {
+        return locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
+                || locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
+    }
+
     public Location getLastLocation() {
         return lastLocation;
     }
