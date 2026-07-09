@@ -199,7 +199,7 @@ public class MainActivity extends Activity {
         }
         setStatus("در حال دریافت مسیر به " + destination.name + "...");
         voicePlayer.play("searching_route");
-        routeRepository.getRoute(origin.getLatitude(), origin.getLongitude(), destination.latitude, destination.longitude(),
+        routeRepository.getRoute(origin.getLatitude(), origin.getLongitude(), destination.latitude, destination.longitude,
                 route -> runOnUiThread(() -> {
                     placeStore.addRecent(destination);
                     lastInstruction = "start_navigation";
