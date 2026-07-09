@@ -74,8 +74,11 @@ tasks.register("generateVoicePlaceholders") {
             int sampleRate = 8000
             int channels = 1
             int bitsPerSample = 16
-            int samples = (int) (sampleRate * durationMs / 1000)
-            int dataSize = samples * channels * bitsPerSample / 8
+            int samples = (sampleRate * durationMs).intdiv(1000)
+            int bytesPerSample = bitsPerSample.intdiv(8)
+            int blockAlign = channels * bytesPerSample
+            int byteRate = sampleRate * blockAlign
+            int dataSize = samples * blockAlign
             int fileSize = 36 + dataSize
             ByteArrayOutputStream out = new ByteArrayOutputStream()
             writeAscii(out, "RIFF")
@@ -85,8 +88,8 @@ tasks.register("generateVoicePlaceholders") {
             writeShortLE(out, 1)
             writeShortLE(out, channels)
             writeIntLE(out, sampleRate)
-            writeIntLE(out, sampleRate * channels * bitsPerSample / 8)
-            writeShortLE(out, channels * bitsPerSample / 8)
+            writeIntLE(out, byteRate)
+            writeShortLE(out, blockAlign)
             writeShortLE(out, bitsPerSample)
             writeAscii(out, "data")
             writeIntLE(out, dataSize)
