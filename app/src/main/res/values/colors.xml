@@ -1,0 +1,8 @@
+<resources>
+    <color name="drivemate_blue">#176B87</color>
+    <color name="drivemate_green">#2E8B57</color>
+    <color name="drivemate_bg">#F5FAFC</color>
+    <color name="drivemate_text">#17324D</color>
+    <color name="drivemate_muted">#6B7C8F</color>
+    <color name="white">#FFFFFF</color>
+</resources>

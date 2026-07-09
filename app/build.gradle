@@ -1,0 +1,112 @@
+plugins {
+    id "com.android.application"
+}
+
+def props = new Properties()
+def localProps = rootProject.file("local.properties")
+if (localProps.exists()) {
+    localProps.withInputStream { props.load(it) }
+}
+
+def neshanApiKey = props.getProperty("NESHAN_API_KEY", System.getenv("NESHAN_API_KEY") ?: "")
+def mapIrApiKey = props.getProperty("MAPIR_API_KEY", System.getenv("MAPIR_API_KEY") ?: "")
+def aiApiKey = props.getProperty("AI_API_KEY", System.getenv("AI_API_KEY") ?: "")
+
+android {
+    namespace "ai.drivemate"
+    compileSdk 35
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    defaultConfig {
+        applicationId "ai.drivemate"
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName "0.1.0"
+
+        buildConfigField "String", "NESHAN_API_KEY", "\"${neshanApiKey}\""
+        buildConfigField "String", "MAPIR_API_KEY", "\"${mapIrApiKey}\""
+        buildConfigField "String", "AI_API_KEY", "\"${aiApiKey}\""
+    }
+
+    sourceSets {
+        main.res.srcDirs += "$buildDir/generated/drivemate/res"
+    }
+}
+
+def voiceClips = [
+        "turn_left", "turn_right", "go_straight", "keep_left", "keep_right",
+        "u_turn", "arrived", "route_recalculated", "caution", "speed_camera",
+        "roundabout_enter", "roundabout_exit", "exit_right", "exit_left",
+        "destination_ahead", "start_navigation", "gps_lost", "gps_ready",
+        "traffic_ahead", "route_changed", "continue_route", "rerouting",
+        "voice_louder", "voice_lower", "repeat_instruction", "fuel_station",
+        "parking_found", "home_saved", "work_saved", "place_saved",
+        "favorite_added", "recent_destination", "searching_route", "api_error",
+        "mapir_fallback", "neshan_route_ready", "off_route", "resume_home",
+        "stop_navigation", "near_destination", "welcome", "listening",
+        "command_unknown"
+]
+
+tasks.register("generateVoicePlaceholders") {
+    def outputDir = file("$buildDir/generated/drivemate/res/raw")
+    outputs.dir(outputDir)
+
+    doLast {
+        delete(outputDir)
+        outputDir.mkdirs()
+        def sourceRawDir = file("src/main/res/raw")
+        voiceClips.each { clip ->
+            def target = new File(outputDir, "${clip}.wav")
+            def realClip = new File(sourceRawDir, "${clip}.wav")
+            if (!realClip.exists()) {
+                target.bytes = createSilentWavBytes(420)
+            }
+        }
+    }
+}
+
+byte[] createSilentWavBytes(int durationMs) {
+    int sampleRate = 8000
+    int channels = 1
+    int bitsPerSample = 16
+    int samples = (int) (sampleRate * durationMs / 1000)
+    int dataSize = samples * channels * bitsPerSample / 8
+    int fileSize = 36 + dataSize
+    ByteArrayOutputStream out = new ByteArrayOutputStream()
+    writeAscii(out, "RIFF")
+    writeIntLE(out, fileSize)
+    writeAscii(out, "WAVEfmt ")
+    writeIntLE(out, 16)
+    writeShortLE(out, 1)
+    writeShortLE(out, channels)
+    writeIntLE(out, sampleRate)
+    writeIntLE(out, sampleRate * channels * bitsPerSample / 8)
+    writeShortLE(out, channels * bitsPerSample / 8)
+    writeShortLE(out, bitsPerSample)
+    writeAscii(out, "data")
+    writeIntLE(out, dataSize)
+    out.write(new byte[dataSize], 0, dataSize)
+    return out.toByteArray()
+}
+
+void writeAscii(ByteArrayOutputStream out, String text) {
+    out.write(text.getBytes("US-ASCII"), 0, text.length())
+}
+
+void writeIntLE(ByteArrayOutputStream out, int value) {
+    out.write(value & 0xff)
+    out.write((value >> 8) & 0xff)
+    out.write((value >> 16) & 0xff)
+    out.write((value >> 24) & 0xff)
+}
+
+void writeShortLE(ByteArrayOutputStream out, int value) {
+    out.write(value & 0xff)
+    out.write((value >> 8) & 0xff)
+}
+
+preBuild.dependsOn("generateVoicePlaceholders")

@@ -1,0 +1,9 @@
+<resources>
+    <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:statusBarColor">@color/drivemate_bg</item>
+        <item name="android:navigationBarColor">@color/white</item>
+        <item name="android:colorAccent">@color/drivemate_green</item>
+    </style>
+</resources>

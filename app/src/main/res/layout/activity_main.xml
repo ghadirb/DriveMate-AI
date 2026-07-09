@@ -1,0 +1,67 @@
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/drivemate_bg"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp"
+        android:layoutDirection="rtl"
+        android:textDirection="rtl">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/app_name_fa"
+            android:textColor="@color/drivemate_text"
+            android:textSize="30sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/statusText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/status_panel"
+            android:padding="14dp"
+            android:text="آماده دریافت فرمان صوتی"
+            android:textColor="@color/drivemate_text"
+            android:textSize="16sp" />
+
+        <Button
+            android:id="@+id/voiceButton"
+            android:layout_width="match_parent"
+            android:layout_height="64dp"
+            android:layout_marginTop="18dp"
+            android:background="@drawable/primary_button"
+            android:text="مقصد را بگویید"
+            android:textColor="@color/white"
+            android:textSize="20sp" />
+
+        <GridLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:columnCount="2"
+            android:useDefaultMargins="true">
+
+            <Button android:id="@+id/homeButton" style="@style/HomeActionButton" android:text="خانه" />
+            <Button android:id="@+id/workButton" style="@style/HomeActionButton" android:text="محل کار" />
+            <Button android:id="@+id/favoritesButton" style="@style/HomeActionButton" android:text="مقصدهای محبوب" />
+            <Button android:id="@+id/recentButton" style="@style/HomeActionButton" android:text="مقصدهای اخیر" />
+            <Button android:id="@+id/saveButton" style="@style/HomeActionButton" android:text="ذخیره مکان جدید" />
+            <Button android:id="@+id/settingsButton" style="@style/HomeActionButton" android:text="تنظیمات صدا" />
+        </GridLayout>
+
+        <TextView
+            android:id="@+id/listText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:textColor="@color/drivemate_muted"
+            android:textSize="15sp" />
+    </LinearLayout>
+</ScrollView>
