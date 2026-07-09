@@ -35,7 +35,7 @@ jobs:
           NESHAN_API_KEY: ${{ secrets.NESHAN_API_KEY }}
           MAPIR_API_KEY: ${{ secrets.MAPIR_API_KEY }}
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
-        run: gradle assembleDebug
+        run: gradle assembleDebug --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4

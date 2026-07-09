@@ -56,6 +56,44 @@ tasks.register("generateVoicePlaceholders") {
     outputs.dir(outputDir)
 
     doLast {
+        def writeAscii = { ByteArrayOutputStream out, String text ->
+            byte[] bytes = text.getBytes("US-ASCII")
+            out.write(bytes, 0, bytes.length)
+        }
+        def writeIntLE = { ByteArrayOutputStream out, int value ->
+            out.write(value & 0xff)
+            out.write((value >> 8) & 0xff)
+            out.write((value >> 16) & 0xff)
+            out.write((value >> 24) & 0xff)
+        }
+        def writeShortLE = { ByteArrayOutputStream out, int value ->
+            out.write(value & 0xff)
+            out.write((value >> 8) & 0xff)
+        }
+        def createSilentWavBytes = { int durationMs ->
+            int sampleRate = 8000
+            int channels = 1
+            int bitsPerSample = 16
+            int samples = (int) (sampleRate * durationMs / 1000)
+            int dataSize = samples * channels * bitsPerSample / 8
+            int fileSize = 36 + dataSize
+            ByteArrayOutputStream out = new ByteArrayOutputStream()
+            writeAscii(out, "RIFF")
+            writeIntLE(out, fileSize)
+            writeAscii(out, "WAVEfmt ")
+            writeIntLE(out, 16)
+            writeShortLE(out, 1)
+            writeShortLE(out, channels)
+            writeIntLE(out, sampleRate)
+            writeIntLE(out, sampleRate * channels * bitsPerSample / 8)
+            writeShortLE(out, channels * bitsPerSample / 8)
+            writeShortLE(out, bitsPerSample)
+            writeAscii(out, "data")
+            writeIntLE(out, dataSize)
+            out.write(new byte[dataSize], 0, dataSize)
+            out.toByteArray()
+        }
+
         delete(outputDir)
         outputDir.mkdirs()
         def sourceRawDir = file("src/main/res/raw")
@@ -67,46 +105,6 @@ tasks.register("generateVoicePlaceholders") {
             }
         }
     }
-}
-
-byte[] createSilentWavBytes(int durationMs) {
-    int sampleRate = 8000
-    int channels = 1
-    int bitsPerSample = 16
-    int samples = (int) (sampleRate * durationMs / 1000)
-    int dataSize = samples * channels * bitsPerSample / 8
-    int fileSize = 36 + dataSize
-    ByteArrayOutputStream out = new ByteArrayOutputStream()
-    writeAscii(out, "RIFF")
-    writeIntLE(out, fileSize)
-    writeAscii(out, "WAVEfmt ")
-    writeIntLE(out, 16)
-    writeShortLE(out, 1)
-    writeShortLE(out, channels)
-    writeIntLE(out, sampleRate)
-    writeIntLE(out, sampleRate * channels * bitsPerSample / 8)
-    writeShortLE(out, channels * bitsPerSample / 8)
-    writeShortLE(out, bitsPerSample)
-    writeAscii(out, "data")
-    writeIntLE(out, dataSize)
-    out.write(new byte[dataSize], 0, dataSize)
-    return out.toByteArray()
-}
-
-void writeAscii(ByteArrayOutputStream out, String text) {
-    out.write(text.getBytes("US-ASCII"), 0, text.length())
-}
-
-void writeIntLE(ByteArrayOutputStream out, int value) {
-    out.write(value & 0xff)
-    out.write((value >> 8) & 0xff)
-    out.write((value >> 16) & 0xff)
-    out.write((value >> 24) & 0xff)
-}
-
-void writeShortLE(ByteArrayOutputStream out, int value) {
-    out.write(value & 0xff)
-    out.write((value >> 8) & 0xff)
 }
 
 preBuild.dependsOn("generateVoicePlaceholders")
