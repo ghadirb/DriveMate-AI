@@ -9,13 +9,13 @@ import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
+import javax.crypto.SecretKeyFactory;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
-import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.SecretKeySpec;
 
 public class RuntimeKeys {
@@ -52,31 +52,22 @@ public class RuntimeKeys {
 
     private static String decodePayload(String payload, String secret) throws Exception {
         String trimmed = payload.trim();
-        if (trimmed.startsWith("{") || trimmed.contains("=")) return trimmed;
-        if (secret == null || secret.isEmpty()) return trimmed;
+        // Base64 padding also uses '=', so only treat a multi-line key/value document as plaintext.
+        if (trimmed.startsWith("{") || (trimmed.contains("\n") && trimmed.contains("=")) || secret == null || secret.trim().isEmpty()) return trimmed;
         byte[] raw = Base64.decode(trimmed, Base64.DEFAULT);
-        byte[] key = MessageDigest.getInstance("SHA-256").digest(secret.getBytes(StandardCharsets.UTF_8));
-        if (raw.length > 29) {
-            try {
-                byte[] iv = new byte[12];
-                byte[] cipherText = new byte[raw.length - 12];
-                System.arraycopy(raw, 0, iv, 0, 12);
-                System.arraycopy(raw, 12, cipherText, 0, cipherText.length);
-                Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-                cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, iv));
-                return new String(cipher.doFinal(cipherText), StandardCharsets.UTF_8);
-            } catch (Exception ignored) { }
-        }
-        if (raw.length > 16) {
-            byte[] iv = new byte[16];
-            byte[] cipherText = new byte[raw.length - 16];
-            System.arraycopy(raw, 0, iv, 0, 16);
-            System.arraycopy(raw, 16, cipherText, 0, cipherText.length);
-            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
-            return new String(cipher.doFinal(cipherText), StandardCharsets.UTF_8);
-        }
-        return trimmed;
+        // Matches encrypt_keys.py: 16-byte salt + 12-byte nonce + AES-GCM ciphertext/tag.
+        if (raw.length < 16 + 12 + 16) throw new IllegalArgumentException("Encrypted key payload is too short");
+        byte[] salt = new byte[16];
+        byte[] iv = new byte[12];
+        byte[] cipherText = new byte[raw.length - 28];
+        System.arraycopy(raw, 0, salt, 0, salt.length);
+        System.arraycopy(raw, 16, iv, 0, iv.length);
+        System.arraycopy(raw, 28, cipherText, 0, cipherText.length);
+        PBEKeySpec spec = new PBEKeySpec(secret.toCharArray(), salt, 20000, 256);
+        byte[] key = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).getEncoded();
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, iv));
+        return new String(cipher.doFinal(cipherText), StandardCharsets.UTF_8);
     }
 
     private static void parse(String text, RuntimeKeys keys) throws Exception {
@@ -92,6 +83,7 @@ public class RuntimeKeys {
             String clean = line.trim();
             if (clean.isEmpty() || clean.startsWith("#")) continue;
             int idx = clean.indexOf('=');
+            if (idx <= 0) idx = clean.indexOf(':');
             if (idx > 0) keys.putIfNotEmpty(clean.substring(0, idx).trim(), clean.substring(idx + 1).trim().replace("\"", ""));
         }
     }

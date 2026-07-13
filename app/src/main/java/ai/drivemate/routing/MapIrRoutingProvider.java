@@ -3,7 +3,11 @@ package ai.drivemate.routing;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import ai.drivemate.model.RouteResult;
+import ai.drivemate.model.RouteStep;
 
 public class MapIrRoutingProvider implements RoutingProvider {
     private String apiKey;
@@ -17,6 +21,8 @@ public class MapIrRoutingProvider implements RoutingProvider {
             this.apiKey = apiKey.trim();
         }
     }
+
+    String apiKey() { return apiKey == null || apiKey.trim().isEmpty() ? null : apiKey; }
 
     @Override
     public String name() {
@@ -37,6 +43,22 @@ public class MapIrRoutingProvider implements RoutingProvider {
             throw new IllegalStateException("مسیری از map.ir دریافت نشد.");
         }
         JSONObject route = routes.getJSONObject(0);
-        return new RouteResult(name(), route.optInt("distance"), route.optInt("duration"), route.optString("weight_name"));
+        List<RouteStep> steps = new ArrayList<>();
+        JSONArray legs = route.optJSONArray("legs");
+        if (legs != null && legs.length() > 0) {
+            JSONArray rawSteps = legs.getJSONObject(0).optJSONArray("steps");
+            if (rawSteps != null) for (int i = 0; i < rawSteps.length(); i++) {
+                JSONObject step = rawSteps.optJSONObject(i);
+                JSONObject maneuver = step == null ? null : step.optJSONObject("maneuver");
+                if (maneuver != null) {
+                    JSONArray point = maneuver.optJSONArray("location");
+                    double longitude = point == null ? destinationLng : point.optDouble(0, destinationLng);
+                    double latitude = point == null ? destinationLat : point.optDouble(1, destinationLat);
+                    steps.add(new RouteStep(latitude, longitude, maneuver.optString("instruction"), step.optInt("distance")));
+                }
+            }
+        }
+        if (steps.isEmpty()) steps.add(new RouteStep(destinationLat, destinationLng, "رسیدن به مقصد", 0));
+        return new RouteResult(name(), route.optInt("distance"), route.optInt("duration"), route.optString("weight_name"), steps);
     }
 }

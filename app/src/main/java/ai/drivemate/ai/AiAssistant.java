@@ -29,10 +29,15 @@ public class AiAssistant {
 
     private String onlineAnswer(String question) throws Exception {
         String gapKey = first(keys.get("GAPGPT_API_KEY"), keys.get("AI_API_KEY"), buildTimeKey);
-        if (gapKey != null) return chat("https://api.gapgpt.app/v1/chat/completions", gapKey, "gpt-5-nano", question);
+        Exception gapError = null;
+        if (gapKey != null) {
+            try { return chat("https://api.gapgpt.app/v1/chat/completions", gapKey, "gpt-5-nano", question); }
+            catch (Exception error) { gapError = error; }
+        }
         String liaraKey = keys.get("LIARA_API_KEY");
-        if (liaraKey != null) return chat("https://ai.liara.ir/api/v1/chat/completions", liaraKey, "openai/gpt-4o-mini", question);
-        throw new IllegalStateException("no key");
+        if (liaraKey != null) return chat("https://ai.liara.ir/api/69467b6ba99a2016cac892e1/v1/chat/completions", liaraKey, "openai/gpt-5-nano", question);
+        if (gapError != null) throw gapError;
+        throw new IllegalStateException("no AI key");
     }
 
     private String chat(String endpoint, String apiKey, String model, String question) throws Exception {

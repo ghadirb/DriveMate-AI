@@ -9,9 +9,11 @@ import android.location.LocationManager;
 import android.os.Bundle;
 
 public class DeviceLocationTracker implements LocationListener {
+    public interface UpdateListener { void onLocationUpdate(Location location); }
     private final Context context;
     private final LocationManager locationManager;
     private Location lastLocation;
+    private UpdateListener updateListener;
 
     public DeviceLocationTracker(Context context) {
         this.context = context;
@@ -38,9 +40,16 @@ public class DeviceLocationTracker implements LocationListener {
         return lastLocation;
     }
 
+    public void setUpdateListener(UpdateListener listener) { this.updateListener = listener; }
+
+    public void stop() {
+        locationManager.removeUpdates(this);
+    }
+
     @Override
     public void onLocationChanged(Location location) {
         lastLocation = location;
+        if (updateListener != null) updateListener.onLocationUpdate(location);
     }
 
     @Override

@@ -1,3 +1,4 @@
 NESHAN_API_KEY=your_neshan_key
 MAPIR_API_KEY=your_mapir_key
 AI_API_KEY=optional_ai_key
+KEYS_DECRYPTION_SECRET=replace_when_you_reencrypt_keys

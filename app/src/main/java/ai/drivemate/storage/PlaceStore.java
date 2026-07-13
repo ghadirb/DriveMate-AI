@@ -79,6 +79,14 @@ public class PlaceStore {
         saveList(KEY_RECENT, updated);
     }
 
+    public void delete(SavedPlace place) {
+        List<SavedPlace> updated = new ArrayList<>();
+        for (SavedPlace item : allPlaces()) {
+            if (!item.kind.equals(place.kind)) updated.add(item);
+        }
+        saveList(KEY_PLACES, updated);
+    }
+
     public List<SavedPlace> recentPlaces() {
         return readList(KEY_RECENT);
     }

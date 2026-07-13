@@ -35,6 +35,7 @@ jobs:
           NESHAN_API_KEY: ${{ secrets.NESHAN_API_KEY }}
           MAPIR_API_KEY: ${{ secrets.MAPIR_API_KEY }}
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          KEYS_DECRYPTION_SECRET: ${{ secrets.KEYS_DECRYPTION_SECRET }}
         run: gradle assembleDebug --stacktrace
 
       - name: Upload APK
