@@ -74,7 +74,7 @@ public class RuntimeKeys {
         String trimmed = text.trim();
         if (trimmed.startsWith("{")) {
             JSONObject object = new JSONObject(trimmed);
-            for (String name : new String[]{"GAPGPT_API_KEY", "LIARA_API_KEY", "AI_API_KEY", "NESHAN_API_KEY", "MAPIR_API_KEY"}) {
+            for (String name : new String[]{"GAPGPT_API_KEY", "LIARA_API_KEY", "LIARA_BASE_URL", "AI_API_KEY", "NESHAN_API_KEY", "MAPIR_API_KEY"}) {
                 keys.putIfNotEmpty(name, object.optString(name, null));
             }
             return;
@@ -84,7 +84,22 @@ public class RuntimeKeys {
             if (clean.isEmpty() || clean.startsWith("#")) continue;
             int idx = clean.indexOf('=');
             if (idx <= 0) idx = clean.indexOf(':');
-            if (idx > 0) keys.putIfNotEmpty(clean.substring(0, idx).trim(), clean.substring(idx + 1).trim().replace("\"", ""));
+            if (idx > 0) {
+                String name = clean.substring(0, idx).trim();
+                String value = clean.substring(idx + 1).trim().replace("\"", "");
+                String canonical = canonicalName(name);
+                // Keep the first credential for a provider; some payloads contain several account tokens.
+                if (!keys.has(canonical)) keys.putIfNotEmpty(canonical, value);
+            }
         }
+    }
+
+    private static String canonicalName(String name) {
+        String normalized = name == null ? "" : name.trim().toLowerCase();
+        if (normalized.equals("gapgpt") || normalized.equals("gap_gpt")) return "GAPGPT_API_KEY";
+        if (normalized.equals("liara")) return "LIARA_API_KEY";
+        if (normalized.equals("neshan") || normalized.equals("nshan")) return "NESHAN_API_KEY";
+        if (normalized.equals("mapir") || normalized.equals("map.ir") || normalized.equals("map_ir")) return "MAPIR_API_KEY";
+        return name;
     }
 }

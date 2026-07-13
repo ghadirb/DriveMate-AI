@@ -8,7 +8,6 @@ import android.content.pm.PackageManager;
 import android.location.Location;
 import android.os.Bundle;
 import android.provider.Settings;
-import android.speech.RecognizerIntent;
 import android.widget.TextView;
 import android.widget.EditText;
 import android.widget.Toast;
@@ -36,7 +35,6 @@ import ai.drivemate.voice.VoiceGuidancePlayer;
 
 public class MainActivity extends Activity {
     private static final int REQ_PERMISSIONS = 10;
-    private static final int REQ_SPEECH = 20;
 
     private TextView statusText;
     private TextView listText;
@@ -124,8 +122,8 @@ public class MainActivity extends Activity {
             recordingOnlineSpeech = false;
             setStatus("در حال تبدیل صدا به متن...");
             onlineSpeechClient.stopAndTranscribe(new OnlineSpeechClient.TextCallback() {
-                @Override public void onResult(String text) { runOnUiThread(() -> { if (text == null || text.trim().isEmpty()) startDeviceSpeechInput(); else handleVoiceText(text); }); }
-                @Override public void onError() { runOnUiThread(() -> { setStatus("تبدیل آنلاین صدا انجام نشد؛ تشخیص گفتار گوشی باز شد."); startDeviceSpeechInput(); }); }
+                @Override public void onResult(String text) { runOnUiThread(() -> { if (text == null || text.trim().isEmpty()) setStatus("پاسخ صوتی خالی بود؛ دوباره ضبط کنید."); else handleVoiceText(text); }); }
+                @Override public void onError(String message) { runOnUiThread(() -> setStatus(message + " لطفاً اتصال و کلیدهای آنلاین را بررسی کنید.")); }
             });
             return;
         }
@@ -140,31 +138,7 @@ public class MainActivity extends Activity {
             setStatus("در حال ضبط است؛ پس از پایان، دوباره دکمه مقصد را بزنید.");
             return;
         }
-        startDeviceSpeechInput();
-    }
-
-    private void startDeviceSpeechInput() {
-        voicePlayer.play("listening");
-        Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
-        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "fa-IR");
-        intent.putExtra(RecognizerIntent.EXTRA_PROMPT, "فرمان رانندگی را بگویید");
-        try {
-            startActivityForResult(intent, REQ_SPEECH);
-        } catch (Exception ex) {
-            setStatus("تشخیص گفتار روی این دستگاه فعال نیست.");
-        }
-    }
-
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQ_SPEECH && resultCode == RESULT_OK && data != null) {
-            ArrayList<String> results = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
-            if (results != null && !results.isEmpty()) {
-                handleVoiceText(results.get(0));
-            }
-        }
+        setStatus("سرویس گفتار آنلاین آماده نیست. کلید GapGPT یا لیارا دریافت نشد.");
     }
 
     private void handleVoiceText(String text) {

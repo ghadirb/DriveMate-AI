@@ -35,7 +35,7 @@ public class AiAssistant {
             catch (Exception error) { gapError = error; }
         }
         String liaraKey = keys.get("LIARA_API_KEY");
-        if (liaraKey != null) return chat("https://ai.liara.ir/api/69467b6ba99a2016cac892e1/v1/chat/completions", liaraKey, "openai/gpt-5-nano", question);
+        if (liaraKey != null) return chat(liaraBaseUrl() + "/chat/completions", liaraKey, "openai/gpt-5-nano", question);
         if (gapError != null) throw gapError;
         throw new IllegalStateException("no AI key");
     }
@@ -58,6 +58,12 @@ public class AiAssistant {
     }
 
     private String first(String... values) { for (String v : values) if (v != null && !v.trim().isEmpty()) return v.trim(); return null; }
+
+    private String liaraBaseUrl() {
+        String baseUrl = keys.get("LIARA_BASE_URL");
+        if (baseUrl == null || baseUrl.trim().isEmpty()) baseUrl = "https://ai.liara.ir/api/69467b6ba99a2016cac892e1/v1";
+        return baseUrl.replaceAll("/+$", "");
+    }
 
     private String offlineAnswer(String question) {
         if (question.contains("پمپ بنزین")) return "برای پیدا کردن پمپ بنزین، کنار مسیر اصلی توقف ایمن داشته باشید و جست‌وجوی نقشه را فعال کنید.";

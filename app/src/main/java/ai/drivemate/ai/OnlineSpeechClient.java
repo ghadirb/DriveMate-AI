@@ -7,7 +7,6 @@ import android.media.MediaRecorder;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -20,7 +19,7 @@ import java.util.UUID;
 
 /** GapGPT speech-to-text and text-to-speech client. All network calls run off the UI thread. */
 public class OnlineSpeechClient {
-    public interface TextCallback { void onResult(String text); void onError(); }
+    public interface TextCallback { void onResult(String text); void onError(String message); }
 
     private final Context context;
     private RuntimeKeys keys = new RuntimeKeys();
@@ -35,7 +34,7 @@ public class OnlineSpeechClient {
     }
 
     public void setRuntimeKeys(RuntimeKeys keys) { if (keys != null) this.keys = keys; }
-    public boolean canUseOnlineSpeech() { return key() != null; }
+    public boolean canUseOnlineSpeech() { return gapKey() != null || liaraKey() != null; }
 
     public boolean startRecording() {
         try {
@@ -44,8 +43,8 @@ public class OnlineSpeechClient {
             recorder.setAudioSource(MediaRecorder.AudioSource.MIC);
             recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
             recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
-            recorder.setAudioEncodingBitRate(64000);
-            recorder.setAudioSamplingRate(16000);
+            recorder.setAudioEncodingBitRate(128000);
+            recorder.setAudioSamplingRate(44100);
             recorder.setOutputFile(recording.getAbsolutePath());
             recorder.prepare();
             recorder.start();
@@ -57,18 +56,18 @@ public class OnlineSpeechClient {
     }
 
     public void stopAndTranscribe(TextCallback callback) {
-        if (recorder == null || recording == null) { callback.onError(); return; }
+        if (recorder == null || recording == null) { callback.onError("ضبط صدا شروع نشده است."); return; }
         try { recorder.stop(); } catch (RuntimeException ignored) { }
         releaseRecorder();
         File audio = recording;
         new Thread(() -> {
-            try { callback.onResult(transcribe(audio)); }
-            catch (Exception error) { callback.onError(); }
+            try { callback.onResult(transcribeWithFallback(audio)); }
+            catch (Exception error) { callback.onError("تبدیل گفتار آنلاین با GapGPT و لیارا انجام نشد."); }
         }).start();
     }
 
     public void speak(String text) {
-        String key = key();
+        String key = gapKey();
         if (key == null || text == null || text.trim().isEmpty()) return;
         new Thread(() -> {
             try {
@@ -87,15 +86,30 @@ public class OnlineSpeechClient {
         }).start();
     }
 
-    private String transcribe(File audio) throws Exception {
-        String apiKey = key();
+    private String transcribeWithFallback(File audio) throws Exception {
+        Exception gapError = null;
+        if (gapKey() != null) {
+            try { return transcribeGapGpt(audio, "gapgpt/whisper-1"); }
+            catch (Exception first) {
+                gapError = first;
+                try { return transcribeGapGpt(audio, "whisper-1"); }
+                catch (Exception ignored) { }
+            }
+        }
+        if (liaraKey() != null) return transcribeLiara(audio);
+        if (gapError != null) throw gapError;
+        throw new IllegalStateException("No online speech provider key");
+    }
+
+    private String transcribeGapGpt(File audio, String model) throws Exception {
+        String apiKey = gapKey();
         if (apiKey == null) throw new IllegalStateException("No GapGPT key");
         String boundary = "----DriveMate" + UUID.randomUUID();
         HttpURLConnection connection = open("https://api.gapgpt.app/v1/audio/transcriptions", apiKey);
         connection.setDoOutput(true);
         connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
         try (OutputStream out = connection.getOutputStream()) {
-            writeField(out, boundary, "model", "whisper-1");
+            writeField(out, boundary, "model", model);
             out.write(("--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"voice.m4a\"\r\nContent-Type: audio/mp4\r\n\r\n").getBytes(StandardCharsets.UTF_8));
             try (FileInputStream input = new FileInputStream(audio)) { byte[] buffer = new byte[8192]; int count; while ((count = input.read(buffer)) != -1) out.write(buffer, 0, count); }
             out.write(("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
@@ -104,6 +118,31 @@ public class OnlineSpeechClient {
         StringBuilder response = new StringBuilder(); String line; while ((line = reader.readLine()) != null) response.append(line);
         if (connection.getResponseCode() >= 300) throw new IllegalStateException("STT unavailable");
         return new JSONObject(response.toString()).optString("text");
+    }
+
+    private String transcribeLiara(File audio) throws Exception {
+        byte[] bytes;
+        try (FileInputStream input = new FileInputStream(audio)) {
+            bytes = new byte[(int) audio.length()];
+            int offset = 0, count;
+            while (offset < bytes.length && (count = input.read(bytes, offset, bytes.length - offset)) != -1) offset += count;
+        }
+        String encoded = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP);
+        JSONObject audioInput = new JSONObject().put("type", "input_audio")
+                .put("input_audio", new JSONObject().put("data", encoded).put("format", "mp3"));
+        org.json.JSONArray content = new org.json.JSONArray()
+                .put(new JSONObject().put("type", "text").put("text", "این صدای فارسی را فقط به متن دقیق تبدیل کن."))
+                .put(audioInput);
+        JSONObject body = new JSONObject().put("model", "google/gemini-2.0-flash-001")
+                .put("messages", new org.json.JSONArray().put(new JSONObject().put("role", "user").put("content", content)));
+        HttpURLConnection connection = open(liaraBaseUrl() + "/chat/completions", liaraKey());
+        connection.setDoOutput(true);
+        connection.setRequestProperty("Content-Type", "application/json");
+        try (OutputStream out = connection.getOutputStream()) { out.write(body.toString().getBytes(StandardCharsets.UTF_8)); }
+        BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getResponseCode() < 300 ? connection.getInputStream() : connection.getErrorStream(), StandardCharsets.UTF_8));
+        StringBuilder response = new StringBuilder(); String line; while ((line = reader.readLine()) != null) response.append(line);
+        if (connection.getResponseCode() >= 300) throw new IllegalStateException("Liara STT unavailable");
+        return new JSONObject(response.toString()).getJSONArray("choices").getJSONObject(0).getJSONObject("message").optString("content");
     }
 
     private void writeField(OutputStream out, String boundary, String name, String value) throws Exception {
@@ -118,11 +157,22 @@ public class OnlineSpeechClient {
         return connection;
     }
 
-    private String key() {
+    private String gapKey() {
         String value = keys.get("GAPGPT_API_KEY");
         if (value == null || value.trim().isEmpty()) value = keys.get("AI_API_KEY");
         if (value == null || value.trim().isEmpty()) value = buildKey;
         return value == null || value.trim().isEmpty() ? null : value.trim();
+    }
+
+    private String liaraKey() {
+        String value = keys.get("LIARA_API_KEY");
+        return value == null || value.trim().isEmpty() ? null : value.trim();
+    }
+
+    private String liaraBaseUrl() {
+        String baseUrl = keys.get("LIARA_BASE_URL");
+        if (baseUrl == null || baseUrl.trim().isEmpty()) baseUrl = "https://ai.liara.ir/api/69467b6ba99a2016cac892e1/v1";
+        return baseUrl.replaceAll("/+$", "");
     }
 
     private void play(File file) {
