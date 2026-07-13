@@ -43,11 +43,14 @@ public class RuntimeKeys {
         connection.setConnectTimeout(9000);
         connection.setReadTimeout(12000);
         connection.setRequestProperty("Accept", "text/plain,application/json");
-        BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8));
-        StringBuilder body = new StringBuilder();
-        String line;
-        while ((line = reader.readLine()) != null) body.append(line).append('\n');
-        return body.toString().trim();
+        try {
+            StringBuilder body = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) body.append(line).append('\n');
+            }
+            return body.toString().trim();
+        } finally { connection.disconnect(); }
     }
 
     private static String decodePayload(String payload, String secret) throws Exception {

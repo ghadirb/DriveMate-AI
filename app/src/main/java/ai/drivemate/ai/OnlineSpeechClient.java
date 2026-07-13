@@ -3,6 +3,7 @@ package ai.drivemate.ai;
 import android.content.Context;
 import android.media.MediaPlayer;
 import android.media.MediaRecorder;
+import android.util.Log;
 
 import org.json.JSONObject;
 
@@ -19,6 +20,7 @@ import java.util.UUID;
 
 /** GapGPT speech-to-text and text-to-speech client. All network calls run off the UI thread. */
 public class OnlineSpeechClient {
+    private static final String TAG = "DriveMateVoice";
     public interface TextCallback { void onResult(String text); void onError(String message); }
 
     private final Context context;
@@ -50,6 +52,7 @@ public class OnlineSpeechClient {
             recorder.start();
             return true;
         } catch (Exception error) {
+            Log.e(TAG, "Could not start microphone recording", error);
             releaseRecorder();
             return false;
         }
@@ -62,7 +65,10 @@ public class OnlineSpeechClient {
         File audio = recording;
         new Thread(() -> {
             try { callback.onResult(transcribeWithFallback(audio)); }
-            catch (Exception error) { callback.onError("تبدیل گفتار آنلاین با GapGPT و لیارا انجام نشد."); }
+            catch (Exception error) {
+                Log.e(TAG, "Online speech recognition failed", error);
+                callback.onError("تبدیل گفتار آنلاین انجام نشد: " + safeMessage(error));
+            }
         }).start();
     }
 
@@ -73,15 +79,19 @@ public class OnlineSpeechClient {
             try {
                 JSONObject body = new JSONObject().put("model", "tts-1").put("voice", "alloy").put("input", text);
                 HttpURLConnection connection = open("https://api.gapgpt.app/v1/audio/speech", key);
-                connection.setDoOutput(true);
-                try (OutputStream out = connection.getOutputStream()) { out.write(body.toString().getBytes(StandardCharsets.UTF_8)); }
-                if (connection.getResponseCode() >= 300) return;
-                File output = new File(context.getCacheDir(), "answer.mp3");
-                try (FileOutputStream file = new FileOutputStream(output); java.io.InputStream input = connection.getInputStream()) {
-                    byte[] buffer = new byte[8192]; int count;
-                    while ((count = input.read(buffer)) != -1) file.write(buffer, 0, count);
+                try {
+                    connection.setDoOutput(true);
+                    try (OutputStream out = connection.getOutputStream()) { out.write(body.toString().getBytes(StandardCharsets.UTF_8)); }
+                    if (connection.getResponseCode() >= 300) return;
+                    File output = new File(context.getCacheDir(), "answer.mp3");
+                    try (FileOutputStream file = new FileOutputStream(output); java.io.InputStream input = connection.getInputStream()) {
+                        byte[] buffer = new byte[8192]; int count;
+                        while ((count = input.read(buffer)) != -1) file.write(buffer, 0, count);
+                    }
+                    new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> play(output));
+                } finally {
+                    connection.disconnect();
                 }
-                new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> play(output));
             } catch (Exception ignored) { }
         }).start();
     }
@@ -89,11 +99,9 @@ public class OnlineSpeechClient {
     private String transcribeWithFallback(File audio) throws Exception {
         Exception gapError = null;
         if (gapKey() != null) {
-            try { return transcribeGapGpt(audio, "gapgpt/whisper-1"); }
+            try { return transcribeGapGpt(audio, "whisper-1"); }
             catch (Exception first) {
                 gapError = first;
-                try { return transcribeGapGpt(audio, "whisper-1"); }
-                catch (Exception ignored) { }
             }
         }
         if (liaraKey() != null) return transcribeLiara(audio);
@@ -114,10 +122,14 @@ public class OnlineSpeechClient {
             try (FileInputStream input = new FileInputStream(audio)) { byte[] buffer = new byte[8192]; int count; while ((count = input.read(buffer)) != -1) out.write(buffer, 0, count); }
             out.write(("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
         }
-        BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getResponseCode() < 300 ? connection.getInputStream() : connection.getErrorStream(), StandardCharsets.UTF_8));
-        StringBuilder response = new StringBuilder(); String line; while ((line = reader.readLine()) != null) response.append(line);
-        if (connection.getResponseCode() >= 300) throw new IllegalStateException("STT unavailable");
-        return new JSONObject(response.toString()).optString("text");
+        try {
+            int code = connection.getResponseCode();
+            String response = readResponse(connection, code);
+            if (code >= 300) throw new IllegalStateException("GapGPT HTTP " + code);
+            String text = new JSONObject(response).optString("text").trim();
+            if (text.isEmpty()) throw new IllegalStateException("GapGPT پاسخ خالی داد");
+            return text;
+        } finally { connection.disconnect(); }
     }
 
     private String transcribeLiara(File audio) throws Exception {
@@ -139,10 +151,14 @@ public class OnlineSpeechClient {
         connection.setDoOutput(true);
         connection.setRequestProperty("Content-Type", "application/json");
         try (OutputStream out = connection.getOutputStream()) { out.write(body.toString().getBytes(StandardCharsets.UTF_8)); }
-        BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getResponseCode() < 300 ? connection.getInputStream() : connection.getErrorStream(), StandardCharsets.UTF_8));
-        StringBuilder response = new StringBuilder(); String line; while ((line = reader.readLine()) != null) response.append(line);
-        if (connection.getResponseCode() >= 300) throw new IllegalStateException("Liara STT unavailable");
-        return new JSONObject(response.toString()).getJSONArray("choices").getJSONObject(0).getJSONObject("message").optString("content");
+        try {
+            int code = connection.getResponseCode();
+            String response = readResponse(connection, code);
+            if (code >= 300) throw new IllegalStateException("Liara HTTP " + code);
+            String text = new JSONObject(response).getJSONArray("choices").getJSONObject(0).getJSONObject("message").optString("content").trim();
+            if (text.isEmpty()) throw new IllegalStateException("لیارا پاسخ خالی داد");
+            return text;
+        } finally { connection.disconnect(); }
     }
 
     private void writeField(OutputStream out, String boundary, String name, String value) throws Exception {
@@ -151,7 +167,7 @@ public class OnlineSpeechClient {
 
     private HttpURLConnection open(String endpoint, String apiKey) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(endpoint).openConnection();
-        connection.setConnectTimeout(10000); connection.setReadTimeout(25000); connection.setRequestMethod("POST");
+        connection.setConnectTimeout(10000); connection.setReadTimeout(20000); connection.setRequestMethod("POST");
         connection.setRequestProperty("Authorization", "Bearer " + apiKey);
         connection.setRequestProperty("Accept", "application/json");
         return connection;
@@ -183,4 +199,21 @@ public class OnlineSpeechClient {
     }
 
     private void releaseRecorder() { if (recorder != null) { recorder.release(); recorder = null; } }
+
+    public void cancelRecording() { releaseRecorder(); }
+
+    private String readResponse(HttpURLConnection connection, int code) throws Exception {
+        java.io.InputStream stream = code < 300 ? connection.getInputStream() : connection.getErrorStream();
+        if (stream == null) return "";
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+            StringBuilder response = new StringBuilder(); String line;
+            while ((line = reader.readLine()) != null) response.append(line);
+            return response.toString();
+        }
+    }
+
+    private String safeMessage(Exception error) {
+        String message = error.getMessage();
+        return message == null || message.trim().isEmpty() ? "خطای ارتباط با سرویس" : message;
+    }
 }

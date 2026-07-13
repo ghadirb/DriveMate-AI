@@ -10,6 +10,7 @@ import android.os.Bundle;
 import android.provider.Settings;
 import android.widget.TextView;
 import android.widget.EditText;
+import android.widget.Button;
 import android.widget.Toast;
 
 import java.util.ArrayList;
@@ -38,6 +39,7 @@ public class MainActivity extends Activity {
 
     private TextView statusText;
     private TextView listText;
+    private Button voiceButton;
     private PlaceStore placeStore;
     private VoiceGuidancePlayer voicePlayer;
     private DeviceLocationTracker locationTracker;
@@ -55,6 +57,8 @@ public class MainActivity extends Activity {
     private boolean recordingOnlineSpeech;
     private boolean runtimeKeysLoading = true;
     private boolean voiceRequestedWhileKeysLoad;
+    private final android.os.Handler voiceHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable automaticStop = this::finishOnlineRecording;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -63,6 +67,7 @@ public class MainActivity extends Activity {
 
         statusText = findViewById(R.id.statusText);
         listText = findViewById(R.id.listText);
+        voiceButton = findViewById(R.id.voiceButton);
         placeStore = new PlaceStore(this);
         voicePlayer = new VoiceGuidancePlayer(this);
         locationTracker = new DeviceLocationTracker(this);
@@ -85,7 +90,7 @@ public class MainActivity extends Activity {
     }
 
     private void wireButtons() {
-        findViewById(R.id.voiceButton).setOnClickListener(v -> toggleVoiceInput());
+        voiceButton.setOnClickListener(v -> toggleVoiceInput());
         findViewById(R.id.saveButton).setOnClickListener(v -> promptSaveCurrentPlace());
         findViewById(R.id.homeButton).setOnClickListener(v -> openHomeOrWork("home", "خانه"));
         findViewById(R.id.workButton).setOnClickListener(v -> openHomeOrWork("work", "محل کار"));
@@ -119,12 +124,7 @@ public class MainActivity extends Activity {
 
     private void toggleVoiceInput() {
         if (recordingOnlineSpeech) {
-            recordingOnlineSpeech = false;
-            setStatus("در حال تبدیل صدا به متن...");
-            onlineSpeechClient.stopAndTranscribe(new OnlineSpeechClient.TextCallback() {
-                @Override public void onResult(String text) { runOnUiThread(() -> { if (text == null || text.trim().isEmpty()) setStatus("پاسخ صوتی خالی بود؛ دوباره ضبط کنید."); else handleVoiceText(text); }); }
-                @Override public void onError(String message) { runOnUiThread(() -> setStatus(message + " لطفاً اتصال و کلیدهای آنلاین را بررسی کنید.")); }
-            });
+            finishOnlineRecording();
             return;
         }
         if (runtimeKeysLoading && !onlineSpeechClient.canUseOnlineSpeech()) {
@@ -135,10 +135,37 @@ public class MainActivity extends Activity {
         if (onlineSpeechClient.canUseOnlineSpeech() && onlineSpeechClient.startRecording()) {
             recordingOnlineSpeech = true;
             voicePlayer.play("listening");
-            setStatus("در حال ضبط است؛ پس از پایان، دوباره دکمه مقصد را بزنید.");
+            voiceButton.setText("در حال ضبط... برای پایان لمس کنید");
+            setStatus("در حال ضبط با کیفیت بالا است. پس از ۱۰ ثانیه خودکار ارسال می‌شود.");
+            voiceHandler.postDelayed(automaticStop, 10000L);
             return;
         }
         setStatus("سرویس گفتار آنلاین آماده نیست. کلید GapGPT یا لیارا دریافت نشد.");
+    }
+
+    private void finishOnlineRecording() {
+        if (!recordingOnlineSpeech) return;
+        recordingOnlineSpeech = false;
+        voiceHandler.removeCallbacks(automaticStop);
+        voiceButton.setEnabled(false);
+        voiceButton.setText("در حال ارسال به GapGPT...");
+        setStatus("صدا به GapGPT ارسال شد؛ در صورت خطا لیارا استفاده می‌شود.");
+        onlineSpeechClient.stopAndTranscribe(new OnlineSpeechClient.TextCallback() {
+            @Override public void onResult(String text) { runOnUiThread(() -> {
+                restoreVoiceButton();
+                if (text == null || text.trim().isEmpty()) setStatus("پاسخ صوتی خالی بود؛ دوباره ضبط کنید.");
+                else handleVoiceText(text);
+            }); }
+            @Override public void onError(String message) { runOnUiThread(() -> {
+                restoreVoiceButton();
+                setStatus(message + " لطفاً اتصال و کلیدهای آنلاین را بررسی کنید.");
+            }); }
+        });
+    }
+
+    private void restoreVoiceButton() {
+        voiceButton.setEnabled(true);
+        voiceButton.setText("مقصد را بگویید");
     }
 
     private void handleVoiceText(String text) {
@@ -233,6 +260,10 @@ public class MainActivity extends Activity {
     }
 
     private void startNavigation(SavedPlace destination) {
+        if (!routeRepository.hasConfiguredProvider()) {
+            setStatus("کلید مسیریابی نشان یا map.ir در این APK موجود نیست. GitHub Secrets را بررسی کنید.");
+            return;
+        }
         Location origin = locationTracker.getLastLocation();
         if (origin == null) {
             setStatus("برای شروع مسیر، GPS باید آماده باشد.");
@@ -453,6 +484,8 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        voiceHandler.removeCallbacks(automaticStop);
+        onlineSpeechClient.cancelRecording();
         navigationEngine.stop();
         locationTracker.stop();
         super.onDestroy();

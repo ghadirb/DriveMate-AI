@@ -23,6 +23,7 @@ public class NeshanRoutingProvider implements RoutingProvider {
     }
 
     String apiKey() { return apiKey == null || apiKey.trim().isEmpty() ? null : apiKey; }
+    public boolean isConfigured() { return apiKey() != null; }
 
     @Override
     public String name() {

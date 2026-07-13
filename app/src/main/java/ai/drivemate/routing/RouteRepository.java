@@ -22,6 +22,11 @@ public class RouteRepository {
         this.fallback = fallback;
     }
 
+    public boolean hasConfiguredProvider() {
+        return (!(primary instanceof NeshanRoutingProvider) || ((NeshanRoutingProvider) primary).isConfigured())
+                || (!(fallback instanceof MapIrRoutingProvider) || ((MapIrRoutingProvider) fallback).isConfigured());
+    }
+
     public void getRoute(double originLat, double originLng, double destinationLat, double destinationLng,
                          SuccessCallback successCallback, ErrorCallback errorCallback) {
         new Thread(() -> {
@@ -31,7 +36,9 @@ public class RouteRepository {
                 try {
                     successCallback.onSuccess(fallback.route(originLat, originLng, destinationLat, destinationLng));
                 } catch (Exception fallbackError) {
-                    new Handler(Looper.getMainLooper()).post(() -> errorCallback.onError(fallbackError.getMessage()));
+                    String primaryMessage = primaryError.getMessage() == null ? "نامشخص" : primaryError.getMessage();
+                    String fallbackMessage = fallbackError.getMessage() == null ? "نامشخص" : fallbackError.getMessage();
+                    new Handler(Looper.getMainLooper()).post(() -> errorCallback.onError("نشان: " + primaryMessage + " | map.ir: " + fallbackMessage));
                 }
             }
         }).start();
