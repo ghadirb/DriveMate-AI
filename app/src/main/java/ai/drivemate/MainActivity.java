@@ -48,6 +48,7 @@ public class MainActivity extends Activity {
     private TextView statusText;
     private TextView listText;
     private Button voiceButton;
+    private Button notificationButton;
     private PlaceStore placeStore;
     private TripStore tripStore;
     private VoiceGuidancePlayer voicePlayer;
@@ -80,6 +81,7 @@ public class MainActivity extends Activity {
         statusText = findViewById(R.id.statusText);
         listText = findViewById(R.id.listText);
         voiceButton = findViewById(R.id.voiceButton);
+        notificationButton = findViewById(R.id.notificationButton);
         placeStore = new PlaceStore(this);
         tripStore = new TripStore(this);
         voicePlayer = new VoiceGuidancePlayer(this);
@@ -101,6 +103,7 @@ public class MainActivity extends Activity {
         locationTracker.setUpdateListener(location -> navigationEngine.onLocation(location));
         handleSharedIntent(getIntent());
         registerNavigationReceiver();
+        refreshNotificationButton();
         if (ACTION_VOICE_FROM_NOTIFICATION.equals(getIntent().getAction())) voiceHandler.postDelayed(this::toggleVoiceInput, 350L);
     }
 
@@ -113,6 +116,7 @@ public class MainActivity extends Activity {
         findViewById(R.id.recentButton).setOnClickListener(v -> showRecent());
         findViewById(R.id.settingsButton).setOnClickListener(v -> cycleVolume());
         findViewById(R.id.stopButton).setOnClickListener(v -> stopNavigation("مسیریابی متوقف شد."));
+        notificationButton.setOnClickListener(v -> toggleBackgroundNavigation());
     }
 
     private void requestCorePermissions() {
@@ -468,11 +472,7 @@ public class MainActivity extends Activity {
             else if (which == 1) { voicePlayer.decreaseVolume(); voicePlayer.play("voice_lower"); setStatus("صدای راهنما کمتر شد."); }
             else if (which == 2) stopNavigation("مسیریابی متوقف شد.");
             else {
-                boolean enabled = !backgroundNavigationEnabled();
-                getSharedPreferences(PREFS_SETTINGS, MODE_PRIVATE).edit().putBoolean("background_navigation", enabled).apply();
-                if (enabled && navigationEngine.isNavigating()) startBackgroundNavigation();
-                else if (!enabled) stopBackgroundNavigation();
-                setStatus(enabled ? "ادامه مسیریابی در پس‌زمینه فعال شد." : "ادامه مسیریابی در پس‌زمینه غیرفعال شد.");
+                toggleBackgroundNavigation();
             }
         }).show();
     }
@@ -543,6 +543,19 @@ public class MainActivity extends Activity {
 
     private boolean backgroundNavigationEnabled() {
         return getSharedPreferences(PREFS_SETTINGS, MODE_PRIVATE).getBoolean("background_navigation", true);
+    }
+
+    private void toggleBackgroundNavigation() {
+        boolean enabled = !backgroundNavigationEnabled();
+        getSharedPreferences(PREFS_SETTINGS, MODE_PRIVATE).edit().putBoolean("background_navigation", enabled).apply();
+        if (enabled && navigationEngine.isNavigating()) startBackgroundNavigation();
+        else if (!enabled) stopBackgroundNavigation();
+        refreshNotificationButton();
+        setStatus(enabled ? "اعلان و ادامه مسیریابی در پس‌زمینه فعال شد." : "اعلان و ادامه مسیریابی در پس‌زمینه غیرفعال شد.");
+    }
+
+    private void refreshNotificationButton() {
+        if (notificationButton != null) notificationButton.setText(backgroundNavigationEnabled() ? "اعلان مسیریابی: روشن" : "اعلان مسیریابی: خاموش");
     }
 
     private void startBackgroundNavigation() {

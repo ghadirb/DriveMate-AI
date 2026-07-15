@@ -55,6 +55,7 @@
             <Button android:id="@+id/saveButton" style="@style/HomeActionButton" android:text="ذخیره مکان جدید" />
             <Button android:id="@+id/settingsButton" style="@style/HomeActionButton" android:text="تنظیمات صدا" />
             <Button android:id="@+id/stopButton" style="@style/HomeActionButton" android:text="توقف مسیریابی" />
+            <Button android:id="@+id/notificationButton" style="@style/HomeActionButton" android:text="اعلان مسیریابی" />
         </GridLayout>
 
         <TextView
