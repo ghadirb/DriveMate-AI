@@ -4,8 +4,12 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.location.Location;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.widget.TextView;
@@ -24,23 +28,28 @@ import ai.drivemate.location.DeviceLocationTracker;
 import ai.drivemate.location.SharedLocationParser;
 import ai.drivemate.model.RouteStep;
 import ai.drivemate.model.SavedPlace;
+import ai.drivemate.model.TripRecord;
 import ai.drivemate.routing.MapIrRoutingProvider;
 import ai.drivemate.routing.NeshanRoutingProvider;
 import ai.drivemate.routing.NavigationEngine;
 import ai.drivemate.routing.PlaceSearchRepository;
 import ai.drivemate.routing.RouteRepository;
 import ai.drivemate.storage.PlaceStore;
+import ai.drivemate.storage.TripStore;
 import ai.drivemate.voice.Command;
 import ai.drivemate.voice.VoiceCommandParser;
 import ai.drivemate.voice.VoiceGuidancePlayer;
 
 public class MainActivity extends Activity {
     private static final int REQ_PERMISSIONS = 10;
+    private static final String PREFS_SETTINGS = "drivemate_settings";
+    public static final String ACTION_VOICE_FROM_NOTIFICATION = "ai.drivemate.action.VOICE_FROM_NOTIFICATION";
 
     private TextView statusText;
     private TextView listText;
     private Button voiceButton;
     private PlaceStore placeStore;
+    private TripStore tripStore;
     private VoiceGuidancePlayer voicePlayer;
     private DeviceLocationTracker locationTracker;
     private NeshanRoutingProvider neshanRoutingProvider;
@@ -59,6 +68,9 @@ public class MainActivity extends Activity {
     private boolean voiceRequestedWhileKeysLoad;
     private final android.os.Handler voiceHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private final Runnable automaticStop = this::finishOnlineRecording;
+    private final BroadcastReceiver navigationStopReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) { stopNavigation("مسیریابی از اعلان متوقف شد."); }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -69,6 +81,7 @@ public class MainActivity extends Activity {
         listText = findViewById(R.id.listText);
         voiceButton = findViewById(R.id.voiceButton);
         placeStore = new PlaceStore(this);
+        tripStore = new TripStore(this);
         voicePlayer = new VoiceGuidancePlayer(this);
         locationTracker = new DeviceLocationTracker(this);
         neshanRoutingProvider = new NeshanRoutingProvider(BuildConfig.NESHAN_API_KEY);
@@ -87,6 +100,8 @@ public class MainActivity extends Activity {
         promptEnableLocationIfNeeded();
         locationTracker.setUpdateListener(location -> navigationEngine.onLocation(location));
         handleSharedIntent(getIntent());
+        registerNavigationReceiver();
+        if (ACTION_VOICE_FROM_NOTIFICATION.equals(getIntent().getAction())) voiceHandler.postDelayed(this::toggleVoiceInput, 350L);
     }
 
     private void wireButtons() {
@@ -97,6 +112,7 @@ public class MainActivity extends Activity {
         findViewById(R.id.favoritesButton).setOnClickListener(v -> showPlaces(true));
         findViewById(R.id.recentButton).setOnClickListener(v -> showRecent());
         findViewById(R.id.settingsButton).setOnClickListener(v -> cycleVolume());
+        findViewById(R.id.stopButton).setOnClickListener(v -> stopNavigation("مسیریابی متوقف شد."));
     }
 
     private void requestCorePermissions() {
@@ -106,6 +122,9 @@ public class MainActivity extends Activity {
         }
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             permissions.add(Manifest.permission.RECORD_AUDIO);
+        }
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            permissions.add(Manifest.permission.POST_NOTIFICATIONS);
         }
         if (!permissions.isEmpty()) {
             requestPermissions(permissions.toArray(new String[0]), REQ_PERMISSIONS);
@@ -186,7 +205,9 @@ public class MainActivity extends Activity {
                 navigateToKnownPlace("work");
                 break;
             case NAVIGATE_NAMED_PLACE:
-                searchAndNavigate(text.replaceFirst("^(برو|به|مسیریابی)\\s+", "").trim());
+                SavedPlace requestedPlace = placeStore.findByNameInText(text);
+                if (requestedPlace != null) startNavigation(requestedPlace);
+                else searchAndNavigate(cleanDestinationText(text));
                 break;
             case FIND_FUEL:
                 searchAndNavigate("پمپ بنزین");
@@ -211,9 +232,10 @@ public class MainActivity extends Activity {
                 SavedPlace namedPlace = placeStore.findByNameInText(text);
                 if (namedPlace != null) {
                     startNavigation(namedPlace);
-                } else {
-                    voicePlayer.play("command_unknown");
+                } else if (commandParser.isExplicitQuestion(text)) {
                     askAi(text);
+                } else {
+                    searchAndNavigate(cleanDestinationText(text));
                 }
         }
     }
@@ -272,10 +294,15 @@ public class MainActivity extends Activity {
         }
         setStatus("در حال دریافت مسیر به " + destination.name + "...");
         voicePlayer.play("searching_route");
-        routeRepository.getRoute(origin.getLatitude(), origin.getLongitude(), destination.latitude, destination.longitude,
+        final double originLatitude = origin.getLatitude();
+        final double originLongitude = origin.getLongitude();
+        routeRepository.getRoute(originLatitude, originLongitude, destination.latitude, destination.longitude,
                 route -> runOnUiThread(() -> {
                     placeStore.addRecent(destination);
+                    tripStore.add(new TripRecord(destination.name, originLatitude, originLongitude, destination.latitude, destination.longitude,
+                            route.distanceMeters, route.durationSeconds, System.currentTimeMillis()));
                     activeDestination = destination;
+                    startBackgroundNavigation();
                     navigationEngine.start(route, new NavigationEngine.Listener() {
                         @Override public void onInstruction(RouteStep step) {
                             runOnUiThread(() -> announceRouteStep(step));
@@ -284,7 +311,12 @@ public class MainActivity extends Activity {
                             runOnUiThread(() -> rerouteFromCurrentLocation());
                         }
                         @Override public void onArrived() {
-                            runOnUiThread(() -> { voicePlayer.play("arrived"); setStatus("به " + activeDestination.name + " رسیدید."); activeDestination = null; });
+                            runOnUiThread(() -> {
+                                voicePlayer.play("arrived");
+                                setStatus("به " + activeDestination.name + " رسیدید.");
+                                activeDestination = null;
+                                stopBackgroundNavigation();
+                            });
                         }
                     });
                     lastInstruction = "start_navigation";
@@ -317,10 +349,11 @@ public class MainActivity extends Activity {
     private void searchAndNavigate(String term) {
         Location location = locationTracker.getLastLocation();
         if (location == null) { setStatus("برای پیدا کردن مقصد، GPS باید آماده باشد."); return; }
+        if (term.isEmpty()) { speakShort("نام مقصد را دوباره بگویید."); return; }
         setStatus("در حال پیدا کردن " + term + "...");
         placeSearchRepository.search(term, location.getLatitude(), location.getLongitude(),
                 place -> runOnUiThread(() -> startNavigation(place)),
-                error -> runOnUiThread(() -> { setStatus(error); askAi("نزدیک‌ترین " + term + " کجاست؟"); }));
+                error -> runOnUiThread(() -> { setStatus(error); speakShort("مقصد پیدا نشد. نام آن را دوباره بگویید."); }));
     }
 
     private void loadRuntimeKeys() {
@@ -349,6 +382,7 @@ public class MainActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         handleSharedIntent(intent);
+        if (ACTION_VOICE_FROM_NOTIFICATION.equals(intent.getAction())) voiceHandler.postDelayed(this::toggleVoiceInput, 350L);
     }
 
     private void handleSharedIntent(Intent intent) {
@@ -393,19 +427,53 @@ public class MainActivity extends Activity {
     }
 
     private void askAi(String question) {
-        setStatus("در حال آماده کردن پاسخ هوشمند...");
-        aiAssistant.answer(question, answer -> runOnUiThread(() -> {
-            setStatus(answer);
-            onlineSpeechClient.speak(answer);
+        setStatus("در حال آماده کردن پاسخ صوتی...");
+        aiAssistant.answer(question, drivingContext(), answer -> runOnUiThread(() -> {
+            speakShort(answer);
         }));
     }
 
+    private void speakShort(String answer) {
+        String shortAnswer = answer == null ? "" : answer.trim();
+        if (shortAnswer.length() > 190) shortAnswer = shortAnswer.substring(0, 190);
+        setStatus("پاسخ صوتی پخش شد.");
+        onlineSpeechClient.speak(shortAnswer);
+    }
+
+    private String cleanDestinationText(String text) {
+        return text == null ? "" : text.replaceFirst("^(برو|به|مسیریابی)\\s+", "").trim();
+    }
+
+    private String drivingContext() {
+        StringBuilder context = new StringBuilder();
+        if (activeDestination != null) context.append("مقصد فعلی: ").append(activeDestination.name).append(". ");
+        ArrayList<SavedPlace> places = new ArrayList<>(placeStore.allPlaces());
+        if (!places.isEmpty()) {
+            context.append("مکان‌های ذخیره‌شده: ");
+            for (int i = 0; i < places.size() && i < 6; i++) context.append(places.get(i).name).append(i == Math.min(places.size(), 6) - 1 ? ". " : "، ");
+        }
+        java.util.List<TripRecord> trips = tripStore.recent(5);
+        if (!trips.isEmpty()) {
+            context.append("مقصدهای سفر اخیر: ");
+            for (int i = 0; i < trips.size(); i++) context.append(trips.get(i).destinationName).append(i == trips.size() - 1 ? "." : "، ");
+        }
+        return context.toString();
+    }
+
     private void cycleVolume() {
-        final String[] choices = {"افزایش صدا", "کاهش صدا", "توقف مسیریابی"};
+        final String background = backgroundNavigationEnabled() ? "غیرفعال کردن ادامه در پس‌زمینه" : "فعال کردن ادامه در پس‌زمینه";
+        final String[] choices = {"افزایش صدا", "کاهش صدا", "توقف مسیریابی", background};
         new AlertDialog.Builder(this).setTitle("تنظیمات راهنما").setItems(choices, (d, which) -> {
             if (which == 0) { voicePlayer.increaseVolume(); voicePlayer.play("voice_louder"); setStatus("صدای راهنما بیشتر شد."); }
             else if (which == 1) { voicePlayer.decreaseVolume(); voicePlayer.play("voice_lower"); setStatus("صدای راهنما کمتر شد."); }
-            else { navigationEngine.stop(); activeDestination = null; voicePlayer.play("stop_navigation"); setStatus("مسیریابی متوقف شد."); }
+            else if (which == 2) stopNavigation("مسیریابی متوقف شد.");
+            else {
+                boolean enabled = !backgroundNavigationEnabled();
+                getSharedPreferences(PREFS_SETTINGS, MODE_PRIVATE).edit().putBoolean("background_navigation", enabled).apply();
+                if (enabled && navigationEngine.isNavigating()) startBackgroundNavigation();
+                else if (!enabled) stopBackgroundNavigation();
+                setStatus(enabled ? "ادامه مسیریابی در پس‌زمینه فعال شد." : "ادامه مسیریابی در پس‌زمینه غیرفعال شد.");
+            }
         }).show();
     }
 
@@ -469,7 +537,36 @@ public class MainActivity extends Activity {
         if (activeDestination == null || locationTracker.getLastLocation() == null) return;
         voicePlayer.play("route_recalculated");
         setStatus("از مسیر خارج شدید؛ در حال محاسبه مسیر جدید...");
+        askAi("کاربر از مسیر خارج شده است. یک هشدار خیلی کوتاه و آرام برای ادامه مسیر بگو.");
         startNavigation(activeDestination);
+    }
+
+    private boolean backgroundNavigationEnabled() {
+        return getSharedPreferences(PREFS_SETTINGS, MODE_PRIVATE).getBoolean("background_navigation", true);
+    }
+
+    private void startBackgroundNavigation() {
+        if (!backgroundNavigationEnabled()) return;
+        Intent intent = new Intent(this, NavigationForegroundService.class);
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent); else startService(intent);
+    }
+
+    private void stopBackgroundNavigation() {
+        stopService(new Intent(this, NavigationForegroundService.class));
+    }
+
+    private void stopNavigation(String message) {
+        navigationEngine.stop();
+        activeDestination = null;
+        stopBackgroundNavigation();
+        voicePlayer.play("stop_navigation");
+        setStatus(message);
+    }
+
+    private void registerNavigationReceiver() {
+        IntentFilter filter = new IntentFilter(NavigationForegroundService.ACTION_STOP_BROADCAST);
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(navigationStopReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        else registerReceiver(navigationStopReceiver, filter);
     }
 
     private void announceRouteStep(RouteStep step) {
@@ -486,7 +583,9 @@ public class MainActivity extends Activity {
     @Override protected void onDestroy() {
         voiceHandler.removeCallbacks(automaticStop);
         onlineSpeechClient.cancelRecording();
+        unregisterReceiver(navigationStopReceiver);
         navigationEngine.stop();
+        stopBackgroundNavigation();
         locationTracker.stop();
         super.onDestroy();
     }

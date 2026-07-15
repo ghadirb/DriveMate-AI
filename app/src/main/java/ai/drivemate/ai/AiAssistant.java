@@ -20,41 +20,51 @@ public class AiAssistant {
     public void setRuntimeKeys(RuntimeKeys keys) { if (keys != null) this.keys = keys; }
 
     public void answer(String question, AnswerCallback callback) {
+        answer(question, "", callback);
+    }
+
+    public void answer(String question, String drivingContext, AnswerCallback callback) {
         new Thread(() -> {
             String normalized = question == null ? "" : question;
-            try { callback.onAnswer(onlineAnswer(normalized)); }
+            try { callback.onAnswer(onlineAnswer(normalized, drivingContext)); }
             catch (Exception ex) { callback.onAnswer(offlineAnswer(normalized)); }
         }).start();
     }
 
-    private String onlineAnswer(String question) throws Exception {
+    private String onlineAnswer(String question, String drivingContext) throws Exception {
         String gapKey = first(keys.get("GAPGPT_API_KEY"), keys.get("AI_API_KEY"), buildTimeKey);
         Exception gapError = null;
         if (gapKey != null) {
-            try { return chat("https://api.gapgpt.app/v1/chat/completions", gapKey, "gpt-5-nano", question); }
+            try { return chat("https://api.gapgpt.app/v1/chat/completions", gapKey, "gpt-5-nano", question, drivingContext); }
             catch (Exception error) { gapError = error; }
         }
         String liaraKey = keys.get("LIARA_API_KEY");
-        if (liaraKey != null) return chat(liaraBaseUrl() + "/chat/completions", liaraKey, "openai/gpt-5-nano", question);
+        if (liaraKey != null) return chat(liaraBaseUrl() + "/chat/completions", liaraKey, "openai/gpt-5-nano", question, drivingContext);
         if (gapError != null) throw gapError;
         throw new IllegalStateException("no AI key");
     }
 
-    private String chat(String endpoint, String apiKey, String model, String question) throws Exception {
+    private String chat(String endpoint, String apiKey, String model, String question, String drivingContext) throws Exception {
         JSONObject body = new JSONObject();
         body.put("model", model);
         JSONArray messages = new JSONArray();
-        messages.put(new JSONObject().put("role", "system").put("content", "تو دستیار رانندگی فارسی DriveMate هستی. پاسخ کوتاه، ایمن و کاربردی بده."));
+        messages.put(new JSONObject().put("role", "system").put("content", "تو دستیار رانندگی فارسی DriveMate هستی. پاسخ را فقط فارسی، حداکثر دو جمله و کمتر از ۳۵ کلمه بده. متن برای پخش صوتی است؛ مقدمه، فهرست و توضیح طولانی نده. برای امور ایمنی راننده را به توقف امن تشویق کن. بدون دادهٔ زنده، دربارهٔ ترافیک یا مکان‌های نزدیک ادعای قطعی نکن. زمینه سفر: " + (drivingContext == null ? "" : drivingContext)));
         messages.put(new JSONObject().put("role", "user").put("content", question));
         body.put("messages", messages);
+        body.put("max_tokens", 100);
         HttpURLConnection c = (HttpURLConnection) new URL(endpoint).openConnection();
         c.setConnectTimeout(10000); c.setReadTimeout(20000); c.setRequestMethod("POST"); c.setDoOutput(true);
         c.setRequestProperty("Authorization", "Bearer " + apiKey); c.setRequestProperty("Content-Type", "application/json");
         try (OutputStream os = c.getOutputStream()) { os.write(body.toString().getBytes(StandardCharsets.UTF_8)); }
-        BufferedReader r = new BufferedReader(new InputStreamReader(c.getResponseCode() < 300 ? c.getInputStream() : c.getErrorStream(), StandardCharsets.UTF_8));
-        StringBuilder sb = new StringBuilder(); String line; while ((line = r.readLine()) != null) sb.append(line);
-        if (c.getResponseCode() >= 300) throw new IllegalStateException(sb.toString());
-        return new JSONObject(sb.toString()).getJSONArray("choices").getJSONObject(0).getJSONObject("message").optString("content", "پاسخی دریافت نشد.");
+        try {
+            int code = c.getResponseCode();
+            StringBuilder sb = new StringBuilder();
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(code < 300 ? c.getInputStream() : c.getErrorStream(), StandardCharsets.UTF_8))) {
+                String line; while ((line = r.readLine()) != null) sb.append(line);
+            }
+            if (code >= 300) throw new IllegalStateException("HTTP " + code);
+            return new JSONObject(sb.toString()).getJSONArray("choices").getJSONObject(0).getJSONObject("message").optString("content", "پاسخی دریافت نشد.");
+        } finally { c.disconnect(); }
     }
 
     private String first(String... values) { for (String v : values) if (v != null && !v.trim().isEmpty()) return v.trim(); return null; }
@@ -66,9 +76,9 @@ public class AiAssistant {
     }
 
     private String offlineAnswer(String question) {
-        if (question.contains("پمپ بنزین")) return "برای پیدا کردن پمپ بنزین، کنار مسیر اصلی توقف ایمن داشته باشید و جست‌وجوی نقشه را فعال کنید.";
-        if (question.contains("خلوت")) return "برای مسیر خلوت‌تر باید مسیر جایگزین با ترافیک زنده بررسی شود. فعلاً مسیر ذخیره‌شده حفظ می‌شود.";
-        if (question.contains("چرا")) return "معمولاً به‌خاطر خروج از مسیر، ترافیک یا خطای GPS مسیر دوباره محاسبه می‌شود.";
-        return "فعلاً پاسخ آفلاین فعال است؛ پس از دریافت کلید آنلاین، مدل GapGPT با اولویت اول استفاده می‌شود.";
+        if (question.contains("پمپ بنزین")) return "نزدیک‌ترین پمپ بنزین در حال جست‌وجو است.";
+        if (question.contains("خلوت") || question.contains("ترافیک")) return "دادهٔ ترافیک زنده در دسترس نیست.";
+        if (question.contains("چرا")) return "احتمالاً به‌دلیل خروج از مسیر یا تغییر GPS است.";
+        return "پاسخ آنلاین در دسترس نیست.";
     }
 }

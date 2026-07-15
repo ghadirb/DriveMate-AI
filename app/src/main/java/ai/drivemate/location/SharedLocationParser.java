@@ -7,6 +7,8 @@ import android.location.Geocoder;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLDecoder;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Locale;
@@ -25,7 +27,7 @@ public final class SharedLocationParser {
     public static void resolve(Context context, String sharedText, Callback callback) {
         new Thread(() -> {
             try {
-                String resolved = resolveRedirect(sharedText);
+                String resolved = resolveRedirectAndPage(sharedText);
                 Matcher matcher = COORDINATES.matcher(URLDecoder.decode(resolved, StandardCharsets.UTF_8.name()));
                 if (matcher.find()) {
                     double latitude = Double.parseDouble(matcher.group(1));
@@ -58,17 +60,28 @@ public final class SharedLocationParser {
         }).start();
     }
 
-    private static String resolveRedirect(String text) throws Exception {
+    private static String resolveRedirectAndPage(String text) throws Exception {
         int start = text.indexOf("http");
         if (start < 0) return text;
         String link = text.substring(start).split("\\s+")[0];
         HttpURLConnection connection = (HttpURLConnection) new URL(link).openConnection();
         connection.setInstanceFollowRedirects(true);
         connection.setConnectTimeout(8000);
-        connection.setReadTimeout(10000);
+        connection.setReadTimeout(12000);
         connection.setRequestMethod("GET");
-        connection.getResponseCode();
-        return connection.getURL().toString();
+        connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Android) DriveMate/1.0");
+        try {
+            int code = connection.getResponseCode();
+            StringBuilder page = new StringBuilder(connection.getURL().toString());
+            if (code >= 200 && code < 400) {
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
+                    char[] buffer = new char[4096];
+                    int count;
+                    while (page.length() < 300000 && (count = reader.read(buffer)) != -1) page.append(buffer, 0, count);
+                }
+            }
+            return page.toString();
+        } finally { connection.disconnect(); }
     }
 
     private static String label(String text) {

@@ -12,10 +12,16 @@ public class VoiceCommandParser {
         if (containsAny(text, "بلندتر", "صدا را زیاد", "صدایت را زیاد")) return new Command(CommandType.VOLUME_UP, rawText);
         if (containsAny(text, "کمتر", "صدا را کم", "صدایت را کم")) return new Command(CommandType.VOLUME_DOWN, rawText);
         if (containsAny(text, "تکرار", "دوباره بگو", "مسیر بعدی")) return new Command(CommandType.REPEAT, rawText);
-        if (containsAny(text, "چرا", "خلوت", "داروخانه", "پارکینگ", "استراحت")) {
+        if (isExplicitQuestion(text)) {
             return new Command(CommandType.ASK_AI, rawText);
         }
         return new Command(CommandType.UNKNOWN, rawText);
+    }
+
+    public boolean isExplicitQuestion(String rawText) {
+        String text = normalize(rawText);
+        return text.contains("؟") || text.endsWith("?") || containsAny(text,
+                "چرا", "چطور", "چگونه", "کجا", "چند", "ترافیک", "خلوت", "شلوغ", "وضعیت", "آب و هوا", "استراحت", "پیشنهاد");
     }
 
     private String normalize(String text) {
