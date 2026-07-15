@@ -20,23 +20,21 @@ import ai.drivemate.model.SavedPlace;
 /** Extracts coordinates from Google Maps/Neshan shared links, including shortened redirects. */
 public final class SharedLocationParser {
     public interface Callback { void onResolved(SavedPlace place); void onFailure(); }
-    private static final Pattern COORDINATES = Pattern.compile("(-?\\d{1,2}\\.\\d{4,})[, ]+(-?\\d{1,3}\\.\\d{4,})");
+    private static final Pattern COORDINATES = Pattern.compile("(-?\\d{1,2}\\.\\d+)[, ]+(-?\\d{1,3}\\.\\d+)");
+    private static final Pattern GOOGLE_DATA_COORDINATES = Pattern.compile("!3d(-?\\d{1,2}\\.\\d+)!4d(-?\\d{1,3}\\.\\d+)");
+    private static final Pattern META_TITLE = Pattern.compile("(?is)<meta[^>]+(?:property|name)=[\"'](?:og:title|title)[\"'][^>]+content=[\"']([^\"']+)");
+    private static final Pattern HTML_TITLE = Pattern.compile("(?is)<title[^>]*>(.*?)</title>");
+    private static final Pattern MAPS_PATH_NAME = Pattern.compile("/maps/(?:place|search)/([^/?#]+)", Pattern.CASE_INSENSITIVE);
 
     private SharedLocationParser() { }
 
     public static void resolve(Context context, String sharedText, Callback callback) {
         new Thread(() -> {
             try {
-                String resolved = resolveRedirectAndPage(sharedText);
-                Matcher matcher = COORDINATES.matcher(URLDecoder.decode(resolved, StandardCharsets.UTF_8.name()));
-                if (matcher.find()) {
-                    double latitude = Double.parseDouble(matcher.group(1));
-                    double longitude = Double.parseDouble(matcher.group(2));
-                    if (Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180) {
-                        callback.onResolved(place(label(sharedText), latitude, longitude, AddressResolver.resolve(context, latitude, longitude)));
-                        return;
-                    }
-                }
+                String resolved = decode(resolveRedirectAndPage(sharedText));
+                String candidateName = candidateName(sharedText, resolved);
+                SavedPlace coordinatePlace = findCoordinates(context, resolved, candidateName);
+                if (coordinatePlace != null) { callback.onResolved(coordinatePlace); return; }
                 Pattern latPattern = Pattern.compile("(?:[?&]|\\b)lat(?:itude)?=([-?\\d.]+)", Pattern.CASE_INSENSITIVE);
                 Pattern lngPattern = Pattern.compile("(?:[?&]|\\b)(?:lng|lon|longitude)=([-?\\d.]+)", Pattern.CASE_INSENSITIVE);
                 Matcher latMatch = latPattern.matcher(resolved);
@@ -45,19 +43,38 @@ public final class SharedLocationParser {
                     double latitude = Double.parseDouble(latMatch.group(1));
                     double longitude = Double.parseDouble(lngMatch.group(1));
                     if (Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180) {
-                        callback.onResolved(place(label(sharedText), latitude, longitude, AddressResolver.resolve(context, latitude, longitude)));
+                        callback.onResolved(place(candidateName, latitude, longitude, AddressResolver.resolve(context, latitude, longitude)));
                         return;
                     }
                 }
-                List<Address> matches = new Geocoder(context, new Locale("fa", "IR")).getFromLocationName(label(sharedText), 1);
-                if (matches != null && !matches.isEmpty()) {
+                List<Address> matches = new Geocoder(context, new Locale("fa", "IR")).getFromLocationName(candidateName, 1);
+                if (!isGenericName(candidateName) && matches != null && !matches.isEmpty()) {
                     Address address = matches.get(0);
-                    callback.onResolved(place(label(sharedText), address.getLatitude(), address.getLongitude(), address.getAddressLine(0)));
+                    callback.onResolved(place(candidateName, address.getLatitude(), address.getLongitude(), address.getAddressLine(0)));
                     return;
                 }
             } catch (Exception ignored) { }
             callback.onFailure();
         }).start();
+    }
+
+    private static SavedPlace findCoordinates(Context context, String source, String name) {
+        Matcher googleData = GOOGLE_DATA_COORDINATES.matcher(source);
+        if (googleData.find()) return placeIfValid(context, name, googleData.group(1), googleData.group(2));
+        Matcher generic = COORDINATES.matcher(source);
+        if (generic.find()) return placeIfValid(context, name, generic.group(1), generic.group(2));
+        return null;
+    }
+
+    private static SavedPlace placeIfValid(Context context, String name, String lat, String lng) {
+        try {
+            double latitude = Double.parseDouble(lat);
+            double longitude = Double.parseDouble(lng);
+            if (Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180) {
+                return place(name, latitude, longitude, AddressResolver.resolve(context, latitude, longitude));
+            }
+        } catch (NumberFormatException ignored) { }
+        return null;
     }
 
     private static String resolveRedirectAndPage(String text) throws Exception {
@@ -82,6 +99,40 @@ public final class SharedLocationParser {
             }
             return page.toString();
         } finally { connection.disconnect(); }
+    }
+
+    private static String candidateName(String originalText, String resolved) {
+        String visible = label(originalText);
+        if (!isGenericName(visible)) return visible;
+        Matcher meta = META_TITLE.matcher(resolved);
+        if (meta.find()) {
+            String title = stripHtml(meta.group(1));
+            if (!isGenericName(title) && !title.toLowerCase(Locale.ROOT).contains("google maps")) return title;
+        }
+        Matcher title = HTML_TITLE.matcher(resolved);
+        if (title.find()) {
+            String pageTitle = stripHtml(title.group(1));
+            if (!isGenericName(pageTitle) && !pageTitle.toLowerCase(Locale.ROOT).contains("google maps")) return pageTitle;
+        }
+        Matcher path = MAPS_PATH_NAME.matcher(resolved);
+        if (path.find()) {
+            String pathName = decode(path.group(1)).replace('+', ' ').trim();
+            if (!isGenericName(pathName)) return pathName;
+        }
+        return visible;
+    }
+
+    private static String decode(String value) {
+        try { return URLDecoder.decode(value, StandardCharsets.UTF_8.name()).replace("\\u0026", "&").replace("\\u003d", "="); }
+        catch (Exception ignored) { return value; }
+    }
+
+    private static String stripHtml(String value) {
+        return value.replaceAll("<[^>]+>", "").replace("&amp;", "&").trim();
+    }
+
+    private static boolean isGenericName(String value) {
+        return value == null || value.trim().isEmpty() || value.equals("مکان اشتراک‌گذاری‌شده") || value.equalsIgnoreCase("Google Maps");
     }
 
     private static String label(String text) {
