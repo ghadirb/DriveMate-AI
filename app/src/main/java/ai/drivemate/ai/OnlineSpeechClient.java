@@ -22,6 +22,7 @@ import java.util.UUID;
 public class OnlineSpeechClient {
     private static final String TAG = "DriveMateVoice";
     public interface TextCallback { void onResult(String text); void onError(String message); }
+    public interface SpeechCallback { void onPlayed(); void onError(); }
 
     private final Context context;
     private RuntimeKeys keys = new RuntimeKeys();
@@ -73,8 +74,16 @@ public class OnlineSpeechClient {
     }
 
     public void speak(String text) {
+        speak(text, null);
+    }
+
+    /** Uses GapGPT TTS first and reports failure so callers can use a local accessibility fallback. */
+    public void speak(String text, SpeechCallback callback) {
         String key = gapKey();
-        if (key == null || text == null || text.trim().isEmpty()) return;
+        if (key == null || text == null || text.trim().isEmpty()) {
+            if (callback != null) callback.onError();
+            return;
+        }
         new Thread(() -> {
             try {
                 JSONObject body = new JSONObject().put("model", "tts-1").put("voice", "alloy").put("input", text);
@@ -82,17 +91,21 @@ public class OnlineSpeechClient {
                 try {
                     connection.setDoOutput(true);
                     try (OutputStream out = connection.getOutputStream()) { out.write(body.toString().getBytes(StandardCharsets.UTF_8)); }
-                    if (connection.getResponseCode() >= 300) return;
+                    if (connection.getResponseCode() >= 300) { notifySpeechError(callback); return; }
                     File output = new File(context.getCacheDir(), "answer.mp3");
                     try (FileOutputStream file = new FileOutputStream(output); java.io.InputStream input = connection.getInputStream()) {
                         byte[] buffer = new byte[8192]; int count;
                         while ((count = input.read(buffer)) != -1) file.write(buffer, 0, count);
                     }
-                    new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> play(output));
+                    new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                        if (play(output)) {
+                            if (callback != null) callback.onPlayed();
+                        } else if (callback != null) callback.onError();
+                    });
                 } finally {
                     connection.disconnect();
                 }
-            } catch (Exception ignored) { }
+            } catch (Exception ignored) { notifySpeechError(callback); }
         }).start();
     }
 
@@ -191,11 +204,11 @@ public class OnlineSpeechClient {
         return baseUrl.replaceAll("/+$", "");
     }
 
-    private void play(File file) {
+    private boolean play(File file) {
         if (player != null) { player.release(); player = null; }
         player = new MediaPlayer();
-        try { player.setDataSource(file.getAbsolutePath()); player.prepare(); player.start(); }
-        catch (Exception ignored) { player.release(); player = null; }
+        try { player.setDataSource(file.getAbsolutePath()); player.prepare(); player.start(); return true; }
+        catch (Exception ignored) { player.release(); player = null; return false; }
     }
 
     private void releaseRecorder() { if (recorder != null) { recorder.release(); recorder = null; } }
@@ -215,5 +228,10 @@ public class OnlineSpeechClient {
     private String safeMessage(Exception error) {
         String message = error.getMessage();
         return message == null || message.trim().isEmpty() ? "خطای ارتباط با سرویس" : message;
+    }
+
+    private void notifySpeechError(SpeechCallback callback) {
+        if (callback == null) return;
+        new android.os.Handler(android.os.Looper.getMainLooper()).post(callback::onError);
     }
 }

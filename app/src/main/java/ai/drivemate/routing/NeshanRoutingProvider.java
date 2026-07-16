@@ -45,7 +45,12 @@ public class NeshanRoutingProvider implements RoutingProvider {
         }
         JSONObject leg = routes.getJSONObject(0).getJSONArray("legs").getJSONObject(0);
         int distance = leg.optJSONObject("distance") != null ? leg.getJSONObject("distance").optInt("value") : 0;
-        int duration = leg.optJSONObject("duration") != null ? leg.getJSONObject("duration").optInt("value") : 0;
+        // Neshan traffic-enabled direction responses may include a separate ETA. Prefer it
+        // when present, while remaining compatible with non-traffic response schemas.
+        JSONObject trafficDuration = leg.optJSONObject("duration_in_traffic");
+        if (trafficDuration == null) trafficDuration = leg.optJSONObject("durationInTraffic");
+        int duration = trafficDuration != null ? trafficDuration.optInt("value")
+                : (leg.optJSONObject("duration") != null ? leg.getJSONObject("duration").optInt("value") : 0);
         List<RouteStep> steps = new ArrayList<>();
         JSONArray rawSteps = leg.optJSONArray("steps");
         if (rawSteps != null) for (int i = 0; i < rawSteps.length(); i++) {

@@ -91,6 +91,12 @@ public class PlaceStore {
         return readList(KEY_RECENT);
     }
 
+    /** Replaces both saved places and the short recent-destination list from a validated backup. */
+    public void restore(List<SavedPlace> places, List<SavedPlace> recent) {
+        saveList(KEY_PLACES, places == null ? new ArrayList<>() : places);
+        saveList(KEY_RECENT, recent == null ? new ArrayList<>() : recent);
+    }
+
     private List<SavedPlace> readList(String key) {
         ArrayList<SavedPlace> result = new ArrayList<>();
         String raw = preferences.getString(key, "[]");

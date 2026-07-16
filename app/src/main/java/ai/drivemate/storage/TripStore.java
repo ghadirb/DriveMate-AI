@@ -38,4 +38,16 @@ public class TripStore {
         } catch (Exception ignored) { }
         return result;
     }
+
+    /** Replaces history from a validated backup and keeps the same on-device retention limit. */
+    public void restore(List<TripRecord> records) {
+        JSONArray values = new JSONArray();
+        if (records != null) {
+            for (int i = 0; i < records.size() && i < 60; i++) {
+                try { values.put(records.get(i).toJson()); }
+                catch (org.json.JSONException ignored) { }
+            }
+        }
+        preferences.edit().putString(KEY_HISTORY, values.toString()).apply();
+    }
 }

@@ -7,6 +7,7 @@ public enum CommandType {
     NAVIGATE_WORK,
     NAVIGATE_NAMED_PLACE,
     FIND_FUEL,
+    FIND_REST,
     VOLUME_UP,
     VOLUME_DOWN,
     REPEAT,

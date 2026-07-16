@@ -41,21 +41,53 @@
             android:textColor="@color/white"
             android:textSize="20sp" />
 
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="مقصدها"
+            android:textColor="@color/drivemate_muted"
+            android:textSize="13sp" />
+
+        <HorizontalScrollView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:scrollbars="none"
+            android:overScrollMode="never">
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <Button android:id="@+id/homeButton" style="@style/NavTabButton" android:text="خانه" />
+                <Button android:id="@+id/workButton" style="@style/NavTabButton" android:text="محل کار" />
+                <Button android:id="@+id/favoritesButton" style="@style/NavTabButton" android:text="مقصدهای محبوب" />
+                <Button android:id="@+id/recentButton" style="@style/NavTabButton" android:layout_marginEnd="0dp" android:text="مقصدهای اخیر" />
+            </LinearLayout>
+        </HorizontalScrollView>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:text="امکانات دیگر"
+            android:textColor="@color/drivemate_muted"
+            android:textSize="13sp" />
+
         <GridLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="6dp"
             android:columnCount="2"
             android:useDefaultMargins="true">
 
-            <Button android:id="@+id/homeButton" style="@style/HomeActionButton" android:text="خانه" />
-            <Button android:id="@+id/workButton" style="@style/HomeActionButton" android:text="محل کار" />
-            <Button android:id="@+id/favoritesButton" style="@style/HomeActionButton" android:text="مقصدهای محبوب" />
-            <Button android:id="@+id/recentButton" style="@style/HomeActionButton" android:text="مقصدهای اخیر" />
             <Button android:id="@+id/saveButton" style="@style/HomeActionButton" android:text="ذخیره مکان جدید" />
             <Button android:id="@+id/settingsButton" style="@style/HomeActionButton" android:text="تنظیمات صدا" />
             <Button android:id="@+id/stopButton" style="@style/HomeActionButton" android:text="توقف مسیریابی" />
             <Button android:id="@+id/notificationButton" style="@style/HomeActionButton" android:text="اعلان مسیریابی" />
+            <Button android:id="@+id/backupButton" style="@style/HomeActionButton" android:layout_columnSpan="2" android:text="پشتیبان‌گیری و بازیابی" />
         </GridLayout>
 
         <TextView
