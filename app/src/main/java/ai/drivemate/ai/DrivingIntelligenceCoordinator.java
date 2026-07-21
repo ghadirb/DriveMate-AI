@@ -19,7 +19,7 @@ public class DrivingIntelligenceCoordinator {
     public interface Listener { void onText(String requestId, String text, boolean online); }
 
     private enum State { PENDING, RUNNING, FALLBACK, CANCELLED, READY }
-    private static final long FULL_MODE_WAIT_MS = 1200L;
+    private static final long FULL_MODE_WAIT_MS = 1500L;
 
     private final AiAssistant assistant;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();

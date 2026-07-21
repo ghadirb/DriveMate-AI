@@ -82,6 +82,7 @@ public class MainActivity extends Activity {
     private final NavigationEngine navigationEngine = new NavigationEngine();
     private RuntimeKeys runtimeKeys = new RuntimeKeys();
     private String lastInstruction = "start_navigation";
+    private String lastInstructionText = "";
     private SavedPlace activeDestination;
     private int lastTrafficEtaSeconds;
     private long lastTrafficEtaMeasuredAt;
@@ -400,7 +401,13 @@ public class MainActivity extends Activity {
                 setStatus("صدای راهنما کمتر شد.");
                 break;
             case REPEAT:
-                voicePlayer.play(lastInstruction);
+                if (isFullIntelligenceMode() && !lastInstructionText.isEmpty()) {
+                    speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
+                            "راهنمای قبلی مسیر را با یک جمله فارسی کوتاه و طبیعی تکرار کن: " + lastInstructionText,
+                            lastInstruction, lastInstructionText, 10_000L);
+                } else {
+                    voicePlayer.play(lastInstruction);
+                }
                 break;
             case ASK_AI:
                 askAi(text);
@@ -473,7 +480,9 @@ public class MainActivity extends Activity {
             return;
         }
         setStatus("در حال دریافت مسیر به " + destination.name + "...");
-        voicePlayer.announce("searching_route", "در حال یافتن مسیر هستم.");
+        if (!isFullIntelligenceMode()) {
+            voicePlayer.announce("searching_route", "در حال یافتن مسیر هستم.");
+        }
         final double originLatitude = origin.getLatitude();
         final double originLongitude = origin.getLongitude();
         routeRepository.getRoute(originLatitude, originLongitude, destination.latitude, destination.longitude,
@@ -496,7 +505,9 @@ public class MainActivity extends Activity {
                         }
                         @Override public void onArrived() {
                             runOnUiThread(() -> {
-                                voicePlayer.play("destination_arrived");
+                                speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
+                                        "راننده به مقصد " + destination.name + " رسیده است. یک پیام فارسی کوتاه و طبیعی برای پایان سفر بگو.",
+                                        "destination_arrived", "به مقصد رسیدید.", 12_000L);
                                 setStatus("به " + activeDestination.name + " رسیدید.");
                                 activeDestination = null;
                                 smartCompanion.stop();
@@ -506,11 +517,12 @@ public class MainActivity extends Activity {
                         }
                     });
                     lastInstruction = "start_navigation";
-                    voicePlayer.play("start_navigation");
+                    lastInstructionText = "مسیر به " + destination.name + " آماده است.";
                     setStatus("مسیر آماده است. سرویس: " + route.providerName + "، فاصله تقریبی: " + route.distanceMeters + " متر");
-                    voiceHandler.postDelayed(() -> requestIntelligence(DrivingIntelligenceCoordinator.Priority.DRIVING,
-                            "مسیر به " + destination.name + " شروع شده است. یک همراهی ایمنی بسیار کوتاه برای شروع سفر بگو.",
-                            "مسیر آماده است؛ با احتیاط حرکت کنید.", false, 15_000L), 1800L);
+                    speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
+                            "مسیر به " + destination.name + " آماده است. فاصله تقریبی " + route.distanceMeters
+                                    + " متر و زمان تقریبی " + route.durationSeconds + " ثانیه است. یک پیام شروع سفر طبیعی، کوتاه و ایمن بگو.",
+                            "start_navigation", "مسیر آماده است؛ با احتیاط حرکت کنید.", 15_000L);
                     scheduleTrafficCheck();
                     refreshList();
                 }),
@@ -629,9 +641,29 @@ public class MainActivity extends Activity {
                 (id, text, online) -> runOnUiThread(() -> {
                     onlineSpeechClient.stopPlayback();
                     voicePlayer.interrupt();
-                    if (online) speakShort(text);
-                    else voicePlayer.speak(text);
+                    if (online) {
+                        speakShort(text);
+                    } else {
+                        voicePlayer.speak(text);
+                        setStatus("پاسخ آفلاین پخش شد.");
+                    }
                 }));
+    }
+
+    private boolean isFullIntelligenceMode() {
+        return readIntelligenceMode() == DrivingIntelligenceCoordinator.Mode.FULL;
+    }
+
+    /** Uses the local clip immediately in economy mode; full mode gives online AI/TTS first refusal. */
+    private void speakDrivingEvent(DrivingIntelligenceCoordinator.Priority priority, String prompt, String clipName,
+                                   String fallback, long expiresInMs) {
+        if (isFullIntelligenceMode()) {
+            requestIntelligence(priority, prompt, fallback, false, expiresInMs);
+        } else if (clipName != null) {
+            voicePlayer.announce(clipName, fallback);
+        } else {
+            voicePlayer.speak(fallback);
+        }
     }
 
     private void playPreparedOrRequest(String key, DrivingIntelligenceCoordinator.Priority priority, String prompt,
@@ -702,9 +734,11 @@ public class MainActivity extends Activity {
 
     private void rerouteForTraffic() {
         if (activeDestination == null) return;
-        voicePlayer.announce("alternative_route", "ترافیک پایدار تشخیص داده شد; در حال بررسی مسیر جایگزین هستم.");
         setStatus("ترافیک پایدار؛ در حال بررسی مسیر جایگزین...");
         startNavigation(activeDestination);
+        speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
+                "حرکت مسیر برای مدتی کند بوده است و مسیر جایگزین در حال بررسی است. یک پیام کوتاه و طبیعی بگو.",
+                "alternative_route", "در حال بررسی مسیر جایگزین هستم.", 15_000L);
     }
 
     private void findNearbyForCompanion(String term, String facts) {
@@ -722,13 +756,16 @@ public class MainActivity extends Activity {
     private void speakShort(String answer) {
         String shortAnswer = answer == null ? "" : answer.trim();
         if (shortAnswer.length() > 190) shortAnswer = shortAnswer.substring(0, 190);
-        setStatus("پاسخ صوتی پخش شد.");
+        setStatus("در حال دریافت صدای آنلاین...");
         final String finalAnswer = shortAnswer;
         voicePlayer.interrupt();
         onlineSpeechClient.stopPlayback();
         onlineSpeechClient.speak(finalAnswer, new OnlineSpeechClient.SpeechCallback() {
-            @Override public void onPlayed() { }
-            @Override public void onError() { voicePlayer.speak(finalAnswer); }
+            @Override public void onPlayed() { runOnUiThread(() -> setStatus("پاسخ هوشمند با TTS آنلاین پخش شد.")); }
+            @Override public void onError() { runOnUiThread(() -> {
+                voicePlayer.speak(finalAnswer);
+                setStatus("متن مدل با صدای محلی پخش شد.");
+            }); }
         });
     }
 
@@ -893,7 +930,9 @@ public class MainActivity extends Activity {
             @Override public void onInstruction(RouteStep step) { runOnUiThread(() -> announceRouteStep(step)); }
             @Override public void onOffRoute() { runOnUiThread(() -> rerouteFromCurrentLocation()); }
             @Override public void onArrived() { runOnUiThread(() -> {
-                voicePlayer.play("destination_arrived");
+                speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
+                        "راننده به مقصد " + destination.name + " رسیده است. یک پیام فارسی کوتاه و طبیعی برای پایان سفر بگو.",
+                        "destination_arrived", "به مقصد رسیدید.", 12_000L);
                 setStatus("به " + destination.name + " رسیدید.");
                 activeDestination = null;
                 smartCompanion.stop();
@@ -901,11 +940,10 @@ public class MainActivity extends Activity {
                 stopBackgroundNavigation();
             }); }
         });
-        voicePlayer.announce("alternative_route", "مسیر سریع‌تری با توجه به ترافیک پیدا شد.");
         setStatus("مسیر با ترافیک به‌روزرسانی شد؛ حدود " + Math.max(1, gainSeconds / 60) + " دقیقه سریع‌تر است.");
-        requestIntelligence(DrivingIntelligenceCoordinator.Priority.DRIVING,
+        speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
                 "مسیر ترافیک‌محور به " + destination.name + " حدود " + Math.max(1, gainSeconds / 60) + " دقیقه زمان بهتری دارد. یک هشدار صوتی بسیار کوتاه و آرام بگو.",
-                "مسیر سریع‌تری پیدا شد.", false, 20_000L);
+                "alternative_route", "مسیر سریع‌تری پیدا شد.", 20_000L);
         scheduleTrafficCheck();
     }
 
@@ -916,12 +954,11 @@ public class MainActivity extends Activity {
 
     private void rerouteFromCurrentLocation() {
         if (activeDestination == null || locationTracker.getLastLocation() == null) return;
-        voicePlayer.announce("route_recalculated", "از مسیر خارج شدید؛ در حال محاسبه مسیر جدید هستم.");
         setStatus("از مسیر خارج شدید؛ در حال محاسبه مسیر جدید...");
         startNavigation(activeDestination);
-        requestIntelligence(DrivingIntelligenceCoordinator.Priority.SAFETY,
+        speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
                 "کاربر از مسیر خارج شده است. یک هشدار خیلی کوتاه و آرام برای ادامه مسیر بگو.",
-                "از مسیر خارج شدید؛ در حال محاسبه مسیر جدید هستم.", false, 15_000L);
+                "route_recalculated", "از مسیر خارج شدید؛ در حال محاسبه مسیر جدید هستم.", 15_000L);
     }
 
     private boolean backgroundNavigationEnabled() {
@@ -959,7 +996,9 @@ public class MainActivity extends Activity {
         voiceHandler.removeCallbacks(trafficCheck);
         activeDestination = null;
         stopBackgroundNavigation();
-        voicePlayer.announce("stop_navigation", message);
+        speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
+                "مسیریابی متوقف شده است. یک پیام فارسی کوتاه و طبیعی برای راننده بگو.",
+                "stop_navigation", message, 12_000L);
         setStatus(message);
     }
 
@@ -974,13 +1013,17 @@ public class MainActivity extends Activity {
         String text = step.instruction == null || step.instruction.trim().isEmpty() ? "ادامه مسیر" : step.instruction;
         String lower = text.toLowerCase(Locale.ROOT);
         if (lower.contains("camera") || text.contains("دوربین")) {
-            voicePlayer.announce("speed_camera", "دوربین سرعت در مسیر است.");
+            speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
+                    "داده مسیر درباره دوربین سرعت هشدار داده است. یک هشدار فارسی بسیار کوتاه، طبیعی و آرام بگو.",
+                    "speed_camera", "دوربین سرعت در مسیر است.", 10_000L);
             smartCompanion.routeHazard("دوربین سرعت");
             setStatus(text);
             return;
         }
         if (lower.contains("speed bump") || text.contains("دست انداز") || text.contains("سرعت گیر")) {
-            voicePlayer.announce("speed_bump_warning", "دست انداز در مسیر است.");
+            speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
+                    "داده مسیر درباره دست‌انداز هشدار داده است. یک هشدار فارسی بسیار کوتاه، طبیعی و آرام بگو.",
+                    "speed_bump_warning", "دست انداز در مسیر است.", 10_000L);
             smartCompanion.routeHazard("دست انداز");
             setStatus(text);
             return;
@@ -989,7 +1032,10 @@ public class MainActivity extends Activity {
         else if (lower.contains("right") || text.contains("راست")) lastInstruction = "turn_right";
         else if (lower.contains("arriv") || text.contains("مقصد")) lastInstruction = "destination_arrived";
         else lastInstruction = "continue_route";
-        voicePlayer.play(lastInstruction);
+        lastInstructionText = text;
+        speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
+                "دستور مسیریابی فعلی این است: " + text + ". آن را در یک جمله فارسی کوتاه، طبیعی و مناسب رانندگی بیان کن.",
+                lastInstruction, text, 10_000L);
         setStatus(text);
     }
 
