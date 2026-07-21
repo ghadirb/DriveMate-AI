@@ -24,11 +24,14 @@ public class AiAssistant {
     }
 
     public void answer(String question, String drivingContext, AnswerCallback callback) {
-        new Thread(() -> {
-            String normalized = question == null ? "" : question;
-            try { callback.onAnswer(onlineAnswer(normalized, drivingContext)); }
-            catch (Exception ex) { callback.onAnswer(offlineAnswer(normalized)); }
-        }).start();
+        new Thread(() -> callback.onAnswer(answerNow(question, drivingContext))).start();
+    }
+
+    /** Performs one complete provider attempt. Call from a worker thread, never the UI thread. */
+    public String answerNow(String question, String drivingContext) {
+        String normalized = question == null ? "" : question;
+        try { return onlineAnswer(normalized, drivingContext); }
+        catch (Exception ignored) { return offlineAnswer(normalized); }
     }
 
     private String onlineAnswer(String question, String drivingContext) throws Exception {

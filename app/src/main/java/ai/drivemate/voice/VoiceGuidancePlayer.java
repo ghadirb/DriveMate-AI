@@ -129,6 +129,12 @@ public class VoiceGuidancePlayer {
         }
     }
 
+    /** Stops any local clip or local TTS before a higher-priority announcement starts. */
+    public void interrupt() {
+        stopCurrent();
+        if (textToSpeech != null) textToSpeech.stop();
+    }
+
     /** Call from Activity#onDestroy to release the TTS engine. */
     public void shutdown() {
         stopCurrent();

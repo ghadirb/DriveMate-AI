@@ -205,10 +205,19 @@ public class OnlineSpeechClient {
     }
 
     private boolean play(File file) {
-        if (player != null) { player.release(); player = null; }
+        stopPlayback();
         player = new MediaPlayer();
         try { player.setDataSource(file.getAbsolutePath()); player.prepare(); player.start(); return true; }
         catch (Exception ignored) { player.release(); player = null; return false; }
+    }
+
+    /** Must be called before a more important local alert so online speech cannot overlap it. */
+    public void stopPlayback() {
+        if (player != null) {
+            try { player.stop(); } catch (IllegalStateException ignored) { }
+            player.release();
+            player = null;
+        }
     }
 
     private void releaseRecorder() { if (recorder != null) { recorder.release(); recorder = null; } }

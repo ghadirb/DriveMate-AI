@@ -68,6 +68,9 @@ public class SmartDriveCompanion {
         if (now - startedAt >= 90 * 60_000L && allow("fuel_check", now, 60 * 60_000L)) {
             listener.onSmartEvent("fuel_check", "حدود نود دقیقه از شروع سفر گذشته است. سطح سوخت خودرو در دسترس برنامه نیست.");
         }
+        if (now - continuousDrivingSince >= 105 * 60_000L && allow("rest_prepare", now, 90 * 60_000L)) {
+            listener.onSmartEvent("rest_prepare", "زمان یادآوری استراحت نزدیک است.");
+        }
         if (now - continuousDrivingSince >= 2 * 60 * 60_000L && allow("rest", now, 90 * 60_000L)) {
             listener.onSmartEvent("rest", "حدود دو ساعت رانندگی پیوسته بدون توقف ده دقیقه‌ای ثبت شده است.");
         }
