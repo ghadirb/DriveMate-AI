@@ -63,6 +63,7 @@ public class MainActivity extends Activity {
     private TextView listText;
     private Button voiceButton;
     private Button notificationButton;
+    private Button intelligenceButton;
     private PlaceStore placeStore;
     private TripStore tripStore;
     private BackupManager backupManager;
@@ -104,6 +105,7 @@ public class MainActivity extends Activity {
         listText = findViewById(R.id.listText);
         voiceButton = findViewById(R.id.voiceButton);
         notificationButton = findViewById(R.id.notificationButton);
+        intelligenceButton = findViewById(R.id.intelligenceButton);
         placeStore = new PlaceStore(this);
         tripStore = new TripStore(this);
         backupManager = new BackupManager(this, placeStore, tripStore);
@@ -135,6 +137,7 @@ public class MainActivity extends Activity {
         handleSharedIntent(getIntent());
         registerNavigationReceiver();
         refreshNotificationButton();
+        refreshIntelligenceButton();
         if (ACTION_VOICE_FROM_NOTIFICATION.equals(getIntent().getAction())) voiceHandler.postDelayed(this::toggleVoiceInput, 350L);
     }
 
@@ -146,6 +149,7 @@ public class MainActivity extends Activity {
         findViewById(R.id.favoritesButton).setOnClickListener(v -> showPlaces(true));
         findViewById(R.id.recentButton).setOnClickListener(v -> showRecent());
         findViewById(R.id.settingsButton).setOnClickListener(v -> showSettingsMenu());
+        intelligenceButton.setOnClickListener(v -> showIntelligenceModeDialog());
         findViewById(R.id.stopButton).setOnClickListener(v -> stopNavigation("مسیریابی متوقف شد."));
         notificationButton.setOnClickListener(v -> toggleBackgroundNavigation());
         findViewById(R.id.backupButton).setOnClickListener(v -> showBackupDialog());
@@ -775,10 +779,17 @@ public class MainActivity extends Activity {
                     intelligenceCoordinator.setMode(selected);
                     intelligenceCoordinator.cancelAll();
                     writeAutomaticBackup();
+                    refreshIntelligenceButton();
                     setStatus(selected == DrivingIntelligenceCoordinator.Mode.FULL
                             ? "حالت هوشمند کامل فعال شد." : "حالت هوشمند اقتصادی فعال شد.");
                     dialog.dismiss();
                 }).setNegativeButton("انصراف", null).show();
+    }
+
+    private void refreshIntelligenceButton() {
+        if (intelligenceButton == null) return;
+        intelligenceButton.setText(readIntelligenceMode() == DrivingIntelligenceCoordinator.Mode.FULL
+                ? "هوشمندی رانندگی: کامل" : "هوشمندی رانندگی: اقتصادی");
     }
 
     private void cycleVolume() {

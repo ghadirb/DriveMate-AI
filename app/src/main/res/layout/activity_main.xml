@@ -68,6 +68,13 @@
             </LinearLayout>
         </HorizontalScrollView>
 
+        <Button
+            android:id="@+id/settingsButton"
+            style="@style/HomeActionButton"
+            android:layout_width="match_parent"
+            android:layout_marginTop="14dp"
+            android:text="تنظیمات برنامه" />
+
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -84,9 +91,9 @@
             android:useDefaultMargins="true">
 
             <Button android:id="@+id/saveButton" style="@style/HomeActionButton" android:text="ذخیره مکان جدید" />
-            <Button android:id="@+id/settingsButton" style="@style/HomeActionButton" android:text="تنظیمات صدا" />
             <Button android:id="@+id/stopButton" style="@style/HomeActionButton" android:text="توقف مسیریابی" />
             <Button android:id="@+id/notificationButton" style="@style/HomeActionButton" android:text="اعلان مسیریابی" />
+            <Button android:id="@+id/intelligenceButton" style="@style/HomeActionButton" android:layout_columnSpan="2" android:text="هوشمندی رانندگی" />
             <Button android:id="@+id/backupButton" style="@style/HomeActionButton" android:layout_columnSpan="2" android:text="پشتیبان‌گیری و بازیابی" />
         </GridLayout>
 
