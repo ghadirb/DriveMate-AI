@@ -664,7 +664,7 @@ public class MainActivity extends Activity {
                         onlineSpeechClient.stopPlayback();
                         voicePlayer.interrupt();
                         if (online) {
-                            speakShort(text);
+                            speakShort(text, clipName, fallback);
                         } else if (clipName != null) {
                             // Use the packaged prompt because device TTS can be unavailable or lack Persian.
                             voicePlayer.announce(clipName, fallback);
@@ -769,6 +769,11 @@ public class MainActivity extends Activity {
     }
 
     private void speakShort(String answer) {
+        speakShort(answer, null, null);
+    }
+
+    /** Plays a generated response, with a known navigation clip as the reliable final fallback. */
+    private void speakShort(String answer, String fallbackClip, String fallbackText) {
         String shortAnswer = answer == null ? "" : answer.trim();
         if (shortAnswer.length() > 190) shortAnswer = shortAnswer.substring(0, 190);
         setStatus("در حال دریافت صدای آنلاین...");
@@ -778,6 +783,11 @@ public class MainActivity extends Activity {
         onlineSpeechClient.speak(finalAnswer, new OnlineSpeechClient.SpeechCallback() {
             @Override public void onPlayed() { runOnUiThread(() -> setStatus("پاسخ هوشمند با TTS آنلاین پخش شد.")); }
             @Override public void onError() { runOnUiThread(() -> {
+                if (fallbackClip != null) {
+                    voicePlayer.announce(fallbackClip, fallbackText);
+                    setStatus("\u0635\u062f\u0627\u06cc \u0622\u0646\u0644\u0627\u06cc\u0646 \u062f\u0631 \u062f\u0633\u062a\u0631\u0633 \u0646\u06cc\u0633\u062a\u061b \u0647\u0634\u062f\u0627\u0631 WAV \u067e\u062e\u0634 \u0634\u062f.");
+                    return;
+                }
                 voicePlayer.speak(finalAnswer);
                 setStatus("متن مدل با صدای محلی پخش شد.");
             }); }
