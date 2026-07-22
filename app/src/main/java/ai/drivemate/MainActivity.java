@@ -658,7 +658,22 @@ public class MainActivity extends Activity {
     private void speakDrivingEvent(DrivingIntelligenceCoordinator.Priority priority, String prompt, String clipName,
                                    String fallback, long expiresInMs) {
         if (isFullIntelligenceMode()) {
-            requestIntelligence(priority, prompt, fallback, false, expiresInMs);
+            setStatus("\u062f\u0631 \u062d\u0627\u0644 \u0622\u0645\u0627\u062f\u0647 \u06a9\u0631\u062f\u0646 \u067e\u0627\u0633\u062e \u0635\u0648\u062a\u06cc \u0647\u0648\u0634\u0645\u0646\u062f...");
+            intelligenceCoordinator.request(priority, prompt, drivingContext(), fallback, false, expiresInMs,
+                    (id, text, online) -> runOnUiThread(() -> {
+                        onlineSpeechClient.stopPlayback();
+                        voicePlayer.interrupt();
+                        if (online) {
+                            speakShort(text);
+                        } else if (clipName != null) {
+                            // Use the packaged prompt because device TTS can be unavailable or lack Persian.
+                            voicePlayer.announce(clipName, fallback);
+                            setStatus("\u0647\u0634\u062f\u0627\u0631 \u0622\u0641\u0644\u0627\u06cc\u0646 WAV \u067e\u062e\u0634 \u0634\u062f.");
+                        } else {
+                            voicePlayer.speak(fallback);
+                            setStatus("\u0647\u0634\u062f\u0627\u0631 \u0622\u0641\u0644\u0627\u06cc\u0646 \u067e\u062e\u0634 \u0634\u062f.");
+                        }
+                    }));
         } else if (clipName != null) {
             voicePlayer.announce(clipName, fallback);
         } else {

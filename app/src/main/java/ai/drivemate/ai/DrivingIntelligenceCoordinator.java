@@ -19,7 +19,8 @@ public class DrivingIntelligenceCoordinator {
     public interface Listener { void onText(String requestId, String text, boolean online); }
 
     private enum State { PENDING, RUNNING, FALLBACK, CANCELLED, READY }
-    private static final long FULL_MODE_WAIT_MS = 1500L;
+    private static final long FULL_MODE_SAFETY_WAIT_MS = 1500L;
+    private static final long FULL_MODE_STANDARD_WAIT_MS = 3000L;
 
     private final AiAssistant assistant;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
@@ -48,7 +49,7 @@ public class DrivingIntelligenceCoordinator {
             queue.add(request);
             startDrainLocked();
             if (mode == Mode.FULL && fallback != null && !fallback.trim().isEmpty()) {
-                timer.schedule(() -> fallbackAfterBudget(request.id), FULL_MODE_WAIT_MS, TimeUnit.MILLISECONDS);
+                timer.schedule(() -> fallbackAfterBudget(request.id), waitBudget(request.priority), TimeUnit.MILLISECONDS);
             }
         }
         return request.id;
@@ -122,7 +123,7 @@ public class DrivingIntelligenceCoordinator {
                 }
                 request.state = State.RUNNING;
             }
-            String answer = assistant.answerNow(request.prompt, request.context);
+            AiAssistant.AnswerResult answer = assistant.answerNowResult(request.prompt, request.context);
             synchronized (this) {
                 if (request.state == State.CANCELLED || request.state == State.FALLBACK || request.expiresAt <= System.currentTimeMillis()) {
                     request.state = State.CANCELLED;
@@ -130,12 +131,16 @@ public class DrivingIntelligenceCoordinator {
                 }
                 request.state = State.READY;
                 if (request.prefetchKey != null) {
-                    prepared.put(request.prefetchKey, new Prepared(answer, request.expiresAt));
+                    if (answer.online) prepared.put(request.prefetchKey, new Prepared(answer.text, request.expiresAt));
                     continue;
                 }
             }
-            dispatch(request, answer, true);
+            dispatch(request, answer.text, answer.online);
         }
+    }
+
+    private long waitBudget(Priority priority) {
+        return priority == Priority.SAFETY ? FULL_MODE_SAFETY_WAIT_MS : FULL_MODE_STANDARD_WAIT_MS;
     }
 
     private void dispatch(Request request, String text, boolean online) {

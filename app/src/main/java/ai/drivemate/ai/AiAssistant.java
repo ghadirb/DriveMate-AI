@@ -13,6 +13,17 @@ import java.nio.charset.StandardCharsets;
 public class AiAssistant {
     public interface AnswerCallback { void onAnswer(String answer); }
 
+    /** Distinguishes a provider answer from the built-in offline wording. */
+    public static final class AnswerResult {
+        public final String text;
+        public final boolean online;
+
+        AnswerResult(String text, boolean online) {
+            this.text = text;
+            this.online = online;
+        }
+    }
+
     private RuntimeKeys keys = new RuntimeKeys();
     private final String buildTimeKey;
 
@@ -29,9 +40,14 @@ public class AiAssistant {
 
     /** Performs one complete provider attempt. Call from a worker thread, never the UI thread. */
     public String answerNow(String question, String drivingContext) {
+        return answerNowResult(question, drivingContext).text;
+    }
+
+    /** Performs one complete provider attempt and reports whether a provider actually answered. */
+    public AnswerResult answerNowResult(String question, String drivingContext) {
         String normalized = question == null ? "" : question;
-        try { return onlineAnswer(normalized, drivingContext); }
-        catch (Exception ignored) { return offlineAnswer(normalized); }
+        try { return new AnswerResult(onlineAnswer(normalized, drivingContext), true); }
+        catch (Exception ignored) { return new AnswerResult(offlineAnswer(normalized), false); }
     }
 
     private String onlineAnswer(String question, String drivingContext) throws Exception {
