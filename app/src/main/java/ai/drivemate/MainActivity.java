@@ -568,6 +568,13 @@ public class MainActivity extends Activity {
             onlineSpeechClient.setRuntimeKeys(runtimeKeys);
             neshanRoutingProvider.setApiKey(runtimeKeys.get("NESHAN_API_KEY"));
             mapIrRoutingProvider.setApiKey(runtimeKeys.get("MAPIR_API_KEY"));
+            StringBuilder found = new StringBuilder();
+            for (String name : new String[]{"GAPGPT_API_KEY", "LIARA_API_KEY", "AI_API_KEY", "NESHAN_API_KEY", "MAPIR_API_KEY"}) {
+                if (runtimeKeys.has(name)) found.append(name).append(' ');
+            }
+            android.util.Log.d("DriveMateKeys", found.length() == 0
+                    ? "no runtime keys were parsed from either URL — online AI/TTS will always fall back to offline text"
+                    : "runtime keys parsed: " + found);
             runOnUiThread(() -> {
                 runtimeKeysLoading = false;
                 boolean onlineReady = onlineSpeechClient.canUseOnlineSpeech();

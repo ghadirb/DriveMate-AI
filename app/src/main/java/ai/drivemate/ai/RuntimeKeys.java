@@ -55,8 +55,7 @@ public class RuntimeKeys {
 
     private static String decodePayload(String payload, String secret) throws Exception {
         String trimmed = payload.trim();
-        // Base64 padding also uses '=', so only treat a multi-line key/value document as plaintext.
-        if (trimmed.startsWith("{") || (trimmed.contains("\n") && trimmed.contains("=")) || secret == null || secret.trim().isEmpty()) return trimmed;
+        if (trimmed.startsWith("{") || looksLikePlainKeyValue(trimmed) || secret == null || secret.trim().isEmpty()) return trimmed;
         byte[] raw = Base64.decode(trimmed, Base64.DEFAULT);
         // Matches encrypt_keys.py: 16-byte salt + 12-byte nonce + AES-GCM ciphertext/tag.
         if (raw.length < 16 + 12 + 16) throw new IllegalArgumentException("Encrypted key payload is too short");
@@ -71,6 +70,26 @@ public class RuntimeKeys {
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
         cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, iv));
         return new String(cipher.doFinal(cipherText), StandardCharsets.UTF_8);
+    }
+
+    /**
+     * A real encrypted payload is one unbroken standard-Base64 block: only A-Z a-z 0-9 + / and,
+     * at most, two '=' padding characters at the very end. Anything else — a ':' anywhere, an '='
+     * that is not trailing padding, or any character outside the Base64 alphabet (e.g. the '_' or
+     * '-' commonly found in real API keys) — means this is a plaintext KEY=VALUE / KEY: VALUE
+     * file, whether or not it happens to be a single line with no trailing newline.
+     */
+    private static boolean looksLikePlainKeyValue(String trimmed) {
+        if (trimmed.contains("\n") || trimmed.contains(":")) return true;
+        int lastNonPadding = trimmed.length();
+        while (lastNonPadding > 0 && trimmed.charAt(lastNonPadding - 1) == '=') lastNonPadding--;
+        if (trimmed.length() - lastNonPadding > 2) return true; // more than 2 '=' -> not real padding
+        for (int i = 0; i < lastNonPadding; i++) {
+            char c = trimmed.charAt(i);
+            boolean isBase64Char = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/';
+            if (!isBase64Char) return true;
+        }
+        return false;
     }
 
     private static void parse(String text, RuntimeKeys keys) throws Exception {

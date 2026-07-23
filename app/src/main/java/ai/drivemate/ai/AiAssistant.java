@@ -47,7 +47,10 @@ public class AiAssistant {
     public AnswerResult answerNowResult(String question, String drivingContext) {
         String normalized = question == null ? "" : question;
         try { return new AnswerResult(onlineAnswer(normalized, drivingContext), true); }
-        catch (Exception ignored) { return new AnswerResult(offlineAnswer(normalized), false); }
+        catch (Exception error) {
+            android.util.Log.w("DriveMateAI", "online answer failed, using offline fallback: " + error, error);
+            return new AnswerResult(offlineAnswer(normalized), false);
+        }
     }
 
     private String onlineAnswer(String question, String drivingContext) throws Exception {
