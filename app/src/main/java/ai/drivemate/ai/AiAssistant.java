@@ -57,7 +57,8 @@ public class AiAssistant {
         String gapKey = first(keys.get("GAPGPT_API_KEY"), keys.get("AI_API_KEY"), buildTimeKey);
         Exception gapError = null;
         if (gapKey != null) {
-            try { return chat("https://api.gapgpt.app/v1/chat/completions", gapKey, "gpt-5-nano", question, drivingContext); }
+            // gpt-4o-mini is documented by GapGPT and is better suited to short, time-bound driving prompts.
+            try { return chat("https://api.gapgpt.app/v1/chat/completions", gapKey, "gpt-4o-mini", question, drivingContext); }
             catch (Exception error) { gapError = error; }
         }
         String liaraKey = keys.get("LIARA_API_KEY");
@@ -73,9 +74,9 @@ public class AiAssistant {
         messages.put(new JSONObject().put("role", "system").put("content", "تو دستیار رانندگی فارسی DriveMate هستی. پاسخ را فقط فارسی، حداکثر دو جمله و کمتر از ۳۵ کلمه بده. متن برای پخش صوتی است؛ مقدمه، فهرست و توضیح طولانی نده. برای امور ایمنی راننده را به توقف امن تشویق کن. بدون دادهٔ زنده، دربارهٔ ترافیک یا مکان‌های نزدیک ادعای قطعی نکن. زمینه سفر: " + (drivingContext == null ? "" : drivingContext)));
         messages.put(new JSONObject().put("role", "user").put("content", question));
         body.put("messages", messages);
-        body.put("max_tokens", 100);
+        body.put("max_tokens", 60);
         HttpURLConnection c = (HttpURLConnection) new URL(endpoint).openConnection();
-        c.setConnectTimeout(10000); c.setReadTimeout(20000); c.setRequestMethod("POST"); c.setDoOutput(true);
+        c.setConnectTimeout(3000); c.setReadTimeout(4500); c.setRequestMethod("POST"); c.setDoOutput(true);
         c.setRequestProperty("Authorization", "Bearer " + apiKey); c.setRequestProperty("Content-Type", "application/json");
         try (OutputStream os = c.getOutputStream()) { os.write(body.toString().getBytes(StandardCharsets.UTF_8)); }
         try {

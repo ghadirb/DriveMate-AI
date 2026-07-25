@@ -500,6 +500,9 @@ public class MainActivity extends Activity {
                     startBackgroundNavigation();
                     lastTrafficEtaSeconds = route.durationSeconds;
                     lastTrafficEtaMeasuredAt = System.currentTimeMillis();
+                    String firstRouteInstruction = route.steps.isEmpty() ? "<none>" : route.steps.get(0).instruction;
+                    android.util.Log.i("DriveMateRoute", "provider=" + route.providerName + " steps=" + route.steps.size()
+                            + " first=" + firstRouteInstruction);
                     navigationEngine.start(route, new NavigationEngine.Listener() {
                         @Override public void onInstruction(RouteStep step) {
                             runOnUiThread(() -> announceRouteStep(step));
@@ -679,8 +682,7 @@ public class MainActivity extends Activity {
             final long watchdogDelay = priority == DrivingIntelligenceCoordinator.Priority.SAFETY ? 2_000L : 3_750L;
             voiceHandler.postDelayed(() -> {
                 if (!delivered.compareAndSet(false, true)) return;
-                playDrivingFallback(clipName, fallback);
-                setStatus("\u067e\u0627\u0633\u062e \u0645\u062f\u0644 \u0628\u0647\u200c\u0645\u0648\u0642\u0639 \u0646\u0631\u0633\u06cc\u062f\u061b \u0647\u0634\u062f\u0627\u0631 \u0622\u0641\u0644\u0627\u06cc\u0646 \u067e\u062e\u0634 \u0634\u062f.");
+                playOnlineTtsFallback(clipName, fallback);
             }, watchdogDelay);
             intelligenceCoordinator.request(priority, prompt, drivingContext(), fallback, false, expiresInMs,
                     (id, text, online) -> runOnUiThread(() -> {
@@ -688,12 +690,7 @@ public class MainActivity extends Activity {
                         if (online) {
                             speakShort(text, clipName, fallback);
                         } else {
-                            playDrivingFallback(clipName, fallback);
-                            if (clipName != null) {
-                            setStatus("\u0647\u0634\u062f\u0627\u0631 \u0622\u0641\u0644\u0627\u06cc\u0646 WAV \u067e\u062e\u0634 \u0634\u062f.");
-                            } else {
-                            setStatus("\u0647\u0634\u062f\u0627\u0631 \u0622\u0641\u0644\u0627\u06cc\u0646 \u067e\u062e\u0634 \u0634\u062f.");
-                            }
+                            playOnlineTtsFallback(clipName, fallback);
                         }
                     }));
         } else if (clipName != null) {
@@ -708,6 +705,24 @@ public class MainActivity extends Activity {
         voicePlayer.interrupt();
         if (clipName != null) voicePlayer.announce(clipName, fallback);
         else voicePlayer.speak(fallback);
+    }
+
+    /** Uses online TTS for a deterministic fallback sentence before resorting to a packaged WAV. */
+    private void playOnlineTtsFallback(String clipName, String fallback) {
+        final AtomicBoolean finished = new AtomicBoolean(false);
+        Runnable localFallback = () -> {
+            if (!finished.compareAndSet(false, true)) return;
+            playDrivingFallback(clipName, fallback);
+            setStatus("\u0635\u062f\u0627\u06cc \u0622\u0646\u0644\u0627\u06cc\u0646 \u062f\u0631 \u062f\u0633\u062a\u0631\u0633 \u0646\u0628\u0648\u062f\u061b \u0647\u0634\u062f\u0627\u0631 WAV \u067e\u062e\u0634 \u0634\u062f.");
+        };
+        setStatus("\u0645\u062f\u0644 \u0628\u0647\u200c\u0645\u0648\u0642\u0639 \u0646\u0631\u0633\u06cc\u062f\u061b \u062f\u0631 \u062d\u0627\u0644 \u062f\u0631\u06cc\u0627\u0641\u062a \u0635\u062f\u0627\u06cc \u0622\u0646\u0644\u0627\u06cc\u0646...");
+        voiceHandler.postDelayed(localFallback, 2500L);
+        onlineSpeechClient.speak(fallback, new OnlineSpeechClient.SpeechCallback() {
+            @Override public void onPlayed() { runOnUiThread(() -> {
+                if (finished.compareAndSet(false, true)) setStatus("\u0645\u062a\u0646 \u0645\u0633\u06cc\u0631 \u0628\u0627 TTS \u0622\u0646\u0644\u0627\u06cc\u0646 \u067e\u062e\u0634 \u0634\u062f.");
+            }); }
+            @Override public void onError() { runOnUiThread(localFallback); }
+        });
     }
 
     private void playPreparedOrRequest(String key, DrivingIntelligenceCoordinator.Priority priority, String prompt,
