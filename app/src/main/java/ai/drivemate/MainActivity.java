@@ -13,6 +13,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.view.View;
 import android.widget.TextView;
 import android.widget.EditText;
 import android.widget.Button;
@@ -58,9 +59,14 @@ public class MainActivity extends Activity {
     private static final int TRAFFIC_REROUTE_MIN_GAIN_SECONDS = 180;
     private static final String PREFS_SETTINGS = "drivemate_settings";
     private static final String KEY_INTELLIGENCE_MODE = "driving_intelligence_mode";
+    private static final String KEY_INTELLIGENCE_ONBOARDING_SHOWN = "intelligence_onboarding_shown_v2";
     public static final String ACTION_VOICE_FROM_NOTIFICATION = "ai.drivemate.action.VOICE_FROM_NOTIFICATION";
 
     private TextView statusText;
+    private TextView aiStatusText;
+    private TextView analysisTitleText;
+    private TextView analysisBodyText;
+    private View analysisPanel;
     private TextView listText;
     private Button voiceButton;
     private Button notificationButton;
@@ -92,9 +98,13 @@ public class MainActivity extends Activity {
     private boolean recordingLocalSpeech;
     private boolean runtimeKeysLoading = true;
     private boolean voiceRequestedWhileKeysLoad;
+    private long tripStartedAt;
+    private int activeTripDistanceMeters;
+    private long initialGuidanceHeldUntil;
     private final android.os.Handler voiceHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private final Runnable automaticStop = this::finishOnlineRecording;
     private final Runnable trafficCheck = this::checkTrafficAndMaybeReroute;
+    private final Runnable tripAnalysisHide = this::hideTripAnalysis;
     private final BroadcastReceiver navigationStopReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) { stopNavigation("مسیریابی از اعلان متوقف شد."); }
     };
@@ -105,6 +115,10 @@ public class MainActivity extends Activity {
         setContentView(R.layout.activity_main);
 
         statusText = findViewById(R.id.statusText);
+        aiStatusText = findViewById(R.id.aiStatusText);
+        analysisPanel = findViewById(R.id.analysisPanel);
+        analysisTitleText = findViewById(R.id.analysisTitleText);
+        analysisBodyText = findViewById(R.id.analysisBodyText);
         listText = findViewById(R.id.listText);
         voiceButton = findViewById(R.id.voiceButton);
         notificationButton = findViewById(R.id.notificationButton);
@@ -141,6 +155,8 @@ public class MainActivity extends Activity {
         registerNavigationReceiver();
         refreshNotificationButton();
         refreshIntelligenceButton();
+        refreshAiStatus();
+        voiceHandler.postDelayed(this::maybeShowIntelligenceOnboarding, 500L);
         if (ACTION_VOICE_FROM_NOTIFICATION.equals(getIntent().getAction())) voiceHandler.postDelayed(this::toggleVoiceInput, 350L);
     }
 
@@ -472,6 +488,8 @@ public class MainActivity extends Activity {
     private void startNavigation(SavedPlace destination) {
         intelligenceCoordinator.cancelAll();
         final long requestSequence = ++routeRequestSequence;
+        voiceHandler.removeCallbacks(tripAnalysisHide);
+        hideTripAnalysis();
         if (!routeRepository.hasConfiguredProvider()) {
             setStatus("کلید مسیریابی نشان یا map.ir در این APK موجود نیست. GitHub Secrets را بررسی کنید.");
             return;
@@ -483,6 +501,7 @@ public class MainActivity extends Activity {
             return;
         }
         setStatus("در حال دریافت مسیر به " + destination.name + "...");
+        showRouteAnalysisLoading(destination);
         if (!isFullIntelligenceMode()) {
             voicePlayer.announce("searching_route", "در حال یافتن مسیر هستم.");
         }
@@ -496,6 +515,8 @@ public class MainActivity extends Activity {
                             route.distanceMeters, route.durationSeconds, System.currentTimeMillis()));
                     writeAutomaticBackup();
                     activeDestination = destination;
+                    tripStartedAt = System.currentTimeMillis();
+                    activeTripDistanceMeters = route.distanceMeters;
                     smartCompanion.start();
                     startBackgroundNavigation();
                     lastTrafficEtaSeconds = route.durationSeconds;
@@ -511,31 +532,25 @@ public class MainActivity extends Activity {
                             runOnUiThread(() -> rerouteFromCurrentLocation());
                         }
                         @Override public void onArrived() {
-                            runOnUiThread(() -> {
-                                speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
-                                        "راننده به مقصد " + destination.name + " رسیده است. یک پیام فارسی کوتاه و طبیعی برای پایان سفر بگو.",
-                                        "destination_arrived", "به مقصد رسیدید.", 12_000L);
-                                setStatus("به " + activeDestination.name + " رسیدید.");
-                                activeDestination = null;
-                                smartCompanion.stop();
-                                voiceHandler.removeCallbacks(trafficCheck);
-                                stopBackgroundNavigation();
-                            });
+                            runOnUiThread(() -> finishTrip(destination));
                         }
                     }, origin);
+                    initialGuidanceHeldUntil = System.currentTimeMillis() + 2_600L;
                     lastInstruction = "start_navigation";
                     lastInstructionText = "مسیر به " + destination.name + " آماده است.";
                     setStatus("مسیر آماده است. سرویس: " + route.providerName + "، فاصله تقریبی: " + route.distanceMeters + " متر");
-                    speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
-                            "مسیر به " + destination.name + " آماده است. فاصله تقریبی " + route.distanceMeters
-                                    + " متر و زمان تقریبی " + route.durationSeconds + " ثانیه است. یک پیام شروع سفر طبیعی، کوتاه و ایمن بگو.",
-                            "start_navigation", "مسیر آماده است؛ با احتیاط حرکت کنید.", 15_000L);
-                    navigationEngine.announceCurrentInstruction();
+                    showTripAnalysis(route, destination);
+                    voiceHandler.postDelayed(() -> {
+                        if (requestSequence != routeRequestSequence || activeDestination != destination
+                                || !navigationEngine.isNavigating()) return;
+                        announceTripStart(route, destination);
+                    }, 2_600L);
                     scheduleTrafficCheck();
                     refreshList();
                 }),
                 error -> runOnUiThread(() -> {
                     if (requestSequence != routeRequestSequence) return;
+                    hideTripAnalysis();
                     voicePlayer.announce("api_error", "در دریافت مسیر خطایی رخ داد.");
                     setStatus("خطا در دریافت مسیر: " + error);
                 }));
@@ -555,6 +570,81 @@ public class MainActivity extends Activity {
                 .setPositiveButton("ذخیره", (dialog, which) -> saveCurrentPlace(input.getText().toString(), kind))
                 .setNegativeButton("انصراف", null)
                 .show();
+    }
+
+    /** Shows only provider-confirmed route facts; it never invents traffic or alternative routes. */
+    private void showRouteAnalysisLoading(SavedPlace destination) {
+        if (analysisPanel == null) return;
+        analysisTitleText.setText("DriveMate AI | تحلیل مسیر");
+        analysisBodyText.setText("در حال تحلیل مسیر تا " + destination.name + "...\n"
+                + "بررسی زمان رسیدن\n"
+                + "آماده‌سازی راهنمای صوتی\n"
+                + "پایش دوره‌ای ترافیک و مسیر جایگزین پس از شروع سفر");
+        analysisPanel.setVisibility(View.VISIBLE);
+    }
+
+    private void showTripAnalysis(RouteResult route, SavedPlace destination) {
+        if (analysisPanel == null) return;
+        int minutes = Math.max(1, (int) Math.ceil(route.durationSeconds / 60.0));
+        double kilometers = route.distanceMeters / 1000.0;
+        analysisTitleText.setText("DriveMate AI | تحلیل مسیر");
+        analysisBodyText.setText("بررسی مسیر انجام شد\n"
+                + "زمان تقریبی: " + minutes + " دقیقه\n"
+                + "مسافت: " + String.format(Locale.US, "%.1f", kilometers) + " کیلومتر\n"
+                + "مسیر پیشنهادی از " + route.providerName + " آماده است. پایش دوره‌ای ترافیک فعال است.");
+        analysisPanel.setVisibility(View.VISIBLE);
+        voiceHandler.removeCallbacks(tripAnalysisHide);
+        voiceHandler.postDelayed(tripAnalysisHide, 2_800L);
+    }
+
+    private void hideTripAnalysis() {
+        if (analysisPanel != null) analysisPanel.setVisibility(View.GONE);
+    }
+
+    private void announceTripStart(RouteResult route, SavedPlace destination) {
+        int minutes = Math.max(1, (int) Math.ceil(route.durationSeconds / 60.0));
+        String firstInstruction = firstRouteInstruction(route);
+        String fallback = "مسیر " + destination.name + " آماده است. حدود " + minutes + " دقیقه زمان دارد. "
+                + (firstInstruction.isEmpty() ? "با احتیاط حرکت کنید." : firstInstruction);
+        String prompt = "شروع سفر به " + destination.name + " است. زمان تقریبی " + minutes
+                + " دقیقه است. " + (firstInstruction.isEmpty() ? "" : "نخستین راهنما: " + firstInstruction + ". ")
+                + "در یک یا دو جمله فارسی بسیار کوتاه و طبیعی بگو: خودت را همراه راننده معرفی کن، وضعیت مسیر را پایش می‌کنی، "
+                + "و در صورت وجود، نخستین راهنما را دقیق بگو. از ادعای ترافیک یا مسیر جایگزین بدون داده خودداری کن.";
+        if (isFullIntelligenceMode()) {
+            speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING, prompt, null, fallback, 20_000L);
+        } else {
+            voicePlayer.speak(fallback);
+            setStatus("خلاصه مسیر با راهنمای محلی پخش شد.");
+        }
+    }
+
+    private String firstRouteInstruction(RouteResult route) {
+        if (route.steps == null || route.steps.isEmpty()) return "";
+        String instruction = route.steps.get(0).instruction == null ? "" : route.steps.get(0).instruction.trim();
+        if (instruction.length() > 110) instruction = instruction.substring(0, 110);
+        return instruction;
+    }
+
+    private void finishTrip(SavedPlace destination) {
+        if (activeDestination == null) return;
+        int minutes = tripStartedAt == 0L ? 0 : Math.max(1, (int) ((System.currentTimeMillis() - tripStartedAt) / 60_000L));
+        double kilometers = activeTripDistanceMeters / 1000.0;
+        String fallback = "به مقصد رسیدید. سفر حدود " + minutes + " دقیقه و "
+                + String.format(Locale.US, "%.1f", kilometers) + " کیلومتر بود.";
+        speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
+                "سفر به " + destination.name + " پایان یافته است. مدت سفر " + minutes + " دقیقه و مسافت "
+                        + String.format(Locale.US, "%.1f", kilometers)
+                        + " کیلومتر است. یک پیام فارسی کوتاه، طبیعی و دوستانه برای پایان سفر بگو.",
+                "destination_arrived", fallback, 15_000L);
+        setStatus("به " + destination.name + " رسیدید.");
+        activeDestination = null;
+        tripStartedAt = 0L;
+        activeTripDistanceMeters = 0;
+        initialGuidanceHeldUntil = 0L;
+        smartCompanion.stop();
+        voiceHandler.removeCallbacks(trafficCheck);
+        stopBackgroundNavigation();
+        hideTripAnalysis();
     }
 
     private void searchAndNavigate(String term) {
@@ -587,6 +677,7 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> {
                 runtimeKeysLoading = false;
                 boolean onlineReady = onlineSpeechClient.canUseOnlineSpeech();
+                refreshAiStatus();
                 setStatus(onlineReady ? "کلیدهای آنلاین فعال شدند." : "کلید آنلاین دریافت نشد؛ حالت تشخیص گفتار گوشی فعال است.");
                 if (voiceRequestedWhileKeysLoad) {
                     voiceRequestedWhileKeysLoad = false;
@@ -713,7 +804,9 @@ public class MainActivity extends Activity {
         Runnable localFallback = () -> {
             if (!finished.compareAndSet(false, true)) return;
             playDrivingFallback(clipName, fallback);
-            setStatus("\u0635\u062f\u0627\u06cc \u0622\u0646\u0644\u0627\u06cc\u0646 \u062f\u0631 \u062f\u0633\u062a\u0631\u0633 \u0646\u0628\u0648\u062f\u061b \u0647\u0634\u062f\u0627\u0631 WAV \u067e\u062e\u0634 \u0634\u062f.");
+            setStatus(clipName == null
+                    ? "صدای آنلاین در دسترس نبود؛ راهنمای محلی پخش شد."
+                    : "صدای آنلاین در دسترس نبود؛ هشدار WAV پخش شد.");
         };
         setStatus("\u0645\u062f\u0644 \u0628\u0647\u200c\u0645\u0648\u0642\u0639 \u0646\u0631\u0633\u06cc\u062f\u061b \u062f\u0631 \u062d\u0627\u0644 \u062f\u0631\u06cc\u0627\u0641\u062a \u0635\u062f\u0627\u06cc \u0622\u0646\u0644\u0627\u06cc\u0646...");
         voiceHandler.postDelayed(localFallback, 2500L);
@@ -880,22 +973,65 @@ public class MainActivity extends Activity {
                 .setSingleChoiceItems(options, current == DrivingIntelligenceCoordinator.Mode.FULL ? 1 : 0, (dialog, which) -> {
                     DrivingIntelligenceCoordinator.Mode selected = which == 1
                             ? DrivingIntelligenceCoordinator.Mode.FULL : DrivingIntelligenceCoordinator.Mode.ECONOMY;
-                    getSharedPreferences(PREFS_SETTINGS, MODE_PRIVATE).edit()
-                            .putString(KEY_INTELLIGENCE_MODE, selected.name()).apply();
-                    intelligenceCoordinator.setMode(selected);
-                    intelligenceCoordinator.cancelAll();
-                    writeAutomaticBackup();
-                    refreshIntelligenceButton();
-                    setStatus(selected == DrivingIntelligenceCoordinator.Mode.FULL
-                            ? "حالت هوشمند کامل فعال شد." : "حالت هوشمند اقتصادی فعال شد.");
+                    selectIntelligenceMode(selected);
                     dialog.dismiss();
                 }).setNegativeButton("انصراف", null).show();
+    }
+
+    private void maybeShowIntelligenceOnboarding() {
+        if (isFinishing() || getSharedPreferences(PREFS_SETTINGS, MODE_PRIVATE)
+                .getBoolean(KEY_INTELLIGENCE_ONBOARDING_SHOWN, false)) return;
+        new AlertDialog.Builder(this)
+                .setTitle("هوشمندی رانندگی")
+                .setMessage("حالت اقتصادی\nمصرف اینترنت کم و راهنمایی فوری محلی.\n\n"
+                        + "حالت هوشمند کامل\nخلاصه طبیعی مسیر، تحلیل آنلاین و پاسخ صوتی هوشمند؛ "
+                        + "در صورت تأخیر اینترنت، راهنمای محلی ادامه پیدا می‌کند.")
+                .setPositiveButton("هوشمند کامل", (dialog, which) -> {
+                    selectIntelligenceMode(DrivingIntelligenceCoordinator.Mode.FULL);
+                    markOnboardingShown();
+                })
+                .setNegativeButton("اقتصادی", (dialog, which) -> {
+                    selectIntelligenceMode(DrivingIntelligenceCoordinator.Mode.ECONOMY);
+                    markOnboardingShown();
+                })
+                .setCancelable(false)
+                .show();
+    }
+
+    private void markOnboardingShown() {
+        getSharedPreferences(PREFS_SETTINGS, MODE_PRIVATE).edit()
+                .putBoolean(KEY_INTELLIGENCE_ONBOARDING_SHOWN, true).apply();
+    }
+
+    private void selectIntelligenceMode(DrivingIntelligenceCoordinator.Mode selected) {
+        getSharedPreferences(PREFS_SETTINGS, MODE_PRIVATE).edit()
+                .putString(KEY_INTELLIGENCE_MODE, selected.name()).apply();
+        intelligenceCoordinator.setMode(selected);
+        intelligenceCoordinator.cancelAll();
+        writeAutomaticBackup();
+        refreshIntelligenceButton();
+        refreshAiStatus();
+        setStatus(selected == DrivingIntelligenceCoordinator.Mode.FULL
+                ? "حالت هوشمند کامل فعال شد." : "حالت هوشمند اقتصادی فعال شد.");
     }
 
     private void refreshIntelligenceButton() {
         if (intelligenceButton == null) return;
         intelligenceButton.setText(readIntelligenceMode() == DrivingIntelligenceCoordinator.Mode.FULL
                 ? "هوشمندی رانندگی: کامل" : "هوشمندی رانندگی: اقتصادی");
+    }
+
+    private void refreshAiStatus() {
+        if (aiStatusText == null) return;
+        if (runtimeKeysLoading) {
+            aiStatusText.setText("هوشمندی رانندگی در حال آماده‌سازی");
+        } else if (isFullIntelligenceMode() && onlineSpeechClient.canUseOnlineTts()) {
+            aiStatusText.setText("تحلیل هوشمند فعال");
+        } else if (isFullIntelligenceMode()) {
+            aiStatusText.setText("هوشمند کامل؛ TTS آنلاین در دسترس نیست");
+        } else {
+            aiStatusText.setText("حالت اقتصادی");
+        }
     }
 
     private void cycleVolume() {
@@ -998,16 +1134,7 @@ public class MainActivity extends Activity {
         navigationEngine.start(route, new NavigationEngine.Listener() {
             @Override public void onInstruction(RouteStep step) { runOnUiThread(() -> announceRouteStep(step)); }
             @Override public void onOffRoute() { runOnUiThread(() -> rerouteFromCurrentLocation()); }
-            @Override public void onArrived() { runOnUiThread(() -> {
-                speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
-                        "راننده به مقصد " + destination.name + " رسیده است. یک پیام فارسی کوتاه و طبیعی برای پایان سفر بگو.",
-                        "destination_arrived", "به مقصد رسیدید.", 12_000L);
-                setStatus("به " + destination.name + " رسیدید.");
-                activeDestination = null;
-                smartCompanion.stop();
-                voiceHandler.removeCallbacks(trafficCheck);
-                stopBackgroundNavigation();
-            }); }
+            @Override public void onArrived() { runOnUiThread(() -> finishTrip(destination)); }
         });
         setStatus("مسیر با ترافیک به‌روزرسانی شد؛ حدود " + Math.max(1, gainSeconds / 60) + " دقیقه سریع‌تر است.");
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
@@ -1060,11 +1187,17 @@ public class MainActivity extends Activity {
     }
 
     private void stopNavigation(String message) {
+        ++routeRequestSequence;
         navigationEngine.stop();
         smartCompanion.stop();
         intelligenceCoordinator.cancelAll();
         voiceHandler.removeCallbacks(trafficCheck);
+        voiceHandler.removeCallbacks(tripAnalysisHide);
         activeDestination = null;
+        tripStartedAt = 0L;
+        activeTripDistanceMeters = 0;
+        initialGuidanceHeldUntil = 0L;
+        hideTripAnalysis();
         stopBackgroundNavigation();
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
                 "مسیریابی متوقف شده است. یک پیام فارسی کوتاه و طبیعی برای راننده بگو.",
@@ -1079,6 +1212,11 @@ public class MainActivity extends Activity {
     }
 
     private void announceRouteStep(RouteStep step) {
+        if (System.currentTimeMillis() < initialGuidanceHeldUntil) {
+            lastInstruction = "continue_route";
+            lastInstructionText = step.instruction == null ? "" : step.instruction;
+            return;
+        }
         onlineSpeechClient.stopPlayback();
         String text = step.instruction == null || step.instruction.trim().isEmpty() ? "ادامه مسیر" : step.instruction;
         String lower = text.toLowerCase(Locale.ROOT);

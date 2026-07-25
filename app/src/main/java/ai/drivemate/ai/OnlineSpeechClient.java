@@ -38,6 +38,8 @@ public class OnlineSpeechClient {
 
     public void setRuntimeKeys(RuntimeKeys keys) { if (keys != null) this.keys = keys; }
     public boolean canUseOnlineSpeech() { return gapKey() != null || liaraKey() != null; }
+    /** TTS currently uses the documented GapGPT audio endpoint; Liara is STT fallback only. */
+    public boolean canUseOnlineTts() { return gapKey() != null; }
 
     public boolean startRecording() {
         try {
