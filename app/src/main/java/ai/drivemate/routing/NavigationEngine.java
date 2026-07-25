@@ -87,12 +87,26 @@ public class NavigationEngine {
         }
     }
 
+    /** True when the current step is a maneuver rather than a destination-only fallback step. */
+    public boolean hasActionableCurrentInstruction() {
+        if (route == null || route.steps.isEmpty()) return false;
+        RouteStep step = route.steps.get(Math.min(nextStep, route.steps.size() - 1));
+        String instruction = step.instruction == null ? "" : step.instruction;
+        String lower = instruction.toLowerCase(java.util.Locale.ROOT);
+        return route.steps.size() > 1
+                || !(lower.contains("arriv")
+                || instruction.contains("\u0645\u0642\u0635\u062f")
+                || instruction.contains("\u0631\u0633\u06cc\u062f"));
+    }
+
     /** Announces the first actionable provider instruction as soon as a route is ready. */
-    public void announceCurrentInstruction() {
-        if (route == null || listener == null || route.steps.isEmpty() || currentInstructionAnnounced) return;
+    public boolean announceCurrentInstruction() {
+        if (route == null || listener == null || route.steps.isEmpty() || currentInstructionAnnounced
+                || !hasActionableCurrentInstruction()) return false;
         currentInstructionAnnounced = true;
         lastInstructionAt = System.currentTimeMillis();
         listener.onInstruction(route.steps.get(Math.min(nextStep, route.steps.size() - 1)));
+        return true;
     }
 
     private boolean isReliablyOffRoute(Location location, float targetDistance) {
