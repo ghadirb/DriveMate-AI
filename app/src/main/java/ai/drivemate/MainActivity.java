@@ -23,6 +23,7 @@ import androidx.core.content.FileProvider;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import ai.drivemate.ai.AiAssistant;
 import ai.drivemate.ai.DrivingIntelligenceCoordinator;
@@ -670,19 +671,25 @@ public class MainActivity extends Activity {
                                    String fallback, long expiresInMs) {
         if (isFullIntelligenceMode()) {
             setStatus("\u062f\u0631 \u062d\u0627\u0644 \u0622\u0645\u0627\u062f\u0647 \u06a9\u0631\u062f\u0646 \u067e\u0627\u0633\u062e \u0635\u0648\u062a\u06cc \u0647\u0648\u0634\u0645\u0646\u062f...");
+            final AtomicBoolean delivered = new AtomicBoolean(false);
+            final long watchdogDelay = priority == DrivingIntelligenceCoordinator.Priority.SAFETY ? 2_000L : 3_750L;
+            voiceHandler.postDelayed(() -> {
+                if (!delivered.compareAndSet(false, true)) return;
+                playDrivingFallback(clipName, fallback);
+                setStatus("\u067e\u0627\u0633\u062e \u0645\u062f\u0644 \u0628\u0647\u200c\u0645\u0648\u0642\u0639 \u0646\u0631\u0633\u06cc\u062f\u061b \u0647\u0634\u062f\u0627\u0631 \u0622\u0641\u0644\u0627\u06cc\u0646 \u067e\u062e\u0634 \u0634\u062f.");
+            }, watchdogDelay);
             intelligenceCoordinator.request(priority, prompt, drivingContext(), fallback, false, expiresInMs,
                     (id, text, online) -> runOnUiThread(() -> {
-                        onlineSpeechClient.stopPlayback();
-                        voicePlayer.interrupt();
+                        if (!delivered.compareAndSet(false, true)) return;
                         if (online) {
                             speakShort(text, clipName, fallback);
-                        } else if (clipName != null) {
-                            // Use the packaged prompt because device TTS can be unavailable or lack Persian.
-                            voicePlayer.announce(clipName, fallback);
-                            setStatus("\u0647\u0634\u062f\u0627\u0631 \u0622\u0641\u0644\u0627\u06cc\u0646 WAV \u067e\u062e\u0634 \u0634\u062f.");
                         } else {
-                            voicePlayer.speak(fallback);
+                            playDrivingFallback(clipName, fallback);
+                            if (clipName != null) {
+                            setStatus("\u0647\u0634\u062f\u0627\u0631 \u0622\u0641\u0644\u0627\u06cc\u0646 WAV \u067e\u062e\u0634 \u0634\u062f.");
+                            } else {
                             setStatus("\u0647\u0634\u062f\u0627\u0631 \u0622\u0641\u0644\u0627\u06cc\u0646 \u067e\u062e\u0634 \u0634\u062f.");
+                            }
                         }
                     }));
         } else if (clipName != null) {
@@ -690,6 +697,13 @@ public class MainActivity extends Activity {
         } else {
             voicePlayer.speak(fallback);
         }
+    }
+
+    private void playDrivingFallback(String clipName, String fallback) {
+        onlineSpeechClient.stopPlayback();
+        voicePlayer.interrupt();
+        if (clipName != null) voicePlayer.announce(clipName, fallback);
+        else voicePlayer.speak(fallback);
     }
 
     private void playPreparedOrRequest(String key, DrivingIntelligenceCoordinator.Priority priority, String prompt,
@@ -984,6 +998,7 @@ public class MainActivity extends Activity {
     }
 
     private void setStatus(String message) {
+        android.util.Log.i("DriveMateStatus", message);
         statusText.setText(message);
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
     }
