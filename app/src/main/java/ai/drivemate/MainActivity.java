@@ -329,7 +329,7 @@ public class MainActivity extends Activity {
                 restoreVoiceButton();
                 setStatus("تشخیص گفتار آفلاین انجام نشد.");
             }); }
-        }, locationTracker.getLastLocation());
+        });
         if (!started) return false;
         recordingLocalSpeech = true;
         voiceButton.setText("در حال گوش دادن آفلاین...");
