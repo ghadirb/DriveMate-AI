@@ -527,6 +527,7 @@ public class MainActivity extends Activity {
                             "مسیر به " + destination.name + " آماده است. فاصله تقریبی " + route.distanceMeters
                                     + " متر و زمان تقریبی " + route.durationSeconds + " ثانیه است. یک پیام شروع سفر طبیعی، کوتاه و ایمن بگو.",
                             "start_navigation", "مسیر آماده است؛ با احتیاط حرکت کنید.", 15_000L);
+                    navigationEngine.announceCurrentInstruction();
                     scheduleTrafficCheck();
                     refreshList();
                 }),
@@ -669,6 +670,9 @@ public class MainActivity extends Activity {
     /** Uses the local clip immediately in economy mode; full mode gives online AI/TTS first refusal. */
     private void speakDrivingEvent(DrivingIntelligenceCoordinator.Priority priority, String prompt, String clipName,
                                    String fallback, long expiresInMs) {
+        // The route engine immediately speaks the first real maneuver; avoid a second generic
+        // "start moving" prompt that would delay the actionable instruction.
+        if ("start_navigation".equals(clipName) && navigationEngine.isNavigating()) return;
         if (isFullIntelligenceMode()) {
             setStatus("\u062f\u0631 \u062d\u0627\u0644 \u0622\u0645\u0627\u062f\u0647 \u06a9\u0631\u062f\u0646 \u067e\u0627\u0633\u062e \u0635\u0648\u062a\u06cc \u0647\u0648\u0634\u0645\u0646\u062f...");
             final AtomicBoolean delivered = new AtomicBoolean(false);

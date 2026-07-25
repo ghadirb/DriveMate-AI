@@ -21,6 +21,7 @@ public class NavigationEngine {
     private float targetDistanceAtReference;
     private int offRouteSamples;
     private long lastInstructionAt;
+    private boolean currentInstructionAnnounced;
     private static final long MIN_MS_BETWEEN_INSTRUCTIONS = 4000L;
     private static final float MAX_ACCURACY_FOR_ADVANCE_METERS = 60f;
 
@@ -39,6 +40,7 @@ public class NavigationEngine {
         this.rerouteRequested = false;
         this.offRouteSamples = 0;
         this.lastInstructionAt = 0L;
+        this.currentInstructionAnnounced = false;
         updateTargetReference(currentLocation);
     }
 
@@ -47,6 +49,7 @@ public class NavigationEngine {
         listener = null;
         targetReference = null;
         offRouteSamples = 0;
+        currentInstructionAnnounced = false;
     }
     public boolean isNavigating() { return route != null; }
 
@@ -61,16 +64,20 @@ public class NavigationEngine {
             callback.onArrived();
             return;
         }
-        // A noisy/jumpy fix (common indoors or right after a cold GPS start) must never be allowed
-        // to walk the engine through several maneuver points back to back; require both a
-        // trustworthy accuracy reading and a minimum gap since the last spoken instruction.
+        // Announce before reaching the maneuver. A no-map experience needs the next action in
+        // advance, while route progression still waits until the maneuver endpoint is reached.
         boolean accuracyOk = !location.hasAccuracy() || location.getAccuracy() <= MAX_ACCURACY_FOR_ADVANCE_METERS;
         boolean cooldownOk = System.currentTimeMillis() - lastInstructionAt >= MIN_MS_BETWEEN_INSTRUCTIONS;
-        if (accuracyOk && cooldownOk && meters < Math.max(35f, Math.min(120f, target.distanceMeters * 0.18f))) {
-            lastInstructionAt = System.currentTimeMillis();
-            listener.onInstruction(target);
+        float announceDistance = Math.max(70f, Math.min(250f, Math.max(100f, target.distanceMeters * 0.55f)));
+        if (accuracyOk && cooldownOk && !currentInstructionAnnounced && meters <= announceDistance) {
+            announceCurrentInstruction();
+        }
+
+        float reachedDistance = Math.max(28f, Math.min(65f, target.distanceMeters * 0.15f));
+        if (accuracyOk && meters <= reachedDistance) {
             nextStep = Math.min(nextStep + 1, route.steps.size() - 1);
             rerouteRequested = false;
+            currentInstructionAnnounced = false;
             updateTargetReference(location);
             return;
         }
@@ -78,6 +85,14 @@ public class NavigationEngine {
             rerouteRequested = true;
             listener.onOffRoute();
         }
+    }
+
+    /** Announces the first actionable provider instruction as soon as a route is ready. */
+    public void announceCurrentInstruction() {
+        if (route == null || listener == null || route.steps.isEmpty() || currentInstructionAnnounced) return;
+        currentInstructionAnnounced = true;
+        lastInstructionAt = System.currentTimeMillis();
+        listener.onInstruction(route.steps.get(Math.min(nextStep, route.steps.size() - 1)));
     }
 
     private boolean isReliablyOffRoute(Location location, float targetDistance) {
