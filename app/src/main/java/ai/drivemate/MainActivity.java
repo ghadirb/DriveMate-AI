@@ -86,6 +86,7 @@ public class MainActivity extends Activity {
     private SavedPlace activeDestination;
     private int lastTrafficEtaSeconds;
     private long lastTrafficEtaMeasuredAt;
+    private long routeRequestSequence;
     private boolean recordingOnlineSpeech;
     private boolean recordingLocalSpeech;
     private boolean runtimeKeysLoading = true;
@@ -328,7 +329,7 @@ public class MainActivity extends Activity {
                 restoreVoiceButton();
                 setStatus("تشخیص گفتار آفلاین انجام نشد.");
             }); }
-        });
+        }, locationTracker.getLastLocation());
         if (!started) return false;
         recordingLocalSpeech = true;
         voiceButton.setText("در حال گوش دادن آفلاین...");
@@ -469,6 +470,7 @@ public class MainActivity extends Activity {
 
     private void startNavigation(SavedPlace destination) {
         intelligenceCoordinator.cancelAll();
+        final long requestSequence = ++routeRequestSequence;
         if (!routeRepository.hasConfiguredProvider()) {
             setStatus("کلید مسیریابی نشان یا map.ir در این APK موجود نیست. GitHub Secrets را بررسی کنید.");
             return;
@@ -487,6 +489,7 @@ public class MainActivity extends Activity {
         final double originLongitude = origin.getLongitude();
         routeRepository.getRoute(originLatitude, originLongitude, destination.latitude, destination.longitude,
                 route -> runOnUiThread(() -> {
+                    if (requestSequence != routeRequestSequence) return;
                     placeStore.addRecent(destination);
                     tripStore.add(new TripRecord(destination.name, originLatitude, originLongitude, destination.latitude, destination.longitude,
                             route.distanceMeters, route.durationSeconds, System.currentTimeMillis()));
@@ -515,7 +518,7 @@ public class MainActivity extends Activity {
                                 stopBackgroundNavigation();
                             });
                         }
-                    });
+                    }, origin);
                     lastInstruction = "start_navigation";
                     lastInstructionText = "مسیر به " + destination.name + " آماده است.";
                     setStatus("مسیر آماده است. سرویس: " + route.providerName + "، فاصله تقریبی: " + route.distanceMeters + " متر");
@@ -527,6 +530,7 @@ public class MainActivity extends Activity {
                     refreshList();
                 }),
                 error -> runOnUiThread(() -> {
+                    if (requestSequence != routeRequestSequence) return;
                     voicePlayer.announce("api_error", "در دریافت مسیر خطایی رخ داد.");
                     setStatus("خطا در دریافت مسیر: " + error);
                 }));
