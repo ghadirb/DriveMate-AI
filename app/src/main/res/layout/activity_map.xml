@@ -1,0 +1,114 @@
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/drivemate_bg"
+    android:layoutDirection="rtl">
+
+    <FrameLayout
+        android:id="@+id/mapContainer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:orientation="vertical"
+        android:padding="14dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@drawable/status_panel"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="8dp">
+
+            <EditText
+                android:id="@+id/mapSearchText"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="1"
+                android:background="@android:color/transparent"
+                android:hint="جست‌وجوی مکان یا آدرس"
+                android:imeOptions="actionSearch"
+                android:inputType="text"
+                android:singleLine="true"
+                android:textColor="@color/drivemate_text"
+                android:textColorHint="@color/drivemate_muted" />
+
+            <Button
+                android:id="@+id/mapSearchButton"
+                android:layout_width="wrap_content"
+                android:layout_height="44dp"
+                android:text="جست‌وجو" />
+
+            <Button
+                android:id="@+id/mapVoiceButton"
+                android:layout_width="44dp"
+                android:layout_height="44dp"
+                android:contentDescription="جست‌وجوی صوتی"
+                android:text="صدا" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="end|center_vertical"
+        android:layout_marginEnd="14dp"
+        android:orientation="vertical">
+
+        <Button
+            android:id="@+id/myLocationButton"
+            android:layout_width="58dp"
+            android:layout_height="58dp"
+            android:contentDescription="مکان فعلی"
+            android:text="من" />
+
+        <Button
+            android:id="@+id/savedPlacesButton"
+            android:layout_width="58dp"
+            android:layout_height="58dp"
+            android:layout_marginTop="8dp"
+            android:contentDescription="مکان‌های ذخیره‌شده"
+            android:text="مکان" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:background="@drawable/status_panel"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <TextView
+            android:id="@+id/mapDestinationText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="برای انتخاب مقصد، جست‌وجو کنید یا روی نقشه نگه دارید."
+            android:textColor="@color/drivemate_text"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/mapRouteText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="5dp"
+            android:text="مبدأ: مکان فعلی"
+            android:textColor="@color/drivemate_muted"
+            android:textSize="14sp" />
+
+        <Button
+            android:id="@+id/startMapNavigationButton"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:layout_marginTop="10dp"
+            android:background="@drawable/primary_button"
+            android:text="شروع مسیریابی"
+            android:textColor="@color/white"
+            android:textSize="18sp" />
+    </LinearLayout>
+</FrameLayout>

@@ -40,6 +40,13 @@
             android:textColor="@color/drivemate_text"
             android:textSize="16sp" />
 
+        <Button
+            android:id="@+id/mapButton"
+            style="@style/HomeActionButton"
+            android:layout_width="match_parent"
+            android:layout_marginTop="10dp"
+            android:text="نقشه و انتخاب مسیر" />
+
         <LinearLayout
             android:id="@+id/analysisPanel"
             android:layout_width="match_parent"

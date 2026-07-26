@@ -43,3 +43,58 @@ jobs:
         with:
           name: DriveMate-AI-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+
+  release:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Prepare release keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$ANDROID_KEYSTORE_BASE64" || (echo "Missing ANDROID_KEYSTORE_BASE64 secret" && exit 1)
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > app/release.jks
+
+      - name: Build signed Release APK and AAB
+        env:
+          NESHAN_API_KEY: ${{ secrets.NESHAN_API_KEY }}
+          MAPIR_API_KEY: ${{ secrets.MAPIR_API_KEY }}
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          KEYS_DECRYPTION_SECRET: ${{ secrets.KEYS_DECRYPTION_SECRET }}
+          RELEASE_STORE_FILE: release.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: gradle assembleRelease bundleRelease --stacktrace
+
+      - name: Upload signed Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DriveMate-AI-release-apk
+          path: app/build/outputs/apk/release/*.apk
+
+      - name: Upload signed Release AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: DriveMate-AI-release-aab
+          path: app/build/outputs/bundle/release/*.aab

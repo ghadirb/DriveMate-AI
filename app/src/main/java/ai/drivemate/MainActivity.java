@@ -55,6 +55,7 @@ public class MainActivity extends Activity {
     private static final int REQ_PERMISSIONS = 10;
     private static final int REQ_EXPORT_BACKUP = 11;
     private static final int REQ_IMPORT_BACKUP = 12;
+    private static final int REQ_MAP = 13;
     private static final long TRAFFIC_CHECK_INTERVAL_MS = 8 * 60_000L;
     private static final int TRAFFIC_REROUTE_MIN_GAIN_SECONDS = 180;
     private static final String PREFS_SETTINGS = "drivemate_settings";
@@ -162,6 +163,7 @@ public class MainActivity extends Activity {
 
     private void wireButtons() {
         voiceButton.setOnClickListener(v -> toggleVoiceInput());
+        findViewById(R.id.mapButton).setOnClickListener(v -> openMap());
         findViewById(R.id.saveButton).setOnClickListener(v -> promptSaveCurrentPlace());
         findViewById(R.id.homeButton).setOnClickListener(v -> openHomeOrWork("home", "خانه"));
         findViewById(R.id.workButton).setOnClickListener(v -> openHomeOrWork("work", "محل کار"));
@@ -203,6 +205,19 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_MAP && resultCode == RESULT_OK && data != null) {
+            if (data.getBooleanExtra(MapActivity.RESULT_START_VOICE, false)) {
+                toggleVoiceInput();
+            } else if (data.hasExtra(MapActivity.RESULT_LATITUDE) && data.hasExtra(MapActivity.RESULT_LONGITUDE)) {
+                SavedPlace destination = new SavedPlace(
+                        data.getStringExtra(MapActivity.RESULT_NAME), "map_" + System.currentTimeMillis(),
+                        data.getDoubleExtra(MapActivity.RESULT_LATITUDE, 0d),
+                        data.getDoubleExtra(MapActivity.RESULT_LONGITUDE, 0d),
+                        data.getStringExtra(MapActivity.RESULT_ADDRESS), System.currentTimeMillis(), false);
+                startNavigation(destination);
+            }
+            return;
+        }
         if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
         Uri uri = data.getData();
         if (requestCode == REQ_EXPORT_BACKUP) {
@@ -217,6 +232,18 @@ public class MainActivity extends Activity {
         } else if (requestCode == REQ_IMPORT_BACKUP) {
             confirmRestore(uri);
         }
+    }
+
+    private void openMap() {
+        Intent intent = new Intent(this, MapActivity.class);
+        Location location = locationTracker.getLastLocation();
+        if (location != null) {
+            intent.putExtra(MapActivity.EXTRA_ORIGIN_LATITUDE, location.getLatitude());
+            intent.putExtra(MapActivity.EXTRA_ORIGIN_LONGITUDE, location.getLongitude());
+        }
+        intent.putExtra(MapActivity.EXTRA_NESHAN_KEY, runtimeKeys.get("NESHAN_API_KEY"));
+        intent.putExtra(MapActivity.EXTRA_MAPIR_KEY, runtimeKeys.get("MAPIR_API_KEY"));
+        startActivityForResult(intent, REQ_MAP);
     }
 
     private void showBackupDialog() {

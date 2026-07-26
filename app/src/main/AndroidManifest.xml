@@ -31,6 +31,10 @@
                 <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".MapActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
         <service
             android:name=".NavigationForegroundService"
             android:exported="false"
