@@ -81,7 +81,7 @@ public class OnlineSpeechClient {
         speak(text, null);
     }
 
-    /** Uses the higher-quality Gemini TTS documented by GapGPT, then tts-1 as online fallback. */
+    /** Uses gpt-4o-mini-tts first, then Gemini and tts-1 as online fallbacks. */
     public void speak(String text, SpeechCallback callback) {
         String key = gapKey();
         if (key == null || text == null || text.trim().isEmpty()) {
@@ -92,19 +92,26 @@ public class OnlineSpeechClient {
             try {
                 File output;
                 try {
-                    output = synthesizeGeminiTts(text, key, true);
-                    lastTtsProvider = "Gemini TTS";
-                    Log.i(TAG, "Gemini TTS response ready");
-                } catch (Exception documentedError) {
-                    Log.w(TAG, "Documented Gemini TTS request failed; trying compatible request", documentedError);
+                    output = synthesizeOpenAiTts(text, key, "gpt-4o-mini-tts", "answer-gpt4o-mini-tts.mp3");
+                    lastTtsProvider = "GapGPT gpt-4o-mini-tts";
+                    Log.i(TAG, "gpt-4o-mini-tts response ready");
+                } catch (Exception gptError) {
+                    Log.w(TAG, "gpt-4o-mini-tts failed; trying Gemini TTS", gptError);
                     try {
-                        output = synthesizeGeminiTts(text, key, false);
+                        output = synthesizeGeminiTts(text, key, true);
                         lastTtsProvider = "Gemini TTS";
-                        Log.i(TAG, "Gemini TTS compatible response ready");
-                    } catch (Exception compatibleError) {
-                        Log.w(TAG, "Gemini TTS unavailable; falling back to tts-1", compatibleError);
-                        output = synthesizeTts1(text, key);
-                        lastTtsProvider = "GapGPT tts-1";
+                        Log.i(TAG, "Gemini TTS response ready");
+                    } catch (Exception documentedError) {
+                        Log.w(TAG, "Documented Gemini TTS request failed; trying compatible request", documentedError);
+                        try {
+                            output = synthesizeGeminiTts(text, key, false);
+                            lastTtsProvider = "Gemini TTS";
+                            Log.i(TAG, "Gemini TTS compatible response ready");
+                        } catch (Exception compatibleError) {
+                            Log.w(TAG, "Gemini TTS unavailable; falling back to tts-1", compatibleError);
+                            output = synthesizeTts1(text, key);
+                            lastTtsProvider = "GapGPT tts-1";
+                        }
                     }
                 }
                 final File playableOutput = output;
@@ -164,20 +171,25 @@ public class OnlineSpeechClient {
     }
 
     private File synthesizeTts1(String text, String key) throws Exception {
-        JSONObject body = new JSONObject().put("model", "tts-1").put("voice", "alloy").put("input", text);
+        return synthesizeOpenAiTts(text, key, "tts-1", "answer-tts1.mp3");
+    }
+
+    /** Implements the documented OpenAI-compatible GapGPT audio/speech request. */
+    private File synthesizeOpenAiTts(String text, String key, String model, String filename) throws Exception {
+        JSONObject body = new JSONObject().put("model", model).put("voice", "alloy").put("input", text);
         HttpURLConnection connection = open("https://api.gapgpt.app/v1/audio/speech", key);
         try {
             connection.setDoOutput(true);
             connection.setRequestProperty("Content-Type", "application/json");
             try (OutputStream out = connection.getOutputStream()) { out.write(body.toString().getBytes(StandardCharsets.UTF_8)); }
             int code = connection.getResponseCode();
-            if (code >= 300) throw new IllegalStateException("tts-1 HTTP " + code + ": " + compactError(readResponse(connection, code)));
-            File output = new File(context.getCacheDir(), "answer-tts1.mp3");
+            if (code >= 300) throw new IllegalStateException(model + " HTTP " + code + ": " + compactError(readResponse(connection, code)));
+            File output = new File(context.getCacheDir(), filename);
             try (FileOutputStream file = new FileOutputStream(output); java.io.InputStream input = connection.getInputStream()) {
                 byte[] buffer = new byte[8192]; int count;
                 while ((count = input.read(buffer)) != -1) file.write(buffer, 0, count);
             }
-            if (output.length() < 64) throw new IllegalStateException("tts-1 audio was empty");
+            if (output.length() < 64) throw new IllegalStateException(model + " audio was empty");
             return output;
         } finally {
             connection.disconnect();
