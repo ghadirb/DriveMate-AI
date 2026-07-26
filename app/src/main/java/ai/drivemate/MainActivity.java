@@ -241,9 +241,16 @@ public class MainActivity extends Activity {
             intent.putExtra(MapActivity.EXTRA_ORIGIN_LATITUDE, location.getLatitude());
             intent.putExtra(MapActivity.EXTRA_ORIGIN_LONGITUDE, location.getLongitude());
         }
-        intent.putExtra(MapActivity.EXTRA_NESHAN_KEY, runtimeKeys.get("NESHAN_API_KEY"));
-        intent.putExtra(MapActivity.EXTRA_MAPIR_KEY, runtimeKeys.get("MAPIR_API_KEY"));
+        // The encrypted runtime payload may contain only AI keys. Keep routing keys injected
+        // by GitHub Actions available to the map as a fallback.
+        intent.putExtra(MapActivity.EXTRA_NESHAN_KEY, routingKey("NESHAN_API_KEY", BuildConfig.NESHAN_API_KEY));
+        intent.putExtra(MapActivity.EXTRA_MAPIR_KEY, routingKey("MAPIR_API_KEY", BuildConfig.MAPIR_API_KEY));
         startActivityForResult(intent, REQ_MAP);
+    }
+
+    private String routingKey(String name, String buildConfigFallback) {
+        String runtimeValue = runtimeKeys == null ? null : runtimeKeys.get(name);
+        return runtimeValue == null || runtimeValue.trim().isEmpty() ? buildConfigFallback : runtimeValue;
     }
 
     private void showBackupDialog() {

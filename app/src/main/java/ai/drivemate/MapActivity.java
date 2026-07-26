@@ -90,12 +90,7 @@ public class MapActivity extends Activity {
 
     private void wireControls() {
         findViewById(R.id.mapSearchButton).setOnClickListener(v -> searchDestination());
-        findViewById(R.id.mapVoiceButton).setOnClickListener(v -> {
-            Intent result = new Intent();
-            result.putExtra(RESULT_START_VOICE, true);
-            setResult(RESULT_OK, result);
-            finish();
-        });
+        findViewById(R.id.mapCloseButton).setOnClickListener(v -> finish());
         findViewById(R.id.myLocationButton).setOnClickListener(v -> focusOrigin());
         findViewById(R.id.savedPlacesButton).setOnClickListener(v -> chooseSavedPlace());
         findViewById(R.id.startMapNavigationButton).setOnClickListener(v -> startSelectedDestination());
@@ -117,9 +112,21 @@ public class MapActivity extends Activity {
             map.moveCamera(new LatLng(originLatitude, originLongitude), 0f);
             map.setZoom(14f, 0f);
             showCurrentMarker();
-            map.setOnMapLongClickListener(point -> selectDestination(new SavedPlace(
-                    "نقطه انتخاب‌شده روی نقشه", "map_pin", point.getLatitude(), point.getLongitude(),
-                    String.format(Locale.US, "%.6f, %.6f", point.getLatitude(), point.getLongitude()), System.currentTimeMillis(), false)));
+            map.setOnMapLongClickListener(point -> {
+                final double latitude = point.getLatitude();
+                final double longitude = point.getLongitude();
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    try {
+                        selectDestination(new SavedPlace(
+                                "نقطه انتخاب‌شده روی نقشه", "map_pin", latitude, longitude,
+                                String.format(Locale.US, "%.6f, %.6f", latitude, longitude), System.currentTimeMillis(), false));
+                    } catch (RuntimeException error) {
+                        Log.e("DriveMateMap", "Could not select map point", error);
+                        routeText.setText("انتخاب نقطه روی نقشه انجام نشد. دوباره تلاش کنید.");
+                    }
+                });
+            });
         } catch (LinkageError error) {
             // A malformed or stale SDK artifact must not close the app or block destination search.
             Log.e("DriveMateMap", "Neshan MapView runtime could not be loaded", error);
