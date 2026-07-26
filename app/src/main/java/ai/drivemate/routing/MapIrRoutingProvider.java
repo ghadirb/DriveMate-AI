@@ -42,7 +42,7 @@ public class MapIrRoutingProvider implements RoutingProvider {
     }
 
     private RouteResult parseRoute(JSONObject route, double originLat, double originLng,
-                                   double destinationLat, double destinationLng) {
+                                   double destinationLat, double destinationLng) throws Exception {
         ArrayList<RouteStep> steps = new ArrayList<>();
         JSONArray legs = route.optJSONArray("legs");
         if (legs != null && legs.length() > 0) {
