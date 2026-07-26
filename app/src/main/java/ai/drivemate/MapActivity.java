@@ -8,6 +8,7 @@ import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.location.Location;
 import android.os.Bundle;
+import android.util.Log;
 import android.view.inputmethod.EditorInfo;
 import android.widget.Button;
 import android.widget.EditText;
@@ -109,15 +110,23 @@ public class MapActivity extends Activity {
             routeText.setText("فایل neshan.license در res/raw برنامه وجود ندارد.");
             return;
         }
-        map = new MapView(this);
-        ((FrameLayout) findViewById(R.id.mapContainer)).addView(map,
-                new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-        map.moveCamera(new LatLng(originLatitude, originLongitude), 0f);
-        map.setZoom(14f, 0f);
-        showCurrentMarker();
-        map.setOnMapLongClickListener(point -> selectDestination(new SavedPlace(
-                "نقطه انتخاب‌شده روی نقشه", "map_pin", point.getLatitude(), point.getLongitude(),
-                String.format(Locale.US, "%.6f, %.6f", point.getLatitude(), point.getLongitude()), System.currentTimeMillis(), false)));
+        try {
+            map = new MapView(this);
+            ((FrameLayout) findViewById(R.id.mapContainer)).addView(map,
+                    new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+            map.moveCamera(new LatLng(originLatitude, originLongitude), 0f);
+            map.setZoom(14f, 0f);
+            showCurrentMarker();
+            map.setOnMapLongClickListener(point -> selectDestination(new SavedPlace(
+                    "نقطه انتخاب‌شده روی نقشه", "map_pin", point.getLatitude(), point.getLongitude(),
+                    String.format(Locale.US, "%.6f, %.6f", point.getLatitude(), point.getLongitude()), System.currentTimeMillis(), false)));
+        } catch (LinkageError error) {
+            // A malformed or stale SDK artifact must not close the app or block destination search.
+            Log.e("DriveMateMap", "Neshan MapView runtime could not be loaded", error);
+            map = null;
+            routeText.setText("نقشه نشان آماده نشد؛ جست‌وجو و مکان‌های ذخیره‌شده همچنان در دسترس هستند.");
+            Toast.makeText(this, "نمایش نقشه در این نسخه آماده نشد.", Toast.LENGTH_LONG).show();
+        }
     }
 
     private void searchDestination() {
