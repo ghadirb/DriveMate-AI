@@ -102,6 +102,28 @@
             android:textColor="@color/drivemate_muted"
             android:textSize="14sp" />
 
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/routeOptionsButton"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="1"
+                android:text="مسیرها" />
+
+            <Button
+                android:id="@+id/saveMapPlaceButton"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:text="ذخیره مکان" />
+        </LinearLayout>
+
         <Button
             android:id="@+id/startMapNavigationButton"
             android:layout_width="match_parent"

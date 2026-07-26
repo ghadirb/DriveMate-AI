@@ -12,39 +12,38 @@ import ai.drivemate.model.RouteStep;
 public class MapIrRoutingProvider implements RoutingProvider {
     private String apiKey;
 
-    public MapIrRoutingProvider(String apiKey) {
-        this.apiKey = apiKey;
-    }
+    public MapIrRoutingProvider(String apiKey) { this.apiKey = apiKey; }
 
     public void setApiKey(String apiKey) {
-        if (apiKey != null && !apiKey.trim().isEmpty()) {
-            this.apiKey = apiKey.trim();
-        }
+        if (apiKey != null && !apiKey.trim().isEmpty()) this.apiKey = apiKey.trim();
     }
 
     String apiKey() { return apiKey == null || apiKey.trim().isEmpty() ? null : apiKey; }
     public boolean isConfigured() { return apiKey() != null; }
 
-    @Override
-    public String name() {
-        return "map.ir";
+    @Override public String name() { return "map.ir"; }
+
+    @Override public RouteResult route(double originLat, double originLng, double destinationLat, double destinationLng) throws Exception {
+        return routes(originLat, originLng, destinationLat, destinationLng).get(0);
     }
 
-    @Override
-    public RouteResult route(double originLat, double originLng, double destinationLat, double destinationLng) throws Exception {
-        if (apiKey == null || apiKey.isEmpty()) {
-            throw new IllegalStateException("کلید API map.ir تنظیم نشده است.");
-        }
-        String url = "https://map.ir/routes/route/v1/driving/"
-                + originLng + "," + originLat + ";" + destinationLng + "," + destinationLat
-                + "?alternatives=false&steps=true&overview=false";
+    @Override public List<RouteResult> routes(double originLat, double originLng, double destinationLat, double destinationLng) throws Exception {
+        if (!isConfigured()) throw new IllegalStateException("map.ir API key is not configured.");
+        String url = "https://map.ir/routes/route/v1/driving/" + originLng + "," + originLat + ";"
+                + destinationLng + "," + destinationLat + "?alternatives=true&steps=true&overview=full&geometries=polyline";
         JSONObject object = RoutingHttp.getJson(url, "x-api-key", apiKey);
-        JSONArray routes = object.optJSONArray("routes");
-        if (routes == null || routes.length() == 0) {
-            throw new IllegalStateException("مسیری از map.ir دریافت نشد.");
+        JSONArray rawRoutes = object.optJSONArray("routes");
+        if (rawRoutes == null || rawRoutes.length() == 0) throw new IllegalStateException("map.ir returned no route.");
+        ArrayList<RouteResult> results = new ArrayList<>();
+        for (int i = 0; i < rawRoutes.length() && i < 3; i++) {
+            results.add(parseRoute(rawRoutes.getJSONObject(i), originLat, originLng, destinationLat, destinationLng));
         }
-        JSONObject route = routes.getJSONObject(0);
-        List<RouteStep> steps = new ArrayList<>();
+        return results;
+    }
+
+    private RouteResult parseRoute(JSONObject route, double originLat, double originLng,
+                                   double destinationLat, double destinationLng) {
+        ArrayList<RouteStep> steps = new ArrayList<>();
         JSONArray legs = route.optJSONArray("legs");
         if (legs != null && legs.length() > 0) {
             JSONArray rawSteps = legs.getJSONObject(0).optJSONArray("steps");
@@ -59,7 +58,8 @@ public class MapIrRoutingProvider implements RoutingProvider {
                 }
             }
         }
-        if (steps.isEmpty()) steps.add(new RouteStep(destinationLat, destinationLng, "رسیدن به مقصد", 0));
-        return new RouteResult(name(), route.optInt("distance"), route.optInt("duration"), route.optString("weight_name"), steps);
+        if (steps.isEmpty()) steps.add(new RouteStep(destinationLat, destinationLng, "Arrive at destination", 0));
+        return new RouteResult(name(), route.optInt("distance"), route.optInt("duration"), route.optString("weight_name"), steps,
+                RouteGeometry.fromRoute(route, steps, originLat, originLng, destinationLat, destinationLng));
     }
 }

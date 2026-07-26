@@ -95,6 +95,7 @@ public class MainActivity extends Activity {
     private int lastTrafficEtaSeconds;
     private long lastTrafficEtaMeasuredAt;
     private long routeRequestSequence;
+    private int pendingRouteOptionIndex;
     private boolean recordingOnlineSpeech;
     private boolean recordingLocalSpeech;
     private boolean runtimeKeysLoading = true;
@@ -208,13 +209,17 @@ public class MainActivity extends Activity {
         if (requestCode == REQ_MAP && resultCode == RESULT_OK && data != null) {
             if (data.getBooleanExtra(MapActivity.RESULT_START_VOICE, false)) {
                 toggleVoiceInput();
+            } else if (data.getBooleanExtra(MapActivity.RESULT_STOP_NAVIGATION, false)) {
+                stopNavigation("مسیریابی متوقف شد.");
             } else if (data.hasExtra(MapActivity.RESULT_LATITUDE) && data.hasExtra(MapActivity.RESULT_LONGITUDE)) {
                 SavedPlace destination = new SavedPlace(
                         data.getStringExtra(MapActivity.RESULT_NAME), "map_" + System.currentTimeMillis(),
                         data.getDoubleExtra(MapActivity.RESULT_LATITUDE, 0d),
                         data.getDoubleExtra(MapActivity.RESULT_LONGITUDE, 0d),
                         data.getStringExtra(MapActivity.RESULT_ADDRESS), System.currentTimeMillis(), false);
+                pendingRouteOptionIndex = Math.max(0, data.getIntExtra(MapActivity.RESULT_ROUTE_INDEX, 0));
                 startNavigation(destination);
+                if (data.getBooleanExtra(MapActivity.RESULT_OPEN_NAVIGATION_MAP, false)) openNavigationMap(destination);
             }
             return;
         }
@@ -235,6 +240,10 @@ public class MainActivity extends Activity {
     }
 
     private void openMap() {
+        if (navigationEngine.isNavigating() && activeDestination != null) {
+            openNavigationMap(activeDestination);
+            return;
+        }
         Intent intent = new Intent(this, MapActivity.class);
         Location location = locationTracker.getLastLocation();
         if (location != null) {
@@ -245,6 +254,23 @@ public class MainActivity extends Activity {
         // by GitHub Actions available to the map as a fallback.
         intent.putExtra(MapActivity.EXTRA_NESHAN_KEY, routingKey("NESHAN_API_KEY", BuildConfig.NESHAN_API_KEY));
         intent.putExtra(MapActivity.EXTRA_MAPIR_KEY, routingKey("MAPIR_API_KEY", BuildConfig.MAPIR_API_KEY));
+        startActivityForResult(intent, REQ_MAP);
+    }
+
+    private void openNavigationMap(SavedPlace destination) {
+        Intent intent = new Intent(this, MapActivity.class);
+        Location location = locationTracker.getLastLocation();
+        if (location != null) {
+            intent.putExtra(MapActivity.EXTRA_ORIGIN_LATITUDE, location.getLatitude());
+            intent.putExtra(MapActivity.EXTRA_ORIGIN_LONGITUDE, location.getLongitude());
+        }
+        intent.putExtra(MapActivity.EXTRA_NESHAN_KEY, routingKey("NESHAN_API_KEY", BuildConfig.NESHAN_API_KEY));
+        intent.putExtra(MapActivity.EXTRA_MAPIR_KEY, routingKey("MAPIR_API_KEY", BuildConfig.MAPIR_API_KEY));
+        intent.putExtra(MapActivity.EXTRA_NAVIGATION_MODE, true);
+        intent.putExtra(MapActivity.EXTRA_DESTINATION_LATITUDE, destination.latitude);
+        intent.putExtra(MapActivity.EXTRA_DESTINATION_LONGITUDE, destination.longitude);
+        intent.putExtra(MapActivity.EXTRA_DESTINATION_NAME, destination.name);
+        intent.putExtra(MapActivity.EXTRA_DESTINATION_ADDRESS, destination.address);
         startActivityForResult(intent, REQ_MAP);
     }
 
@@ -522,6 +548,8 @@ public class MainActivity extends Activity {
     private void startNavigation(SavedPlace destination) {
         intelligenceCoordinator.cancelAll();
         final long requestSequence = ++routeRequestSequence;
+        final int preferredRouteIndex = pendingRouteOptionIndex;
+        pendingRouteOptionIndex = 0;
         voiceHandler.removeCallbacks(tripAnalysisHide);
         hideTripAnalysis();
         if (!routeRepository.hasConfiguredProvider()) {
@@ -541,8 +569,10 @@ public class MainActivity extends Activity {
         }
         final double originLatitude = origin.getLatitude();
         final double originLongitude = origin.getLongitude();
-        routeRepository.getRoute(originLatitude, originLongitude, destination.latitude, destination.longitude,
-                route -> runOnUiThread(() -> {
+        routeRepository.getRoutes(originLatitude, originLongitude, destination.latitude, destination.longitude,
+                routes -> runOnUiThread(() -> {
+                    if (routes == null || routes.isEmpty()) return;
+                    RouteResult route = routes.get(Math.min(preferredRouteIndex, routes.size() - 1));
                     if (requestSequence != routeRequestSequence) return;
                     placeStore.addRecent(destination);
                     tripStore.add(new TripRecord(destination.name, originLatitude, originLongitude, destination.latitude, destination.longitude,
