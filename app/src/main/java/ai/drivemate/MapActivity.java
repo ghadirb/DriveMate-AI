@@ -8,6 +8,7 @@ import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
@@ -66,11 +67,13 @@ public class MapActivity extends Activity implements LocationListener {
     public static final String EXTRA_DESTINATION_LONGITUDE = "navigation_destination_longitude";
     public static final String EXTRA_DESTINATION_NAME = "navigation_destination_name";
     public static final String EXTRA_DESTINATION_ADDRESS = "navigation_destination_address";
+    public static final String EXTRA_NAVIGATION_ROUTE_INDEX = "navigation_route_index";
 
     private static final double DEFAULT_LATITUDE = 35.7219;
     private static final double DEFAULT_LONGITUDE = 51.3347;
     private MapView map;
     private Marker currentMarker;
+    private Marker vehicleMarker;
     private Marker destinationMarker;
     private Polyline routePolyline;
     private List<RouteResult> routeOptions = new ArrayList<>();
@@ -86,6 +89,9 @@ public class MapActivity extends Activity implements LocationListener {
     private PlaceStore placeStore;
     private LocationManager locationManager;
     private boolean navigationMode;
+    private boolean followVehicle = true;
+    private float lastBearing;
+    private int navigationRouteIndex;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -95,6 +101,7 @@ public class MapActivity extends Activity implements LocationListener {
         originLatitude = getIntent().getDoubleExtra(EXTRA_ORIGIN_LATITUDE, DEFAULT_LATITUDE);
         originLongitude = getIntent().getDoubleExtra(EXTRA_ORIGIN_LONGITUDE, DEFAULT_LONGITUDE);
         navigationMode = getIntent().getBooleanExtra(EXTRA_NAVIGATION_MODE, false);
+        navigationRouteIndex = Math.max(0, getIntent().getIntExtra(EXTRA_NAVIGATION_ROUTE_INDEX, 0));
         String neshanKey = getIntent().getStringExtra(EXTRA_NESHAN_KEY);
         String mapIrKey = getIntent().getStringExtra(EXTRA_MAPIR_KEY);
         NeshanRoutingProvider neshan = new NeshanRoutingProvider(neshanKey);
@@ -115,6 +122,10 @@ public class MapActivity extends Activity implements LocationListener {
                     getIntent().getDoubleExtra(EXTRA_DESTINATION_LONGITUDE, 0d),
                     getIntent().getStringExtra(EXTRA_DESTINATION_ADDRESS), System.currentTimeMillis(), false);
             if (active.latitude != 0d && active.longitude != 0d) selectDestinationWithOptions(active);
+            findViewById(R.id.stopMapNavigationButton).setVisibility(android.view.View.VISIBLE);
+            findViewById(R.id.drivingOverviewButton).setVisibility(android.view.View.VISIBLE);
+            findViewById(R.id.routeOptionsButton).setVisibility(android.view.View.GONE);
+            findViewById(R.id.saveMapPlaceButton).setVisibility(android.view.View.GONE);
         }
     }
 
@@ -125,6 +136,8 @@ public class MapActivity extends Activity implements LocationListener {
         findViewById(R.id.savedPlacesButton).setOnClickListener(v -> chooseSavedPlace());
         findViewById(R.id.saveMapPlaceButton).setOnClickListener(v -> saveSelectedPlace());
         findViewById(R.id.routeOptionsButton).setOnClickListener(v -> chooseRouteOption());
+        findViewById(R.id.drivingOverviewButton).setOnClickListener(v -> showRouteOverview());
+        findViewById(R.id.stopMapNavigationButton).setOnClickListener(v -> stopNavigationFromMap());
         findViewById(R.id.startMapNavigationButton).setOnClickListener(v -> {
             if (navigationMode) finish(); else startSelectedDestination();
         });
@@ -255,7 +268,8 @@ public class MapActivity extends Activity implements LocationListener {
             routeText.setText("مسیر قابل استفاده‌ای پیدا نشد.");
             return;
         }
-        selectedRoute = routeOptions.get(0);
+        selectedRoute = routeOptions.get(navigationMode
+                ? Math.min(navigationRouteIndex, routeOptions.size() - 1) : 0);
         showRoutePreview(selectedRoute);
         if (!navigationMode && routeOptions.size() > 1) chooseRouteOption();
     }
@@ -307,6 +321,7 @@ public class MapActivity extends Activity implements LocationListener {
             startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS));
             return;
         }
+        if (navigationMode) followVehicle = true;
         if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
             Location gps = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
             Location network = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
@@ -329,9 +344,58 @@ public class MapActivity extends Activity implements LocationListener {
 
     private void showCurrentMarker() {
         if (map == null) return;
+        if (navigationMode) {
+            showVehicleMarker(lastBearing);
+            return;
+        }
         if (currentMarker != null) map.removeMarker(currentMarker);
         currentMarker = new Marker(new LatLng(originLatitude, originLongitude), markerStyle(0xff2e8b57));
         map.addMarker(currentMarker);
+    }
+
+    private void showVehicleMarker(float bearing) {
+        if (map == null) return;
+        if (vehicleMarker != null) map.removeMarker(vehicleMarker);
+        vehicleMarker = new Marker(drivingPosition(), vehicleMarkerStyle(bearing));
+        map.addMarker(vehicleMarker);
+    }
+
+    private LatLng drivingPosition() {
+        if (selectedRoute == null || selectedRoute.geometry.isEmpty()) {
+            return new LatLng(originLatitude, originLongitude);
+        }
+        RoutePoint nearest = null;
+        float nearestMeters = Float.MAX_VALUE;
+        Location current = new Location("gps");
+        current.setLatitude(originLatitude);
+        current.setLongitude(originLongitude);
+        for (RoutePoint point : selectedRoute.geometry) {
+            Location candidate = new Location("route");
+            candidate.setLatitude(point.latitude);
+            candidate.setLongitude(point.longitude);
+            float meters = current.distanceTo(candidate);
+            if (meters < nearestMeters) {
+                nearestMeters = meters;
+                nearest = point;
+            }
+        }
+        return nearest != null && nearestMeters <= 45f
+                ? new LatLng(nearest.latitude, nearest.longitude)
+                : new LatLng(originLatitude, originLongitude);
+    }
+
+    private void showRouteOverview() {
+        if (map == null || selectedRoute == null || selectedRoute.geometry.isEmpty()) return;
+        followVehicle = false;
+        map.moveCamera(new LatLng(originLatitude, originLongitude), 0.25f);
+        map.setZoom(12.5f, 0.25f);
+    }
+
+    private void stopNavigationFromMap() {
+        Intent result = new Intent();
+        result.putExtra(RESULT_STOP_NAVIGATION, true);
+        setResult(RESULT_OK, result);
+        finish();
     }
 
     private void saveSelectedPlace() {
@@ -380,6 +444,29 @@ public class MapActivity extends Activity implements LocationListener {
         return builder.buildStyle();
     }
 
+    private MarkerStyle vehicleMarkerStyle(float bearing) {
+        Bitmap bitmap = Bitmap.createBitmap(96, 96, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        canvas.rotate(bearing, 48f, 48f);
+        Path arrow = new Path();
+        arrow.moveTo(48f, 8f);
+        arrow.lineTo(76f, 76f);
+        arrow.lineTo(48f, 62f);
+        arrow.lineTo(20f, 76f);
+        arrow.close();
+        paint.setColor(0xff176b87);
+        canvas.drawPath(arrow, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(4f);
+        paint.setColor(0xffffffff);
+        canvas.drawPath(arrow, paint);
+        MarkerStyleBuilder builder = new MarkerStyleBuilder();
+        builder.setSize(46f);
+        builder.setBitmap(BitmapUtils.createBitmapFromAndroidBitmap(bitmap));
+        return builder.buildStyle();
+    }
+
     private LineStyle routeLineStyle() {
         LineStyleBuilder builder = new LineStyleBuilder();
         builder.setColor(new Color((short) 23, (short) 107, (short) 135, (short) 230));
@@ -402,11 +489,12 @@ public class MapActivity extends Activity implements LocationListener {
     @Override public void onLocationChanged(Location location) {
         originLatitude = location.getLatitude();
         originLongitude = location.getLongitude();
+        if (location.hasBearing()) lastBearing = location.getBearing();
         runOnUiThread(() -> {
             showCurrentMarker();
-            if (navigationMode && map != null) {
-                map.moveCamera(new LatLng(originLatitude, originLongitude), 0.35f);
-                map.setZoom(16f, 0.35f);
+            if (navigationMode && followVehicle && map != null) {
+                map.moveCamera(drivingPosition(), 0.35f);
+                map.setZoom(17f, 0.35f);
             }
         });
     }

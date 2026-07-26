@@ -217,9 +217,10 @@ public class MainActivity extends Activity {
                         data.getDoubleExtra(MapActivity.RESULT_LATITUDE, 0d),
                         data.getDoubleExtra(MapActivity.RESULT_LONGITUDE, 0d),
                         data.getStringExtra(MapActivity.RESULT_ADDRESS), System.currentTimeMillis(), false);
-                pendingRouteOptionIndex = Math.max(0, data.getIntExtra(MapActivity.RESULT_ROUTE_INDEX, 0));
+                int selectedRouteIndex = Math.max(0, data.getIntExtra(MapActivity.RESULT_ROUTE_INDEX, 0));
+                pendingRouteOptionIndex = selectedRouteIndex;
                 startNavigation(destination);
-                if (data.getBooleanExtra(MapActivity.RESULT_OPEN_NAVIGATION_MAP, false)) openNavigationMap(destination);
+                if (data.getBooleanExtra(MapActivity.RESULT_OPEN_NAVIGATION_MAP, false)) openNavigationMap(destination, selectedRouteIndex);
             }
             return;
         }
@@ -258,6 +259,10 @@ public class MainActivity extends Activity {
     }
 
     private void openNavigationMap(SavedPlace destination) {
+        openNavigationMap(destination, 0);
+    }
+
+    private void openNavigationMap(SavedPlace destination, int selectedRouteIndex) {
         Intent intent = new Intent(this, MapActivity.class);
         Location location = locationTracker.getLastLocation();
         if (location != null) {
@@ -271,6 +276,7 @@ public class MainActivity extends Activity {
         intent.putExtra(MapActivity.EXTRA_DESTINATION_LONGITUDE, destination.longitude);
         intent.putExtra(MapActivity.EXTRA_DESTINATION_NAME, destination.name);
         intent.putExtra(MapActivity.EXTRA_DESTINATION_ADDRESS, destination.address);
+        intent.putExtra(MapActivity.EXTRA_NAVIGATION_ROUTE_INDEX, selectedRouteIndex);
         startActivityForResult(intent, REQ_MAP);
     }
 
