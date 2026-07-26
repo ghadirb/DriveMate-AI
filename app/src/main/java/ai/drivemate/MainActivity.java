@@ -812,7 +812,8 @@ public class MainActivity extends Activity {
         voiceHandler.postDelayed(localFallback, 2500L);
         onlineSpeechClient.speak(fallback, new OnlineSpeechClient.SpeechCallback() {
             @Override public void onPlayed() { runOnUiThread(() -> {
-                if (finished.compareAndSet(false, true)) setStatus("\u0645\u062a\u0646 \u0645\u0633\u06cc\u0631 \u0628\u0627 TTS \u0622\u0646\u0644\u0627\u06cc\u0646 \u067e\u062e\u0634 \u0634\u062f.");
+                if (finished.compareAndSet(false, true)) setStatus("متن مسیر با "
+                        + onlineSpeechClient.getLastTtsProvider() + " پخش شد.");
             }); }
             @Override public void onError() { runOnUiThread(localFallback); }
         });
@@ -918,7 +919,8 @@ public class MainActivity extends Activity {
         voicePlayer.interrupt();
         onlineSpeechClient.stopPlayback();
         onlineSpeechClient.speak(finalAnswer, new OnlineSpeechClient.SpeechCallback() {
-            @Override public void onPlayed() { runOnUiThread(() -> setStatus("پاسخ هوشمند با TTS آنلاین پخش شد.")); }
+            @Override public void onPlayed() { runOnUiThread(() -> setStatus("پاسخ هوشمند با "
+                    + onlineSpeechClient.getLastTtsProvider() + " پخش شد.")); }
             @Override public void onError() { runOnUiThread(() -> {
                 if (fallbackClip != null) {
                     voicePlayer.announce(fallbackClip, fallbackText);

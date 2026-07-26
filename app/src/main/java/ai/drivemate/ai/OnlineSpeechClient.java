@@ -30,6 +30,7 @@ public class OnlineSpeechClient {
     private MediaRecorder recorder;
     private File recording;
     private MediaPlayer player;
+    private volatile String lastTtsProvider = "";
 
     public OnlineSpeechClient(Context context, String buildKey) {
         this.context = context.getApplicationContext();
@@ -40,6 +41,7 @@ public class OnlineSpeechClient {
     public boolean canUseOnlineSpeech() { return gapKey() != null || liaraKey() != null; }
     /** TTS currently uses the documented GapGPT audio endpoint; Liara is STT fallback only. */
     public boolean canUseOnlineTts() { return gapKey() != null; }
+    public String getLastTtsProvider() { return lastTtsProvider; }
 
     public boolean startRecording() {
         try {
@@ -79,7 +81,7 @@ public class OnlineSpeechClient {
         speak(text, null);
     }
 
-    /** Uses GapGPT TTS first and reports failure so callers can use a local accessibility fallback. */
+    /** Uses the higher-quality Gemini TTS documented by GapGPT, then tts-1 as online fallback. */
     public void speak(String text, SpeechCallback callback) {
         String key = gapKey();
         if (key == null || text == null || text.trim().isEmpty()) {
@@ -88,27 +90,153 @@ public class OnlineSpeechClient {
         }
         new Thread(() -> {
             try {
-                JSONObject body = new JSONObject().put("model", "tts-1").put("voice", "alloy").put("input", text);
-                HttpURLConnection connection = open("https://api.gapgpt.app/v1/audio/speech", key);
+                File output;
                 try {
-                    connection.setDoOutput(true);
-                    try (OutputStream out = connection.getOutputStream()) { out.write(body.toString().getBytes(StandardCharsets.UTF_8)); }
-                    if (connection.getResponseCode() >= 300) { notifySpeechError(callback); return; }
-                    File output = new File(context.getCacheDir(), "answer.mp3");
-                    try (FileOutputStream file = new FileOutputStream(output); java.io.InputStream input = connection.getInputStream()) {
-                        byte[] buffer = new byte[8192]; int count;
-                        while ((count = input.read(buffer)) != -1) file.write(buffer, 0, count);
+                    output = synthesizeGeminiTts(text, key, true);
+                    lastTtsProvider = "Gemini TTS";
+                    Log.i(TAG, "Gemini TTS response ready");
+                } catch (Exception documentedError) {
+                    Log.w(TAG, "Documented Gemini TTS request failed; trying compatible request", documentedError);
+                    try {
+                        output = synthesizeGeminiTts(text, key, false);
+                        lastTtsProvider = "Gemini TTS";
+                        Log.i(TAG, "Gemini TTS compatible response ready");
+                    } catch (Exception compatibleError) {
+                        Log.w(TAG, "Gemini TTS unavailable; falling back to tts-1", compatibleError);
+                        output = synthesizeTts1(text, key);
+                        lastTtsProvider = "GapGPT tts-1";
                     }
-                    new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
-                        if (play(output)) {
-                            if (callback != null) callback.onPlayed();
-                        } else if (callback != null) callback.onError();
-                    });
-                } finally {
-                    connection.disconnect();
                 }
-            } catch (Exception ignored) { notifySpeechError(callback); }
+                final File playableOutput = output;
+                new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                    if (play(playableOutput)) {
+                        if (callback != null) callback.onPlayed();
+                    } else {
+                        Log.w(TAG, "Downloaded online TTS audio could not be played");
+                        if (callback != null) callback.onError();
+                    }
+                });
+            } catch (Exception error) {
+                Log.e(TAG, "All online TTS providers failed", error);
+                notifySpeechError(callback);
+            }
         }).start();
+    }
+
+    private File synthesizeGeminiTts(String text, String key, boolean documentedPayload) throws Exception {
+        JSONObject voiceConfig;
+        JSONObject speechConfig;
+        JSONObject generationConfig;
+        JSONObject body = new JSONObject();
+        if (documentedPayload) {
+            voiceConfig = new JSONObject().put("prebuilt_voice_config", new JSONObject().put("voice_name", "Kore"));
+            speechConfig = new JSONObject().put("voice_config", voiceConfig);
+            generationConfig = new JSONObject().put("response_modalities", new org.json.JSONArray().put("AUDIO"))
+                    .put("speech_config", speechConfig);
+            body.put("contents", "متن را با لحن طبیعی فارسی بخوان: " + text);
+        } else {
+            voiceConfig = new JSONObject().put("prebuiltVoiceConfig", new JSONObject().put("voiceName", "Kore"));
+            speechConfig = new JSONObject().put("voiceConfig", voiceConfig);
+            generationConfig = new JSONObject().put("responseModalities", new org.json.JSONArray().put("AUDIO"))
+                    .put("speechConfig", speechConfig);
+            body.put("contents", new org.json.JSONArray().put(new JSONObject().put("parts",
+                    new org.json.JSONArray().put(new JSONObject().put("text", "متن را با لحن طبیعی فارسی بخوان: " + text)))));
+        }
+        body.put("generationConfig", generationConfig);
+        HttpURLConnection connection = open("https://api.gapgpt.app/v1/models/gemini-2.5-pro-preview-tts:generateContent", key);
+        try {
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", "application/json");
+            try (OutputStream out = connection.getOutputStream()) { out.write(body.toString().getBytes(StandardCharsets.UTF_8)); }
+            int code = connection.getResponseCode();
+            String response = readResponse(connection, code);
+            if (code >= 300) throw new IllegalStateException("Gemini TTS HTTP " + code + ": " + compactError(response));
+            String encoded = extractGeminiAudio(response);
+            if (encoded.isEmpty()) throw new IllegalStateException("Gemini TTS response had no audio data");
+            byte[] pcm = android.util.Base64.decode(encoded, android.util.Base64.DEFAULT);
+            if (pcm.length < 64) throw new IllegalStateException("Gemini TTS audio was empty");
+            File output = new File(context.getCacheDir(), "answer-gemini.wav");
+            writePcmWav(output, pcm, 24_000);
+            return output;
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    private File synthesizeTts1(String text, String key) throws Exception {
+        JSONObject body = new JSONObject().put("model", "tts-1").put("voice", "alloy").put("input", text);
+        HttpURLConnection connection = open("https://api.gapgpt.app/v1/audio/speech", key);
+        try {
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", "application/json");
+            try (OutputStream out = connection.getOutputStream()) { out.write(body.toString().getBytes(StandardCharsets.UTF_8)); }
+            int code = connection.getResponseCode();
+            if (code >= 300) throw new IllegalStateException("tts-1 HTTP " + code + ": " + compactError(readResponse(connection, code)));
+            File output = new File(context.getCacheDir(), "answer-tts1.mp3");
+            try (FileOutputStream file = new FileOutputStream(output); java.io.InputStream input = connection.getInputStream()) {
+                byte[] buffer = new byte[8192]; int count;
+                while ((count = input.read(buffer)) != -1) file.write(buffer, 0, count);
+            }
+            if (output.length() < 64) throw new IllegalStateException("tts-1 audio was empty");
+            return output;
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    private String extractGeminiAudio(String response) throws Exception {
+        JSONObject root = new JSONObject(response);
+        org.json.JSONArray candidates = root.optJSONArray("candidates");
+        if (candidates == null || candidates.length() == 0) return "";
+        JSONObject content = candidates.getJSONObject(0).optJSONObject("content");
+        if (content == null) return "";
+        org.json.JSONArray parts = content.optJSONArray("parts");
+        if (parts == null) return "";
+        for (int i = 0; i < parts.length(); i++) {
+            JSONObject part = parts.getJSONObject(i);
+            JSONObject inline = part.optJSONObject("inlineData");
+            if (inline == null) inline = part.optJSONObject("inline_data");
+            if (inline != null) {
+                String data = inline.optString("data");
+                if (!data.trim().isEmpty()) return data;
+            }
+        }
+        return "";
+    }
+
+    private void writePcmWav(File output, byte[] pcm, int sampleRate) throws Exception {
+        int channels = 1;
+        int bitsPerSample = 16;
+        int byteRate = sampleRate * channels * bitsPerSample / 8;
+        byte[] header = new byte[44];
+        System.arraycopy("RIFF".getBytes(StandardCharsets.US_ASCII), 0, header, 0, 4);
+        putLeInt(header, 4, 36 + pcm.length);
+        System.arraycopy("WAVEfmt ".getBytes(StandardCharsets.US_ASCII), 0, header, 8, 8);
+        putLeInt(header, 16, 16);
+        putLeShort(header, 20, 1);
+        putLeShort(header, 22, channels);
+        putLeInt(header, 24, sampleRate);
+        putLeInt(header, 28, byteRate);
+        putLeShort(header, 32, channels * bitsPerSample / 8);
+        putLeShort(header, 34, bitsPerSample);
+        System.arraycopy("data".getBytes(StandardCharsets.US_ASCII), 0, header, 36, 4);
+        putLeInt(header, 40, pcm.length);
+        try (FileOutputStream stream = new FileOutputStream(output)) {
+            stream.write(header);
+            stream.write(pcm);
+        }
+    }
+
+    private void putLeInt(byte[] target, int offset, int value) {
+        target[offset] = (byte) value;
+        target[offset + 1] = (byte) (value >>> 8);
+        target[offset + 2] = (byte) (value >>> 16);
+        target[offset + 3] = (byte) (value >>> 24);
+    }
+
+    private void putLeShort(byte[] target, int offset, int value) {
+        target[offset] = (byte) value;
+        target[offset + 1] = (byte) (value >>> 8);
     }
 
     private String transcribeWithFallback(File audio) throws Exception {
@@ -239,6 +367,12 @@ public class OnlineSpeechClient {
     private String safeMessage(Exception error) {
         String message = error.getMessage();
         return message == null || message.trim().isEmpty() ? "خطای ارتباط با سرویس" : message;
+    }
+
+    private String compactError(String response) {
+        if (response == null || response.trim().isEmpty()) return "empty response";
+        String compact = response.replaceAll("\\s+", " ").trim();
+        return compact.length() > 180 ? compact.substring(0, 180) : compact;
     }
 
     private void notifySpeechError(SpeechCallback callback) {
