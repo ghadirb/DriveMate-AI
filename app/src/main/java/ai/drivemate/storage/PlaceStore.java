@@ -91,6 +91,27 @@ public class PlaceStore {
         return readList(KEY_RECENT);
     }
 
+    public void removeRecent(SavedPlace place) {
+        List<SavedPlace> updated = new ArrayList<>();
+        for (SavedPlace item : readList(KEY_RECENT)) {
+            if (!item.kind.equals(place.kind)) updated.add(item);
+        }
+        saveList(KEY_RECENT, updated);
+    }
+
+    public void renameRecent(SavedPlace place, String name) {
+        List<SavedPlace> updated = new ArrayList<>();
+        for (SavedPlace item : readList(KEY_RECENT)) {
+            if (item.kind.equals(place.kind)) {
+                updated.add(new SavedPlace(name, item.kind, item.latitude, item.longitude, item.address,
+                        System.currentTimeMillis(), item.favorite));
+            } else {
+                updated.add(item);
+            }
+        }
+        saveList(KEY_RECENT, updated);
+    }
+
     /** Replaces both saved places and the short recent-destination list from a validated backup. */
     public void restore(List<SavedPlace> places, List<SavedPlace> recent) {
         saveList(KEY_PLACES, places == null ? new ArrayList<>() : places);

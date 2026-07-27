@@ -27,8 +27,10 @@ public class DeviceLocationTracker implements LocationListener {
         Location gps = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
         Location network = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
         lastLocation = gps != null ? gps : network;
-        locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 2500L, 8f, this);
-        locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 5000L, 15f, this);
+        // Short urban blocks need denser samples than a background location indicator.
+        // NavigationEngine still debounces spoken instructions, so this does not create voice spam.
+        locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 3f, this);
+        locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 3000L, 8f, this);
     }
 
     public boolean isLocationEnabled() {

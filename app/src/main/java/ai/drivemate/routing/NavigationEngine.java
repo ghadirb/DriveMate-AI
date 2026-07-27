@@ -3,6 +3,7 @@ package ai.drivemate.routing;
 import android.location.Location;
 
 import ai.drivemate.model.RouteResult;
+import ai.drivemate.model.RoutePoint;
 import ai.drivemate.model.RouteStep;
 
 /** Keeps route progress separate from the activity so GPS updates can be handled consistently. */
@@ -22,7 +23,7 @@ public class NavigationEngine {
     private int offRouteSamples;
     private long lastInstructionAt;
     private boolean currentInstructionAnnounced;
-    private static final long MIN_MS_BETWEEN_INSTRUCTIONS = 4000L;
+    private static final long MIN_MS_BETWEEN_INSTRUCTIONS = 1800L;
     private static final float MAX_ACCURACY_FOR_ADVANCE_METERS = 60f;
 
     public void start(RouteResult route, Listener listener) {
@@ -88,6 +89,10 @@ public class NavigationEngine {
             rerouteRequested = false;
             currentInstructionAnnounced = false;
             updateTargetReference(location);
+            RouteStep next = route.steps.get(Math.min(nextStep, route.steps.size() - 1));
+            float nextDistance = location.distanceTo(asLocation(next));
+            float nextAnnounceDistance = Math.max(90f, Math.min(260f, Math.max(120f, next.distanceMeters * 0.65f)));
+            if (nextDistance <= nextAnnounceDistance) announceCurrentInstruction();
             return;
         }
         if (isReliablyOffRoute(location, meters) && !rerouteRequested) {
@@ -102,8 +107,7 @@ public class NavigationEngine {
         RouteStep step = route.steps.get(Math.min(nextStep, route.steps.size() - 1));
         String instruction = step.instruction == null ? "" : step.instruction;
         String lower = instruction.toLowerCase(java.util.Locale.ROOT);
-        return route.steps.size() > 1
-                || !(lower.contains("arriv")
+        return !(lower.contains("arriv")
                 || instruction.contains("\u0645\u0642\u0635\u062f")
                 || instruction.contains("\u0631\u0633\u06cc\u062f"));
     }
@@ -122,13 +126,34 @@ public class NavigationEngine {
         if (nextStep >= route.steps.size() - 1 || targetReference == null) return false;
         if (!location.hasAccuracy() || location.getAccuracy() > 50f) return false;
 
+        // Route geometry is much more reliable than distance to a maneuver endpoint on city streets.
+        // Two consecutive samples beyond the corridor are enough to reroute without reacting to a GPS jump.
+        float routeDistance = distanceToRoute(location);
+        float movedFromReference = location.distanceTo(targetReference);
+        if (routeDistance > 70f && movedFromReference >= 20f) {
+            offRouteSamples++;
+            return offRouteSamples >= 2;
+        }
+        if (routeDistance <= 40f) offRouteSamples = 0;
+
         // Without a route polyline, a far maneuver end point cannot be used for off-route detection.
         if (targetDistanceAtReference > 160f) return false;
-        float movedFromReference = location.distanceTo(targetReference);
         boolean movingAway = movedFromReference >= 80f
                 && targetDistance > Math.max(180f, targetDistanceAtReference + 100f);
         offRouteSamples = movingAway ? offRouteSamples + 1 : 0;
         return offRouteSamples >= 3;
+    }
+
+    private float distanceToRoute(Location location) {
+        if (route == null || route.geometry == null || route.geometry.isEmpty()) return Float.MAX_VALUE;
+        float nearest = Float.MAX_VALUE;
+        for (RoutePoint point : route.geometry) {
+            Location routePoint = new Location("route");
+            routePoint.setLatitude(point.latitude);
+            routePoint.setLongitude(point.longitude);
+            nearest = Math.min(nearest, location.distanceTo(routePoint));
+        }
+        return nearest;
     }
 
     private void updateTargetReference(Location location) {

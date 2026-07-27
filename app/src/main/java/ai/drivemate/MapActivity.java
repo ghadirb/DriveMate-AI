@@ -158,6 +158,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         turnArrowText = findViewById(R.id.turnArrowText);
         turnDistanceText = findViewById(R.id.turnDistanceText);
         turnInstructionText = findViewById(R.id.turnInstructionText);
+        turnBannerContainer.setOnClickListener(v -> showTurnByTurnSteps());
         wireControls();
         initializeMap();
         if (navigationMode) {
@@ -413,6 +414,39 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             closeSearchUi();
             selectDestinationWithOptions(place);
         });
+        if (query == null || query.trim().isEmpty()) {
+            card.setOnLongClickListener(view -> {
+                editRecentSearch(place);
+                return true;
+            });
+        }
+    }
+
+    private void editRecentSearch(SavedPlace place) {
+        new AlertDialog.Builder(this)
+                .setTitle("جست‌وجوی اخیر")
+                .setItems(new String[]{"ویرایش نام", "حذف از تاریخچه"}, (dialog, action) -> {
+                    if (action == 1) {
+                        placeStore.removeRecent(place);
+                        showRecentSearches();
+                        return;
+                    }
+                    EditText input = new EditText(this);
+                    input.setSingleLine(true);
+                    input.setText(place.name);
+                    new AlertDialog.Builder(this)
+                            .setTitle("ویرایش نام مکان")
+                            .setView(input)
+                            .setPositiveButton("ذخیره", (saveDialog, which) -> {
+                                String name = input.getText().toString().trim();
+                                if (!name.isEmpty()) placeStore.renameRecent(place, name);
+                                showRecentSearches();
+                            })
+                            .setNegativeButton("انصراف", null)
+                            .show();
+                })
+                .setNegativeButton("بستن", null)
+                .show();
     }
 
     private void showSearchResultsPanel() {
@@ -861,20 +895,57 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     private float navigationHeading() {
-        if (hasHeading) return lastBearing;
         LatLng position = drivingPosition();
         if (selectedRoute != null) {
-            for (RoutePoint point : selectedRoute.geometry) {
+            int nearestIndex = -1;
+            float nearestDistance = Float.MAX_VALUE;
+            for (int i = 0; i < selectedRoute.geometry.size(); i++) {
+                RoutePoint point = selectedRoute.geometry.get(i);
                 Location from = new Location("route");
                 from.setLatitude(position.getLatitude());
                 from.setLongitude(position.getLongitude());
                 Location to = new Location("route");
                 to.setLatitude(point.latitude);
                 to.setLongitude(point.longitude);
-                if (from.distanceTo(to) > 15f) return from.bearingTo(to);
+                float distance = from.distanceTo(to);
+                if (distance < nearestDistance) {
+                    nearestDistance = distance;
+                    nearestIndex = i;
+                }
+            }
+            if (nearestIndex >= 0) {
+                Location from = new Location("route");
+                from.setLatitude(position.getLatitude());
+                from.setLongitude(position.getLongitude());
+                float accumulated = 0f;
+                for (int i = nearestIndex + 1; i < selectedRoute.geometry.size(); i++) {
+                    RoutePoint point = selectedRoute.geometry.get(i);
+                    Location to = new Location("route");
+                    to.setLatitude(point.latitude);
+                    to.setLongitude(point.longitude);
+                    accumulated += from.distanceTo(to);
+                    if (accumulated >= 28f) return from.bearingTo(to);
+                    from = to;
+                }
             }
         }
         return lastBearing;
+    }
+
+    private void showTurnByTurnSteps() {
+        if (selectedRoute == null || selectedRoute.steps.isEmpty()) return;
+        String[] steps = new String[selectedRoute.steps.size()];
+        for (int i = 0; i < selectedRoute.steps.size(); i++) {
+            RouteStep step = selectedRoute.steps.get(i);
+            String instruction = step.instruction == null || step.instruction.trim().isEmpty()
+                    ? "ادامه مسیر" : step.instruction;
+            steps[i] = formatDistance(Math.max(0, step.distanceMeters)) + "\n" + instruction;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("راهنمای مسیر تا مقصد")
+                .setSingleChoiceItems(steps, Math.min(navigationEngine.currentStepIndex(), steps.length - 1), null)
+                .setPositiveButton("بستن", null)
+                .show();
     }
 
     private LatLng pointAhead(LatLng origin, float bearing, double meters) {

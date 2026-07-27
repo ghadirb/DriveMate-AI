@@ -45,6 +45,9 @@ public class PlaceSearchRepository {
             catch (Exception exception) { failures.add("Neshan geocoding: " + messageOf(exception)); }
             try { addUnique(results, searchNeshan(term, latitude, longitude)); }
             catch (Exception exception) { failures.add("Neshan search: " + messageOf(exception)); }
+            // The nearby-search endpoint can hide a distant Iranian village behind a local fuzzy result.
+            try { addUnique(results, searchNeshan(term, 32.4279d, 53.6880d)); }
+            catch (Exception exception) { failures.add("Neshan Iran-wide search: " + messageOf(exception)); }
             try { addUnique(results, searchMapIr(term, latitude, longitude)); }
             catch (Exception exception) { failures.add("map.ir: " + messageOf(exception)); }
 
@@ -61,7 +64,7 @@ public class PlaceSearchRepository {
         String url = "https://api.neshan.org/v4/geocoding?address=" + URLEncoder.encode(term, StandardCharsets.UTF_8.name());
         JSONObject body = RoutingHttp.getJson(url, "Api-Key", key);
         JSONObject location = body.optJSONObject("location");
-        if (location == null) return Collections.emptyList();
+        if (location == null || !isInIran(location.optDouble("y"), location.optDouble("x"))) return Collections.emptyList();
         String address = body.optString("formatted_address", body.optString("address", term));
         String title = body.optString("title", "");
         if (title.trim().isEmpty()) title = address;
@@ -79,8 +82,10 @@ public class PlaceSearchRepository {
         if (items != null) for (int i = 0; i < items.length() && i < 12; i++) {
             JSONObject item = items.optJSONObject(i);
             JSONObject location = item == null ? null : item.optJSONObject("location");
-            if (location != null) results.add(place(item.optString("title", term), searchKind(item), location.optDouble("y"),
-                    location.optDouble("x"), item.optString("address", term)));
+            if (location != null && isInIran(location.optDouble("y"), location.optDouble("x"))) {
+                results.add(place(item.optString("title", term), searchKind(item), location.optDouble("y"),
+                        location.optDouble("x"), item.optString("address", term)));
+            }
         }
         return results;
     }
@@ -98,8 +103,10 @@ public class PlaceSearchRepository {
             JSONObject item = items.optJSONObject(i);
             JSONObject geom = item == null ? null : item.optJSONObject("geom");
             JSONArray coordinates = geom == null ? null : geom.optJSONArray("coordinates");
-            if (coordinates != null) results.add(place(item.optString("title", term), searchKind(item), coordinates.optDouble(1),
-                    coordinates.optDouble(0), item.optString("address", term)));
+            if (coordinates != null && isInIran(coordinates.optDouble(1), coordinates.optDouble(0))) {
+                results.add(place(item.optString("title", term), searchKind(item), coordinates.optDouble(1),
+                        coordinates.optDouble(0), item.optString("address", term)));
+            }
         }
         return results;
     }
@@ -220,7 +227,12 @@ public class PlaceSearchRepository {
     }
 
     private SavedPlace place(String name, String kind, double latitude, double longitude, String address) {
-        return new SavedPlace(name, kind, latitude, longitude,
+        String uniqueKind = kind + "_" + Math.round(latitude * 100000d) + "_" + Math.round(longitude * 100000d);
+        return new SavedPlace(name, uniqueKind, latitude, longitude,
                 address, System.currentTimeMillis(), false);
+    }
+
+    private boolean isInIran(double latitude, double longitude) {
+        return latitude >= 24.0d && latitude <= 40.5d && longitude >= 44.0d && longitude <= 64.5d;
     }
 }
