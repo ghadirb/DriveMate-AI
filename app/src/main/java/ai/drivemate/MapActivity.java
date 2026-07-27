@@ -116,6 +116,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private boolean navigationMode;
     private boolean followVehicle = true;
     private float lastBearing;
+    private boolean hasHeading;
+    private boolean navigationCameraEnabled;
     private int navigationRouteIndex;
     private final NavigationEngine navigationEngine = new NavigationEngine();
     private final SimpleDateFormat etaFormat = new SimpleDateFormat("HH:mm", Locale.US);
@@ -127,6 +129,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private Runnable pendingSuggestionSearch;
     private int activeSearchRequest;
     private boolean selectingSearchResult;
+    private boolean orientationWarningLogged;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -158,6 +161,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         wireControls();
         initializeMap();
         if (navigationMode) {
+            navigationCameraEnabled = true;
             findViewById(R.id.startMapNavigationButton).setEnabled(true);
             ((Button) findViewById(R.id.startMapNavigationButton)).setText("بازگشت به داشبورد");
             SavedPlace active = new SavedPlace(getIntent().getStringExtra(EXTRA_DESTINATION_NAME), "active_navigation",
@@ -167,6 +171,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             if (active.latitude != 0d && active.longitude != 0d) selectDestinationWithOptions(active);
             findViewById(R.id.stopMapNavigationButton).setVisibility(View.VISIBLE);
             findViewById(R.id.drivingOverviewButton).setVisibility(View.VISIBLE);
+            findViewById(R.id.navigationCameraButton).setVisibility(View.VISIBLE);
             findViewById(R.id.routeOptionsButton).setVisibility(View.GONE);
             findViewById(R.id.saveMapPlaceButton).setVisibility(View.GONE);
             findViewById(R.id.mapSearchBarRow).setVisibility(View.GONE);
@@ -187,6 +192,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         findViewById(R.id.saveMapPlaceButton).setOnClickListener(v -> saveSelectedPlace());
         findViewById(R.id.routeOptionsButton).setOnClickListener(v -> chooseRouteOption());
         findViewById(R.id.drivingOverviewButton).setOnClickListener(v -> showRouteOverview());
+        View navigationCameraButton = findViewById(R.id.navigationCameraButton);
+        navigationCameraButton.setTooltipText("نمای رانندگی و دنبال کردن خودرو");
+        navigationCameraButton.setOnClickListener(v -> enableNavigationCamera());
         findViewById(R.id.stopMapNavigationButton).setOnClickListener(v -> stopNavigationFromMap());
         findViewById(R.id.startMapNavigationButton).setOnClickListener(v -> {
             if (navigationMode) finish(); else startSelectedDestination();
@@ -651,6 +659,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             turnInstructionText.setText("به سمت مقصد حرکت کنید");
             turnArrowText.setText("↑");
         }
+        enableNavigationCamera();
     }
 
     /** Live per-tick update: distance to the upcoming maneuver plus the driving HUD line. The
@@ -754,7 +763,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS));
             return;
         }
-        if (navigationMode) followVehicle = true;
+        if (navigationMode) {
+            followVehicle = true;
+            navigationCameraEnabled = true;
+        }
         if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
             Location gps = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
             Location network = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
@@ -764,6 +776,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                 originLongitude = latest.getLongitude();
                 showCurrentMarker();
             }
+        }
+        if (navigationMode && navigationCameraEnabled) {
+            updateNavigationCamera();
+            return;
         }
         if (map == null) return;
         map.moveCamera(new LatLng(originLatitude, originLongitude), 0.25f);
@@ -820,8 +836,79 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private void showRouteOverview() {
         if (map == null || selectedRoute == null || selectedRoute.geometry.isEmpty()) return;
         followVehicle = false;
+        navigationCameraEnabled = false;
+        applyMapOrientation(0f, 90f, 0.2f);
         map.moveCamera(new LatLng(originLatitude, originLongitude), 0.25f);
         map.setZoom(12.5f, 0.25f);
+    }
+
+    /** Restores the driver-first viewport: the vehicle stays below center and the road points up. */
+    private void enableNavigationCamera() {
+        if (!navigationMode) return;
+        navigationCameraEnabled = true;
+        followVehicle = true;
+        updateNavigationCamera();
+    }
+
+    private void updateNavigationCamera() {
+        if (map == null || !navigationMode || !navigationCameraEnabled) return;
+        float heading = navigationHeading();
+        LatLng vehiclePosition = drivingPosition();
+        LatLng cameraTarget = pointAhead(vehiclePosition, heading, 68d);
+        applyMapOrientation(heading, 58f, 0.28f);
+        map.moveCamera(cameraTarget, 0.28f);
+        map.setZoom(17.25f, 0.28f);
+    }
+
+    private float navigationHeading() {
+        if (hasHeading) return lastBearing;
+        LatLng position = drivingPosition();
+        if (selectedRoute != null) {
+            for (RoutePoint point : selectedRoute.geometry) {
+                Location from = new Location("route");
+                from.setLatitude(position.getLatitude());
+                from.setLongitude(position.getLongitude());
+                Location to = new Location("route");
+                to.setLatitude(point.latitude);
+                to.setLongitude(point.longitude);
+                if (from.distanceTo(to) > 15f) return from.bearingTo(to);
+            }
+        }
+        return lastBearing;
+    }
+
+    private LatLng pointAhead(LatLng origin, float bearing, double meters) {
+        double radians = Math.toRadians(bearing);
+        double latitude = origin.getLatitude() + (meters * Math.cos(radians) / 111320d);
+        double longitude = origin.getLongitude() + (meters * Math.sin(radians)
+                / (111320d * Math.max(0.1d, Math.cos(Math.toRadians(origin.getLatitude())))));
+        return new LatLng(latitude, longitude);
+    }
+
+    /**
+     * mobile-sdk exposes these through its Carto-backed MapView. Reflection keeps releases using
+     * an older Neshan artifact operational: they retain follow mode instead of crashing.
+     */
+    private void applyMapOrientation(float heading, float tilt, float durationSeconds) {
+        if (map == null) return;
+        try {
+            map.getClass().getMethod("setBearing", float.class, float.class)
+                    .invoke(map, heading, durationSeconds);
+        } catch (Exception ignored) {
+            logMissingOrientationSupport();
+        }
+        try {
+            map.getClass().getMethod("setTilt", float.class, float.class)
+                    .invoke(map, tilt, durationSeconds);
+        } catch (Exception ignored) {
+            logMissingOrientationSupport();
+        }
+    }
+
+    private void logMissingOrientationSupport() {
+        if (orientationWarningLogged) return;
+        orientationWarningLogged = true;
+        Log.w("DriveMateMap", "Navigation camera orientation is unavailable in this SDK build.");
     }
 
     private void stopNavigationFromMap() {
@@ -927,14 +1014,19 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     @Override public void onLocationChanged(Location location) {
         originLatitude = location.getLatitude();
         originLongitude = location.getLongitude();
-        if (location.hasBearing()) lastBearing = location.getBearing();
+        if (location.hasBearing()) {
+            lastBearing = location.getBearing();
+            hasHeading = true;
+        }
         runOnUiThread(() -> {
             showCurrentMarker();
             if (navigationMode && navigationEngine.isNavigating()) {
                 navigationEngine.onLocation(location);
                 updateTurnBanner(location);
             }
-            if (navigationMode && followVehicle && map != null) {
+            if (navigationMode && followVehicle && navigationCameraEnabled) {
+                updateNavigationCamera();
+            } else if (navigationMode && followVehicle && map != null) {
                 map.moveCamera(drivingPosition(), 0.35f);
                 map.setZoom(17f, 0.35f);
             }
