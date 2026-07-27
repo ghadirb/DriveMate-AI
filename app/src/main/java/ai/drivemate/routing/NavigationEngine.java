@@ -53,6 +53,15 @@ public class NavigationEngine {
     }
     public boolean isNavigating() { return route != null; }
 
+    /** Current maneuver target, or null when no route is active. Lets a UI show live progress
+     *  toward the same step this engine is tracking, without duplicating its step logic. */
+    public RouteStep currentStep() {
+        if (route == null || route.steps.isEmpty()) return null;
+        return route.steps.get(Math.min(nextStep, route.steps.size() - 1));
+    }
+
+    public int currentStepIndex() { return nextStep; }
+
     public void onLocation(Location location) {
         if (route == null || listener == null) return;
         if (route.steps.isEmpty()) return;

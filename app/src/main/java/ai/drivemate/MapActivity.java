@@ -15,6 +15,7 @@ import android.location.LocationManager;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.util.Log;
+import android.view.View;
 import android.view.inputmethod.EditorInfo;
 import android.widget.Button;
 import android.widget.EditText;
@@ -34,7 +35,9 @@ import org.neshan.mapsdk.MapView;
 import org.neshan.mapsdk.model.Marker;
 import org.neshan.mapsdk.model.Polyline;
 
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 
@@ -43,13 +46,14 @@ import ai.drivemate.model.RoutePoint;
 import ai.drivemate.model.RouteStep;
 import ai.drivemate.model.SavedPlace;
 import ai.drivemate.routing.MapIrRoutingProvider;
+import ai.drivemate.routing.NavigationEngine;
 import ai.drivemate.routing.NeshanRoutingProvider;
 import ai.drivemate.routing.PlaceSearchRepository;
 import ai.drivemate.routing.RouteRepository;
 import ai.drivemate.storage.PlaceStore;
 
 /** Map UI is isolated from the driving activity; it returns a selected destination to the existing engine. */
-public class MapActivity extends Activity implements LocationListener {
+public class MapActivity extends Activity implements LocationListener, NavigationEngine.Listener {
     public static final String EXTRA_ORIGIN_LATITUDE = "origin_latitude";
     public static final String EXTRA_ORIGIN_LONGITUDE = "origin_longitude";
     public static final String EXTRA_NESHAN_KEY = "neshan_key";
@@ -92,6 +96,12 @@ public class MapActivity extends Activity implements LocationListener {
     private boolean followVehicle = true;
     private float lastBearing;
     private int navigationRouteIndex;
+    private final NavigationEngine navigationEngine = new NavigationEngine();
+    private final SimpleDateFormat etaFormat = new SimpleDateFormat("HH:mm", Locale.US);
+    private View turnBannerContainer;
+    private TextView turnArrowText;
+    private TextView turnDistanceText;
+    private TextView turnInstructionText;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -112,6 +122,10 @@ public class MapActivity extends Activity implements LocationListener {
         destinationText = findViewById(R.id.mapDestinationText);
         routeText = findViewById(R.id.mapRouteText);
         searchText = findViewById(R.id.mapSearchText);
+        turnBannerContainer = findViewById(R.id.turnBannerContainer);
+        turnArrowText = findViewById(R.id.turnArrowText);
+        turnDistanceText = findViewById(R.id.turnDistanceText);
+        turnInstructionText = findViewById(R.id.turnInstructionText);
         wireControls();
         initializeMap();
         if (navigationMode) {
@@ -122,10 +136,12 @@ public class MapActivity extends Activity implements LocationListener {
                     getIntent().getDoubleExtra(EXTRA_DESTINATION_LONGITUDE, 0d),
                     getIntent().getStringExtra(EXTRA_DESTINATION_ADDRESS), System.currentTimeMillis(), false);
             if (active.latitude != 0d && active.longitude != 0d) selectDestinationWithOptions(active);
-            findViewById(R.id.stopMapNavigationButton).setVisibility(android.view.View.VISIBLE);
-            findViewById(R.id.drivingOverviewButton).setVisibility(android.view.View.VISIBLE);
-            findViewById(R.id.routeOptionsButton).setVisibility(android.view.View.GONE);
-            findViewById(R.id.saveMapPlaceButton).setVisibility(android.view.View.GONE);
+            findViewById(R.id.stopMapNavigationButton).setVisibility(View.VISIBLE);
+            findViewById(R.id.drivingOverviewButton).setVisibility(View.VISIBLE);
+            findViewById(R.id.routeOptionsButton).setVisibility(View.GONE);
+            findViewById(R.id.saveMapPlaceButton).setVisibility(View.GONE);
+            findViewById(R.id.mapSearchBarRow).setVisibility(View.GONE);
+            findViewById(R.id.savedPlacesButton).setVisibility(View.GONE);
         }
     }
 
@@ -271,6 +287,7 @@ public class MapActivity extends Activity implements LocationListener {
         selectedRoute = routeOptions.get(navigationMode
                 ? Math.min(navigationRouteIndex, routeOptions.size() - 1) : 0);
         showRoutePreview(selectedRoute);
+        if (navigationMode) startTurnByTurn(selectedRoute);
         if (!navigationMode && routeOptions.size() > 1) chooseRouteOption();
     }
 
@@ -313,6 +330,119 @@ public class MapActivity extends Activity implements LocationListener {
                 map.setZoom(12.5f, 0.25f);
             }
         }
+    }
+
+    /** Starts real turn-by-turn tracking for the active route: shows the first maneuver right
+     *  away and keeps the banner in sync with this activity's own location stream. This engine
+     *  instance is independent from MainActivity's (which drives voice guidance), so opening or
+     *  closing the map never disturbs the background voice session. */
+    private void startTurnByTurn(RouteResult route) {
+        Location current = new Location("gps");
+        current.setLatitude(originLatitude);
+        current.setLongitude(originLongitude);
+        current.setBearing(lastBearing);
+        navigationEngine.start(route, this, current);
+        turnBannerContainer.setVisibility(View.VISIBLE);
+        turnDistanceText.setText("");
+        if (!navigationEngine.announceCurrentInstruction()) {
+            turnInstructionText.setText("به سمت مقصد حرکت کنید");
+            turnArrowText.setText("↑");
+        }
+    }
+
+    /** Live per-tick update: distance to the upcoming maneuver plus the driving HUD line. The
+     *  instruction text itself only changes through onInstruction, so it never flickers between
+     *  GPS samples. */
+    private void updateTurnBanner(Location location) {
+        RouteStep step = navigationEngine.currentStep();
+        if (step == null) return;
+        Location target = new Location("route");
+        target.setLatitude(step.latitude);
+        target.setLongitude(step.longitude);
+        float metersToTurn = location.distanceTo(target);
+        turnDistanceText.setText(formatDistance(Math.round(metersToTurn)));
+        updateDrivingHud(metersToTurn);
+    }
+
+    /** Approximates remaining distance/time by adding the live distance to the next maneuver to
+     *  the provider's per-step distances for every maneuver still ahead, then scales the route's
+     *  total duration by that same fraction. It is an estimate (no live traffic per segment), but
+     *  it moves with the car instead of freezing at the numbers shown when the route was chosen. */
+    private void updateDrivingHud(float metersToCurrentTarget) {
+        if (selectedRoute == null || selectedRoute.steps.isEmpty()) return;
+        int index = navigationEngine.currentStepIndex();
+        int remainingMeters = Math.round(metersToCurrentTarget);
+        for (int i = index + 1; i < selectedRoute.steps.size(); i++) {
+            remainingMeters += selectedRoute.steps.get(i).distanceMeters;
+        }
+        int totalMeters = Math.max(1, selectedRoute.distanceMeters);
+        double fraction = Math.max(0.02, Math.min(1.0, remainingMeters / (double) totalMeters));
+        int remainingSeconds = (int) Math.round(selectedRoute.durationSeconds * fraction);
+        long arrivalAt = System.currentTimeMillis() + remainingSeconds * 1000L;
+        routeText.setText(formatDistance(remainingMeters) + " مانده • "
+                + formatDuration(remainingSeconds) + " دیگر • رسیدن ساعت " + etaFormat.format(new Date(arrivalAt)));
+    }
+
+    private String formatDistance(int meters) {
+        if (meters < 1000) return Math.max(0, meters) + " متر";
+        return String.format(Locale.US, "%.1f کیلومتر", meters / 1000.0);
+    }
+
+    private String formatDuration(int seconds) {
+        int minutes = Math.max(1, Math.round(seconds / 60f));
+        return minutes + " دقیقه";
+    }
+
+    /** Provider instructions are free-form Persian text (no maneuver-type enum), so the arrow is a
+     *  best-effort keyword match rather than an exact turn code. */
+    private String arrowForInstruction(String instruction) {
+        if (instruction == null) return "↑";
+        if (instruction.contains("راست")) return "↗";
+        if (instruction.contains("چپ")) return "↖";
+        if (instruction.contains("دوربرگردان") || instruction.contains("برگردان")) return "↺";
+        if (instruction.contains("خروج")) return "⤴";
+        if (instruction.contains("میدان") || instruction.contains("فلکه")) return "↻";
+        return "↑";
+    }
+
+    /** Re-fetches a route from the current position after an off-route detection and restarts
+     *  turn-by-turn on it, instead of silently continuing to track a maneuver the driver has
+     *  already left behind. */
+    private void recalculateActiveRoute() {
+        if (destination == null) return;
+        routeRepository.getRoute(originLatitude, originLongitude, destination.latitude, destination.longitude,
+                route -> runOnUiThread(() -> {
+                    selectedRoute = route;
+                    showRoutePreview(route);
+                    startTurnByTurn(route);
+                }),
+                error -> runOnUiThread(() -> turnInstructionText.setText("بازیابی مسیر انجام نشد: " + error)));
+    }
+
+    @Override public void onInstruction(RouteStep step) {
+        runOnUiThread(() -> {
+            String instruction = step.instruction == null || step.instruction.isEmpty()
+                    ? "ادامه در مسیر" : step.instruction;
+            turnInstructionText.setText(instruction);
+            turnArrowText.setText(arrowForInstruction(instruction));
+        });
+    }
+
+    @Override public void onOffRoute() {
+        runOnUiThread(() -> {
+            turnInstructionText.setText("در حال محاسبه مجدد مسیر...");
+            turnArrowText.setText("↻");
+        });
+        recalculateActiveRoute();
+    }
+
+    @Override public void onArrived() {
+        runOnUiThread(() -> {
+            turnInstructionText.setText("به مقصد رسیدید");
+            turnDistanceText.setText("");
+            turnArrowText.setText("●");
+            routeText.setText("سفر به پایان رسید.");
+        });
     }
 
     private void focusOrigin() {
@@ -392,6 +522,7 @@ public class MapActivity extends Activity implements LocationListener {
     }
 
     private void stopNavigationFromMap() {
+        navigationEngine.stop();
         Intent result = new Intent();
         result.putExtra(RESULT_STOP_NAVIGATION, true);
         setResult(RESULT_OK, result);
@@ -478,7 +609,11 @@ public class MapActivity extends Activity implements LocationListener {
     @Override protected void onResume() {
         super.onResume();
         if (locationManager == null || checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) return;
-        if (isLocationEnabled()) locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 2500L, 8f, this);
+        if (isLocationEnabled()) {
+            long minTimeMs = navigationMode ? 1000L : 2500L;
+            float minDistanceM = navigationMode ? 4f : 8f;
+            locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, minTimeMs, minDistanceM, this);
+        }
     }
 
     @Override protected void onPause() {
@@ -492,6 +627,10 @@ public class MapActivity extends Activity implements LocationListener {
         if (location.hasBearing()) lastBearing = location.getBearing();
         runOnUiThread(() -> {
             showCurrentMarker();
+            if (navigationMode && navigationEngine.isNavigating()) {
+                navigationEngine.onLocation(location);
+                updateTurnBanner(location);
+            }
             if (navigationMode && followVehicle && map != null) {
                 map.moveCamera(drivingPosition(), 0.35f);
                 map.setZoom(17f, 0.35f);
