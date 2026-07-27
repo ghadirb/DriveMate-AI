@@ -48,8 +48,12 @@ public class PlaceSearchRepository {
             // The nearby-search endpoint can hide a distant Iranian village behind a local fuzzy result.
             try { addUnique(results, searchNeshan(term, 32.4279d, 53.6880d)); }
             catch (Exception exception) { failures.add("Neshan Iran-wide search: " + messageOf(exception)); }
-            try { addUnique(results, searchMapIr(term, latitude, longitude)); }
-            catch (Exception exception) { failures.add("map.ir: " + messageOf(exception)); }
+            // map.ir /search/v2 performs a full address/place search; autocomplete is retained
+            // only for live typing suggestions because it intentionally favors fuzzy prefixes.
+            try { addUnique(results, searchMapIrExact(term)); }
+            catch (Exception exception) { failures.add("map.ir search: " + messageOf(exception)); }
+            try { addUnique(results, searchMapIrAutocomplete(term, latitude, longitude)); }
+            catch (Exception exception) { failures.add("map.ir autocomplete: " + messageOf(exception)); }
 
             rank(results, term, latitude, longitude);
             results = keepBestMatchTier(results, term);
@@ -90,12 +94,24 @@ public class PlaceSearchRepository {
         return results;
     }
 
-    private List<SavedPlace> searchMapIr(String term, double latitude, double longitude) throws Exception {
+    private List<SavedPlace> searchMapIrExact(String term) throws Exception {
+        String key = mapir.apiKey();
+        if (key == null) throw new IllegalStateException("map.ir API key is not configured.");
+        JSONObject request = new JSONObject();
+        request.put("text", term);
+        request.put("select", "poi,city,roads,neighborhood,county,district,province,natural");
+        return mapIrPlaces(RoutingHttp.postJson("https://map.ir/search/v2", "x-api-key", key, request), term);
+    }
+
+    private List<SavedPlace> searchMapIrAutocomplete(String term, double latitude, double longitude) throws Exception {
         String key = mapir.apiKey();
         if (key == null) throw new IllegalStateException("map.ir API key is not configured.");
         String url = "https://map.ir/search/v2/autocomplete?text=" + URLEncoder.encode(term, StandardCharsets.UTF_8.name())
                 + "&lat=" + latitude + "&lon=" + longitude;
-        JSONObject body = RoutingHttp.getJson(url, "x-api-key", key);
+        return mapIrPlaces(RoutingHttp.getJson(url, "x-api-key", key), term);
+    }
+
+    private List<SavedPlace> mapIrPlaces(JSONObject body, String term) {
         JSONArray items = body.optJSONArray("value");
         if (items == null) items = body.optJSONArray("items");
         ArrayList<SavedPlace> results = new ArrayList<>();

@@ -839,7 +839,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private void showVehicleMarker(float bearing) {
         if (map == null) return;
         if (vehicleMarker != null) map.removeMarker(vehicleMarker);
-        vehicleMarker = new Marker(drivingPosition(), vehicleMarkerStyle(bearing));
+        vehicleMarker = new Marker(drivingPosition(), vehicleMarkerStyle(navigationCameraEnabled ? 0f : bearing));
         map.addMarker(vehicleMarker);
     }
 
@@ -889,7 +889,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         float heading = navigationHeading();
         LatLng vehiclePosition = drivingPosition();
         LatLng cameraTarget = pointAhead(vehiclePosition, heading, 68d);
-        applyMapOrientation(heading, 58f, 0.28f);
+        // Neshan applies this as map rotation; invert the travel heading so the road ahead is up.
+        applyMapOrientation(-heading, 58f, 0.28f);
         map.moveCamera(cameraTarget, 0.28f);
         map.setZoom(17.25f, 0.28f);
     }

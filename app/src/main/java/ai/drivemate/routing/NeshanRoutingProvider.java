@@ -55,14 +55,22 @@ public class NeshanRoutingProvider implements RoutingProvider {
         JSONArray rawSteps = leg.optJSONArray("steps");
         if (rawSteps != null) for (int i = 0; i < rawSteps.length(); i++) {
             JSONObject step = rawSteps.optJSONObject(i);
-            JSONObject end = step == null ? null : step.optJSONObject("end_location");
-            if (end != null) {
-                JSONObject stepDistance = step.optJSONObject("distance");
-                steps.add(new RouteStep(end.optDouble("lat"), end.optDouble("lng"), step.optString("instruction"),
+            if (step == null || "arrive".equalsIgnoreCase(step.optString("type"))) continue;
+            JSONObject stepDistance = step.optJSONObject("distance");
+            JSONObject end = step.optJSONObject("end_location");
+            JSONArray start = step.optJSONArray("start_location");
+            double latitude = end != null ? end.optDouble("lat", Double.NaN)
+                    : (start == null ? Double.NaN : start.optDouble(1, Double.NaN));
+            double longitude = end != null ? end.optDouble("lng", Double.NaN)
+                    : (start == null ? Double.NaN : start.optDouble(0, Double.NaN));
+            if (!Double.isNaN(latitude) && !Double.isNaN(longitude)) {
+                steps.add(new RouteStep(latitude, longitude, step.optString("instruction"),
                         stepDistance == null ? 0 : stepDistance.optInt("value")));
             }
         }
-        if (steps.isEmpty()) steps.add(new RouteStep(destinationLat, destinationLng, "Arrive at destination", 0));
+        // Neshan step coordinates mark the start of each maneuver. Keep arrival at the real
+        // destination instead of the start of the provider's final arrive step.
+        steps.add(new RouteStep(destinationLat, destinationLng, "Arrive at destination", 0));
         return new RouteResult(name(), distance, duration, leg.optString("summary"), steps,
                 RouteGeometry.fromRoute(route, steps, originLat, originLng, destinationLat, destinationLng));
     }
