@@ -49,6 +49,7 @@ public class PlaceSearchRepository {
             catch (Exception exception) { failures.add("map.ir: " + messageOf(exception)); }
 
             rank(results, term, latitude, longitude);
+            results = keepBestMatchTier(results, term);
             if (!results.isEmpty()) success.onSuccess(results.subList(0, Math.min(12, results.size())));
             else error.onError("Search failed. " + join(failures));
         }).start();
@@ -64,7 +65,7 @@ public class PlaceSearchRepository {
         String address = body.optString("formatted_address", body.optString("address", term));
         String title = body.optString("title", "");
         if (title.trim().isEmpty()) title = address;
-        return Collections.singletonList(place(title, location.optDouble("y"), location.optDouble("x"), address));
+        return Collections.singletonList(place(title, "search_geocoding", location.optDouble("y"), location.optDouble("x"), address));
     }
 
     private List<SavedPlace> searchNeshan(String term, double latitude, double longitude) throws Exception {
@@ -78,7 +79,7 @@ public class PlaceSearchRepository {
         if (items != null) for (int i = 0; i < items.length() && i < 12; i++) {
             JSONObject item = items.optJSONObject(i);
             JSONObject location = item == null ? null : item.optJSONObject("location");
-            if (location != null) results.add(place(item.optString("title", term), location.optDouble("y"),
+            if (location != null) results.add(place(item.optString("title", term), searchKind(item), location.optDouble("y"),
                     location.optDouble("x"), item.optString("address", term)));
         }
         return results;
@@ -97,7 +98,7 @@ public class PlaceSearchRepository {
             JSONObject item = items.optJSONObject(i);
             JSONObject geom = item == null ? null : item.optJSONObject("geom");
             JSONArray coordinates = geom == null ? null : geom.optJSONArray("coordinates");
-            if (coordinates != null) results.add(place(item.optString("title", term), coordinates.optDouble(1),
+            if (coordinates != null) results.add(place(item.optString("title", term), searchKind(item), coordinates.optDouble(1),
                     coordinates.optDouble(0), item.optString("address", term)));
         }
         return results;
@@ -109,6 +110,34 @@ public class PlaceSearchRepository {
                 .thenComparing(place -> place.name == null ? "" : place.name));
     }
 
+    /**
+     * A typo-tolerant provider may return a nearby but unrelated name before an exact village.
+     * Do not show fuzzy matches at all while there is a true exact, prefix, or whole-word match.
+     */
+    private ArrayList<SavedPlace> keepBestMatchTier(List<SavedPlace> places, String rawQuery) {
+        String query = normalize(rawQuery);
+        int bestTier = 0;
+        for (SavedPlace place : places) bestTier = Math.max(bestTier, matchTier(place, query));
+        ArrayList<SavedPlace> filtered = new ArrayList<>();
+        for (SavedPlace place : places) {
+            if (bestTier == 0 || matchTier(place, query) == bestTier) filtered.add(place);
+        }
+        return filtered;
+    }
+
+    private int matchTier(SavedPlace place, String query) {
+        String name = normalize(place.name);
+        String address = normalize(place.address);
+        if (name.equals(query) || address.equals(query)) return 3;
+        if (name.startsWith(query) || address.startsWith(query)) return 2;
+        if (hasWholePhrase(name, query) || hasWholePhrase(address, query)) return 1;
+        return 0;
+    }
+
+    private boolean hasWholePhrase(String text, String phrase) {
+        return (" " + text + " ").contains(" " + phrase + " ");
+    }
+
     private int score(SavedPlace place, String query, double originLatitude, double originLongitude) {
         String name = normalize(place.name);
         String address = normalize(place.address);
@@ -116,8 +145,11 @@ public class PlaceSearchRepository {
         if (name.equals(query)) score += 12000;
         else if (address.equals(query)) score += 11000;
         else if (name.startsWith(query)) score += 7000;
-        else if (name.contains(query)) score += 5500;
-        else if (address.contains(query)) score += 3500;
+        else if (address.startsWith(query)) score += 6000;
+        else if (containsWholeQueryWord(name, query)) score += 5000;
+        else if (containsWholeQueryWord(address, query)) score += 4000;
+        else if (name.contains(query)) score += 800;
+        else if (address.contains(query)) score += 400;
         for (String token : query.split(" ")) {
             if (token.length() < 2) continue;
             if (name.equals(token)) score += 4000;
@@ -125,7 +157,23 @@ public class PlaceSearchRepository {
             else if (name.contains(token) || address.contains(token)) score += 700;
         }
         double distanceKm = distanceKm(originLatitude, originLongitude, place.latitude, place.longitude);
-        return score + Math.max(0, 250 - (int) Math.min(250, distanceKm));
+        return score + administrativeImportance(place) + Math.max(0, 250 - (int) Math.min(250, distanceKm));
+    }
+
+    private boolean containsWholeQueryWord(String text, String query) {
+        return hasWholePhrase(text, query);
+    }
+
+    /** Provider responses do not currently expose population, so administrative type is the stable tie-breaker. */
+    private int administrativeImportance(SavedPlace place) {
+        String value = normalize(place.name + " " + place.address);
+        if (value.contains("استان")) return 120;
+        if (value.contains("شهرستان")) return 100;
+        if (value.contains("شهر")) return 80;
+        if (value.contains("بخش")) return 60;
+        if (value.contains("دهستان")) return 40;
+        if (value.contains("روستا")) return 20;
+        return 0;
     }
 
     private void addUnique(List<SavedPlace> target, List<SavedPlace> additions) {
@@ -166,8 +214,13 @@ public class PlaceSearchRepository {
         return message == null || message.trim().isEmpty() ? "Unknown error" : message;
     }
 
-    private SavedPlace place(String name, double latitude, double longitude, String address) {
-        return new SavedPlace(name, "search_" + System.currentTimeMillis() + "_" + latitude, latitude, longitude,
+    private String searchKind(JSONObject item) {
+        String kind = item.optString("type", item.optString("category", item.optString("class", "place")));
+        return "search_" + (kind == null || kind.trim().isEmpty() ? "place" : kind.trim());
+    }
+
+    private SavedPlace place(String name, String kind, double latitude, double longitude, String address) {
+        return new SavedPlace(name, kind, latitude, longitude,
                 address, System.currentTimeMillis(), false);
     }
 }

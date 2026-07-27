@@ -5,21 +5,35 @@ import android.app.AlertDialog;
 import android.Manifest;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.Typeface;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
+import android.text.Editable;
+import android.text.SpannableString;
+import android.text.TextWatcher;
+import android.text.style.ForegroundColorSpan;
+import android.text.style.StyleSpan;
 import android.util.Log;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -29,6 +43,7 @@ import com.carto.styles.LineStyleBuilder;
 import com.carto.styles.MarkerStyle;
 import com.carto.styles.MarkerStyleBuilder;
 import com.carto.utils.BitmapUtils;
+import com.google.android.material.card.MaterialCardView;
 
 import org.neshan.common.model.LatLng;
 import org.neshan.mapsdk.MapView;
@@ -38,8 +53,10 @@ import org.neshan.mapsdk.model.Polyline;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 import ai.drivemate.model.RouteResult;
 import ai.drivemate.model.RoutePoint;
@@ -85,6 +102,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private TextView destinationText;
     private TextView routeText;
     private EditText searchText;
+    private Button searchClearButton;
+    private ProgressBar searchProgress;
+    private ScrollView searchResultsPanel;
+    private LinearLayout searchResultsContent;
     private SavedPlace destination;
     private double originLatitude;
     private double originLongitude;
@@ -102,6 +123,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private TextView turnArrowText;
     private TextView turnDistanceText;
     private TextView turnInstructionText;
+    private final Handler searchHandler = new Handler(Looper.getMainLooper());
+    private Runnable pendingSuggestionSearch;
+    private int activeSearchRequest;
+    private boolean selectingSearchResult;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -122,6 +147,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         destinationText = findViewById(R.id.mapDestinationText);
         routeText = findViewById(R.id.mapRouteText);
         searchText = findViewById(R.id.mapSearchText);
+        searchClearButton = findViewById(R.id.mapSearchClearButton);
+        searchProgress = findViewById(R.id.mapSearchProgress);
+        searchResultsPanel = findViewById(R.id.searchResultsPanel);
+        searchResultsContent = findViewById(R.id.searchResultsContent);
         turnBannerContainer = findViewById(R.id.turnBannerContainer);
         turnArrowText = findViewById(R.id.turnArrowText);
         turnDistanceText = findViewById(R.id.turnDistanceText);
@@ -147,6 +176,11 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     private void wireControls() {
         findViewById(R.id.mapSearchButton).setOnClickListener(v -> searchDestinations());
+        searchClearButton.setOnClickListener(v -> {
+            searchText.setText("");
+            searchText.requestFocus();
+            showRecentSearches();
+        });
         findViewById(R.id.mapCloseButton).setOnClickListener(v -> finish());
         findViewById(R.id.myLocationButton).setOnClickListener(v -> focusOrigin());
         findViewById(R.id.savedPlacesButton).setOnClickListener(v -> chooseSavedPlace());
@@ -160,6 +194,31 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         searchText.setOnEditorActionListener((v, actionId, event) -> {
             if (actionId == EditorInfo.IME_ACTION_SEARCH) { searchDestinations(); return true; }
             return false;
+        });
+        searchText.setOnFocusChangeListener((view, focused) -> {
+            if (focused && searchText.getText().toString().trim().isEmpty()) showRecentSearches();
+        });
+        searchText.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence value, int start, int count, int after) { }
+            @Override public void onTextChanged(CharSequence value, int start, int before, int count) {
+                String term = value == null ? "" : value.toString().trim();
+                searchClearButton.setVisibility(term.isEmpty() ? View.GONE : View.VISIBLE);
+                if (selectingSearchResult) return;
+                activeSearchRequest++;
+                if (pendingSuggestionSearch != null) searchHandler.removeCallbacks(pendingSuggestionSearch);
+                if (term.isEmpty()) {
+                    setSearchLoading(false);
+                    showRecentSearches();
+                    return;
+                }
+                if (term.length() < 2) {
+                    hideSearchResults();
+                    return;
+                }
+                pendingSuggestionSearch = () -> performSearch(term, false);
+                searchHandler.postDelayed(pendingSuggestionSearch, 350L);
+            }
+            @Override public void afterTextChanged(Editable value) { }
         });
     }
 
@@ -202,27 +261,271 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private void searchDestinations() {
         String term = searchText.getText().toString().trim();
         if (term.isEmpty()) {
-            Toast.makeText(this, "نام یا آدرس مقصد را وارد کنید.", Toast.LENGTH_SHORT).show();
+            showRecentSearches();
             return;
         }
-        routeText.setText("در حال جست‌وجوی مقصد...");
-        placeSearchRepository.searchAll(term, originLatitude, originLongitude,
-                places -> runOnUiThread(() -> showSearchResults(places)),
-                error -> runOnUiThread(() -> routeText.setText(error)));
+        if (pendingSuggestionSearch != null) searchHandler.removeCallbacks(pendingSuggestionSearch);
+        performSearch(term, true);
     }
 
-    private void showSearchResults(List<SavedPlace> places) {
+    private void performSearch(String term, boolean userInitiated) {
+        final int requestId = ++activeSearchRequest;
+        setSearchLoading(true);
+        if (userInitiated) routeText.setText("در حال جست‌وجوی مقصد...");
+        placeSearchRepository.searchAll(term, originLatitude, originLongitude,
+                places -> runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed() || requestId != activeSearchRequest) return;
+                    setSearchLoading(false);
+                    showSearchResults(places, term);
+                }),
+                error -> runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed() || requestId != activeSearchRequest) return;
+                    setSearchLoading(false);
+                    if (userInitiated) routeText.setText(error);
+                    hideSearchResults();
+                }));
+    }
+
+    private void showSearchResults(List<SavedPlace> places, String query) {
         if (places == null || places.isEmpty()) {
-            routeText.setText("نتیجه‌ای پیدا نشد.");
+            searchResultsContent.removeAllViews();
+            addSectionTitle("نتیجه‌ای پیدا نشد");
+            showSearchResultsPanel();
             return;
         }
-        String[] labels = new String[places.size()];
-        for (int i = 0; i < places.size(); i++) {
-            SavedPlace place = places.get(i);
-            labels[i] = place.name + (place.address == null || place.address.isEmpty() ? "" : "\n" + place.address);
+        searchResultsContent.removeAllViews();
+        LinkedHashMap<String, List<SavedPlace>> groups = new LinkedHashMap<>();
+        for (SavedPlace place : places) {
+            String group = placeGroup(place);
+            List<SavedPlace> groupItems = groups.get(group);
+            if (groupItems == null) {
+                groupItems = new ArrayList<>();
+                groups.put(group, groupItems);
+            }
+            groupItems.add(place);
         }
-        new AlertDialog.Builder(this).setTitle("انتخاب مقصد")
-                .setItems(labels, (dialog, which) -> selectDestinationWithOptions(places.get(which))).show();
+        for (Map.Entry<String, List<SavedPlace>> entry : groups.entrySet()) {
+            addSectionTitle(entry.getKey());
+            for (SavedPlace place : entry.getValue()) addSearchResultCard(place, query);
+        }
+        showSearchResultsPanel();
+    }
+
+    private void showRecentSearches() {
+        if (navigationMode) return;
+        List<SavedPlace> recent = placeStore.recentPlaces();
+        if (recent == null || recent.isEmpty()) {
+            hideSearchResults();
+            return;
+        }
+        searchResultsContent.removeAllViews();
+        addSectionTitle("جست‌وجوهای اخیر");
+        int limit = Math.min(6, recent.size());
+        for (int i = 0; i < limit; i++) addSearchResultCard(recent.get(i), "");
+        showSearchResultsPanel();
+    }
+
+    private void addSectionTitle(String title) {
+        TextView header = new TextView(this);
+        header.setText(title);
+        header.setTextColor(0xff3f5362);
+        header.setTextSize(14f);
+        header.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        header.setPadding(dp(8), dp(10), dp(8), dp(4));
+        searchResultsContent.addView(header, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
+
+    private void addSearchResultCard(SavedPlace place, String query) {
+        MaterialCardView card = new MaterialCardView(this);
+        card.setCardElevation(dp(2));
+        card.setRadius(dp(14));
+        card.setStrokeWidth(dp(1));
+        card.setStrokeColor(0xffd9e2e8);
+        card.setCardBackgroundColor(0xffffffff);
+        card.setRippleColor(ColorStateList.valueOf(0x223d8fb0));
+        card.setClickable(true);
+        card.setFocusable(true);
+        card.setUseCompatPadding(true);
+        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        cardParams.setMargins(0, dp(3), 0, dp(7));
+        searchResultsContent.addView(card, cardParams);
+
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setPadding(dp(14), dp(12), dp(12), dp(12));
+        card.addView(row, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView icon = new TextView(this);
+        icon.setText(placeIcon(place));
+        icon.setGravity(android.view.Gravity.CENTER);
+        icon.setTextSize(23f);
+        icon.setTextColor(0xff176b87);
+        row.addView(icon, new LinearLayout.LayoutParams(dp(38), dp(46)));
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(8), 0, dp(4), 0);
+        row.addView(content, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView title = new TextView(this);
+        title.setText(highlight(place.name == null ? "مکان بدون نام" : place.name, query));
+        title.setTextColor(0xff16222b);
+        title.setTextSize(17f);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        title.setMaxLines(1);
+        content.addView(title);
+
+        String hierarchy = administrativeHierarchy(place);
+        if (!hierarchy.isEmpty()) {
+            TextView subtitle = new TextView(this);
+            subtitle.setText(highlight(hierarchy, query));
+            subtitle.setTextColor(0xff566a78);
+            subtitle.setTextSize(13f);
+            subtitle.setMaxLines(3);
+            subtitle.setPadding(0, dp(3), 0, 0);
+            content.addView(subtitle);
+        }
+
+        TextView metadata = new TextView(this);
+        metadata.setText("\u2570 " + formatDistance(place) + " - " + placeTypeLabel(place));
+        metadata.setTextColor(0xff71838e);
+        metadata.setTextSize(12f);
+        metadata.setPadding(0, dp(6), 0, 0);
+        content.addView(metadata);
+
+        card.setOnClickListener(view -> {
+            placeStore.addRecent(place);
+            selectingSearchResult = true;
+            searchText.setText(place.name == null ? "" : place.name);
+            selectingSearchResult = false;
+            closeSearchUi();
+            selectDestinationWithOptions(place);
+        });
+    }
+
+    private void showSearchResultsPanel() {
+        if (searchResultsPanel.getVisibility() != View.VISIBLE) {
+            searchResultsPanel.setAlpha(0f);
+            searchResultsPanel.setVisibility(View.VISIBLE);
+            searchResultsPanel.animate().alpha(1f).setDuration(160L).start();
+        }
+        searchResultsPanel.post(() -> searchResultsPanel.fullScroll(View.FOCUS_UP));
+    }
+
+    private void hideSearchResults() {
+        if (searchResultsPanel.getVisibility() != View.VISIBLE) return;
+        searchResultsPanel.animate().alpha(0f).setDuration(120L).withEndAction(() -> {
+            searchResultsPanel.setVisibility(View.GONE);
+            searchResultsPanel.setAlpha(1f);
+        }).start();
+    }
+
+    private void closeSearchUi() {
+        if (pendingSuggestionSearch != null) searchHandler.removeCallbacks(pendingSuggestionSearch);
+        activeSearchRequest++;
+        setSearchLoading(false);
+        hideSearchResults();
+        searchText.clearFocus();
+        InputMethodManager keyboard = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        if (keyboard != null) keyboard.hideSoftInputFromWindow(searchText.getWindowToken(), 0);
+    }
+
+    private void setSearchLoading(boolean loading) {
+        searchProgress.setVisibility(loading ? View.VISIBLE : View.GONE);
+    }
+
+    private String placeGroup(SavedPlace place) {
+        String type = placeTypeLabel(place);
+        return "مکان‌های " + type;
+    }
+
+    private String placeTypeLabel(SavedPlace place) {
+        String value = normalizeForUi((place.name == null ? "" : place.name) + " "
+                + (place.address == null ? "" : place.address) + " " + (place.kind == null ? "" : place.kind));
+        if (value.contains("پمپ بنزین") || value.contains("جایگاه سوخت")) return "سوخت";
+        if (value.contains("بیمارستان") || value.contains("درمانگاه") || value.contains("داروخانه")) return "درمانی";
+        if (value.contains("رستوران") || value.contains("کافه")) return "غذا و نوشیدنی";
+        if (value.contains("روستا") || value.contains("village")) return "روستا";
+        if (value.contains("شهر") || value.contains("بخش") || value.contains("استان")
+                || value.contains("city") || value.contains("county")) return "شهر و منطقه";
+        return "مکان‌ها";
+    }
+
+    private String placeIcon(SavedPlace place) {
+        String type = placeTypeLabel(place);
+        if ("سوخت".equals(type)) return "\u26fd";
+        if ("درمانی".equals(type)) return "\u2695";
+        if ("غذا و نوشیدنی".equals(type)) return "\u2615";
+        if ("روستا".equals(type)) return "\u2302";
+        if ("شهر و منطقه".equals(type)) return "\u25c9";
+        return "\u25cf";
+    }
+
+    private String administrativeHierarchy(SavedPlace place) {
+        String address = place.address == null ? "" : place.address.trim();
+        String type = placeTypeLabel(place);
+        String prefix = "";
+        if ("روستا".equals(type) && !normalizeForUi(address).contains("روستا")) prefix = "روستای " + place.name;
+        else if ("شهر و منطقه".equals(type) && !normalizeForUi(address).contains("شهر")) prefix = "شهر یا منطقه";
+        if (address.isEmpty()) return prefix;
+        String[] parts = address.split("[،,]");
+        StringBuilder hierarchy = new StringBuilder(prefix);
+        for (int i = 0; i < parts.length && i < 4; i++) {
+            String part = parts[i].trim();
+            if (part.isEmpty() || part.equals(place.name)) continue;
+            if (hierarchy.length() > 0) hierarchy.append('\n');
+            hierarchy.append(part);
+        }
+        return hierarchy.toString();
+    }
+
+    private String formatDistance(SavedPlace place) {
+        double distanceKm = distanceKm(originLatitude, originLongitude, place.latitude, place.longitude);
+        if (distanceKm < 1d) return Math.max(1, (int) Math.round(distanceKm * 1000d)) + " متر تا شما";
+        return String.format(Locale.US, "%.1f کیلومتر تا شما", distanceKm);
+    }
+
+    private double distanceKm(double latitudeA, double longitudeA, double latitudeB, double longitudeB) {
+        double latitudeDelta = Math.toRadians(latitudeB - latitudeA);
+        double longitudeDelta = Math.toRadians(longitudeB - longitudeA);
+        double value = Math.sin(latitudeDelta / 2d) * Math.sin(latitudeDelta / 2d)
+                + Math.cos(Math.toRadians(latitudeA)) * Math.cos(Math.toRadians(latitudeB))
+                * Math.sin(longitudeDelta / 2d) * Math.sin(longitudeDelta / 2d);
+        return 6371d * 2d * Math.atan2(Math.sqrt(value), Math.sqrt(1d - value));
+    }
+
+    private CharSequence highlight(String value, String query) {
+        SpannableString styled = new SpannableString(value == null ? "" : value);
+        if (query == null || query.trim().isEmpty()) return styled;
+        String lowerValue = normalizeForHighlight(styled.toString());
+        String lowerQuery = normalizeForHighlight(query.trim());
+        int start = lowerValue.indexOf(lowerQuery);
+        if (start >= 0) {
+            int end = start + lowerQuery.length();
+            styled.setSpan(new ForegroundColorSpan(0xff087e8b), start, end, 0);
+            styled.setSpan(new StyleSpan(Typeface.BOLD), start, end, 0);
+        }
+        return styled;
+    }
+
+    private String normalizeForUi(String value) {
+        if (value == null) return "";
+        return value.replace('\u064a', '\u06cc').replace('\u0649', '\u06cc').replace('\u0643', '\u06a9')
+                .replace("\u200c", " ").trim().replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
+    }
+
+    private String normalizeForHighlight(String value) {
+        if (value == null) return "";
+        return value.replace('\u064a', '\u06cc').replace('\u0649', '\u06cc').replace('\u0643', '\u06a9')
+                .replace("\u200c", " ").toLowerCase(Locale.ROOT);
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
     private void searchDestination() {
