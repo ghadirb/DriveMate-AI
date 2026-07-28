@@ -421,17 +421,13 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private void showMapLayersDialog() {
         String[] items = {
                 "مکان‌های اطراف روی نقشه",
-                "پاک‌کردن همهٔ لایه‌های مکان",
-                "منبع و نوع نقشه",
-                "ترافیک مسیر"
+                "پاک‌کردن همهٔ لایه‌های مکان"
         };
         new AlertDialog.Builder(this)
                 .setTitle("تنظیمات نقشه")
                 .setItems(items, (dialog, which) -> {
                     if (which == 0) showPoiLayerSelection();
-                    else if (which == 1) clearPoiLayers();
-                    else if (which == 2) showMapSourceInfo();
-                    else showTrafficLayerInfo();
+                    else clearPoiLayers();
                 })
                 .show();
     }
@@ -457,25 +453,6 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                 })
                 .setNegativeButton("انصراف", null)
                 .show();
-    }
-
-    private void showMapSourceInfo() {
-        new AlertDialog.Builder(this)
-                .setTitle("منبع و نوع نقشه")
-                .setMessage("نقشهٔ استاندارد نشان فعال است. این نسخه از SDK نشان، لایهٔ ماهواره‌ای یا تعویض مستقیم "
-                        + "به Google Maps و OpenStreetMap را ارائه نمی‌کند؛ بنابراین برای جلوگیری از انتخاب بی‌اثر، "
-                        + "آن‌ها به‌عنوان گزینهٔ قابل انتخاب نمایش داده نمی‌شوند.\n\n"
-                        + "دادهٔ مکان‌ها مستقل است: نشان، map.ir، TomTom و OpenStreetMap به‌ترتیب برای جست‌وجوی POI استفاده می‌شوند.")
-                .setPositiveButton("متوجه شدم", null)
-                .show();
-    }
-
-    private void showTrafficLayerInfo() {
-        String message = selectedRoute == null
-                ? "هنگام انتخاب مسیر، زمان رسیدن و تغییرات مسیر از پاسخ ترافیک‌محور نشان بررسی می‌شود. SDK نقشهٔ فعلی لایهٔ رنگی ترافیک جداگانه ارائه نمی‌کند."
-                : "زمان فعلی مسیر بر اساس پاسخ مسیریابی نمایش داده شده است. بازبینی دوره‌ای مسیر فقط در صورت تغییر معنادار، مسیر را جایگزین می‌کند. SDK نقشهٔ فعلی لایهٔ رنگی ترافیک جداگانه ارائه نمی‌کند.";
-        new AlertDialog.Builder(this).setTitle("ترافیک مسیر").setMessage(message)
-                .setPositiveButton("باشه", null).show();
     }
 
     private void clearPoiLayers() {
