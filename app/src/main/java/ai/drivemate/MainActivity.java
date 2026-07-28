@@ -16,6 +16,7 @@ import android.provider.Settings;
 import android.view.View;
 import android.widget.TextView;
 import android.widget.EditText;
+import android.widget.ScrollView;
 import android.widget.Button;
 import android.widget.Toast;
 
@@ -79,6 +80,10 @@ public class MainActivity extends Activity {
     private TextView tripSpeedText;
     private final SimpleDateFormat tripEtaFormat = new SimpleDateFormat("HH:mm", Locale.US);
     private TextView listText;
+    private TextView savedPlacesTabText;
+    private ScrollView dashboardPage;
+    private ScrollView savedPlacesPage;
+    private ScrollView profilePage;
     private Button voiceButton;
     private Button notificationButton;
     private Button intelligenceButton;
@@ -140,6 +145,10 @@ public class MainActivity extends Activity {
         tripElapsedText = findViewById(R.id.tripElapsedText);
         tripSpeedText = findViewById(R.id.tripSpeedText);
         listText = findViewById(R.id.listText);
+        savedPlacesTabText = findViewById(R.id.savedPlacesTabText);
+        dashboardPage = findViewById(R.id.dashboardPage);
+        savedPlacesPage = findViewById(R.id.savedPlacesPage);
+        profilePage = findViewById(R.id.profilePage);
         voiceButton = findViewById(R.id.voiceButton);
         notificationButton = findViewById(R.id.notificationButton);
         intelligenceButton = findViewById(R.id.intelligenceButton);
@@ -194,6 +203,17 @@ public class MainActivity extends Activity {
         findViewById(R.id.stopButton).setOnClickListener(v -> stopNavigation("مسیریابی متوقف شد."));
         notificationButton.setOnClickListener(v -> toggleBackgroundNavigation());
         findViewById(R.id.backupButton).setOnClickListener(v -> showBackupDialog());
+        findViewById(R.id.tabDashboardButton).setOnClickListener(v -> selectMainTab(0));
+        findViewById(R.id.tabMapButton).setOnClickListener(v -> openMap());
+        findViewById(R.id.tabSavedButton).setOnClickListener(v -> selectMainTab(1));
+        findViewById(R.id.tabProfileButton).setOnClickListener(v -> selectMainTab(2));
+        findViewById(R.id.addSavedPlaceTabButton).setOnClickListener(v -> promptSaveCurrentPlace());
+        findViewById(R.id.manageSavedPlacesTabButton).setOnClickListener(v -> showPlaces(false));
+        findViewById(R.id.profileSettingsButton).setOnClickListener(v -> showSettingsMenu());
+        findViewById(R.id.profileSubscriptionButton).setOnClickListener(v -> showSubscriptionInfo());
+        findViewById(R.id.profileBackupButton).setOnClickListener(v -> showBackupDialog());
+        findViewById(R.id.profileAboutButton).setOnClickListener(v -> showAboutDialog());
+        selectMainTab(0);
     }
 
     private void requestCorePermissions() {
@@ -1337,6 +1357,46 @@ public class MainActivity extends Activity {
         }).show();
     }
 
+    private void selectMainTab(int tab) {
+        dashboardPage.setVisibility(tab == 0 ? View.VISIBLE : View.GONE);
+        savedPlacesPage.setVisibility(tab == 1 ? View.VISIBLE : View.GONE);
+        profilePage.setVisibility(tab == 2 ? View.VISIBLE : View.GONE);
+        ((Button) findViewById(R.id.tabDashboardButton)).setAlpha(tab == 0 ? 1f : 0.62f);
+        ((Button) findViewById(R.id.tabSavedButton)).setAlpha(tab == 1 ? 1f : 0.62f);
+        ((Button) findViewById(R.id.tabProfileButton)).setAlpha(tab == 2 ? 1f : 0.62f);
+        ((Button) findViewById(R.id.tabMapButton)).setAlpha(0.62f);
+        if (tab == 1) refreshSavedPlacesTab();
+    }
+
+    private void refreshSavedPlacesTab() {
+        if (savedPlacesTabText == null) return;
+        List<SavedPlace> places = placeStore.allPlaces();
+        StringBuilder text = new StringBuilder();
+        for (int i = 0; i < places.size(); i++) {
+            SavedPlace place = places.get(i);
+            text.append(i + 1).append(". ").append(place.name);
+            if (place.address != null && !place.address.trim().isEmpty()) text.append("\n").append(place.address);
+            text.append("\n\n");
+        }
+        savedPlacesTabText.setText(text.length() == 0 ? "هنوز مکانی ذخیره نشده است." : text.toString().trim());
+    }
+
+    private void showSubscriptionInfo() {
+        new AlertDialog.Builder(this)
+                .setTitle("اشتراک")
+                .setMessage("مدیریت اشتراک در نسخه بعدی فعال می‌شود. امکانات فعلی برنامه بدون تغییر در دسترس هستند.")
+                .setPositiveButton("متوجه شدم", null)
+                .show();
+    }
+
+    private void showAboutDialog() {
+        new AlertDialog.Builder(this)
+                .setTitle("درباره DriveMate AI")
+                .setMessage("دستیار رانندگی فارسی با مسیریابی، راهنمای صوتی، نقشه، مکان‌های ذخیره‌شده و پشتیبان‌گیری محلی.")
+                .setPositiveButton("بستن", null)
+                .show();
+    }
+
     private void showPlaces(boolean favoritesOnly) {
         ArrayList<SavedPlace> places = new ArrayList<>();
         for (SavedPlace place : placeStore.allPlaces()) if (!favoritesOnly || place.favorite) places.add(place);
@@ -1387,6 +1447,7 @@ public class MainActivity extends Activity {
 
     private void refreshList() {
         showPlaces(false);
+        refreshSavedPlacesTab();
     }
 
     private void scheduleTrafficCheck() {

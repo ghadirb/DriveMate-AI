@@ -1,7 +1,15 @@
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/drivemate_bg"
+    android:layoutDirection="rtl">
+
+<ScrollView
+    android:id="@+id/dashboardPage"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:clipToPadding="false"
+    android:paddingBottom="84dp"
     android:fillViewport="true">
 
     <LinearLayout
@@ -203,4 +211,116 @@
             android:textColor="@color/drivemate_muted"
             android:textSize="15sp" />
     </LinearLayout>
-</ScrollView>
+    </ScrollView>
+
+    <ScrollView
+        android:id="@+id/savedPlacesPage"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:clipToPadding="false"
+        android:padding="20dp"
+        android:paddingBottom="84dp"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="ذخیره‌ها"
+                android:textColor="@color/drivemate_text"
+                android:textSize="26sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="مکان‌های شخصی، خانه، محل کار و مقصدهای محبوب"
+                android:textColor="@color/drivemate_muted"
+                android:textSize="14sp" />
+
+            <Button
+                android:id="@+id/addSavedPlaceTabButton"
+                style="@style/HomeActionButton"
+                android:layout_width="match_parent"
+                android:layout_marginTop="16dp"
+                android:text="ذخیره مکان فعلی" />
+
+            <TextView
+                android:id="@+id/savedPlacesTabText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/status_panel"
+                android:padding="14dp"
+                android:textColor="@color/drivemate_text"
+                android:textSize="15sp" />
+
+            <Button
+                android:id="@+id/manageSavedPlacesTabButton"
+                style="@style/HomeActionButton"
+                android:layout_width="match_parent"
+                android:layout_marginTop="10dp"
+                android:text="مدیریت و ویرایش ذخیره‌ها" />
+        </LinearLayout>
+    </ScrollView>
+
+    <ScrollView
+        android:id="@+id/profilePage"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:clipToPadding="false"
+        android:padding="20dp"
+        android:paddingBottom="84dp"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="پروفایل"
+                android:textColor="@color/drivemate_text"
+                android:textSize="26sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="مدیریت تجربه DriveMate AI"
+                android:textColor="@color/drivemate_muted"
+                android:textSize="14sp" />
+
+            <Button android:id="@+id/profileSettingsButton" style="@style/HomeActionButton" android:layout_width="match_parent" android:layout_marginTop="16dp" android:text="تنظیمات" />
+            <Button android:id="@+id/profileSubscriptionButton" style="@style/HomeActionButton" android:layout_width="match_parent" android:layout_marginTop="8dp" android:text="اشتراک" />
+            <Button android:id="@+id/profileBackupButton" style="@style/HomeActionButton" android:layout_width="match_parent" android:layout_marginTop="8dp" android:text="پشتیبان‌گیری و بازگردانی" />
+            <Button android:id="@+id/profileAboutButton" style="@style/HomeActionButton" android:layout_width="match_parent" android:layout_marginTop="8dp" android:text="درباره برنامه" />
+        </LinearLayout>
+    </ScrollView>
+
+    <LinearLayout
+        android:id="@+id/mainBottomTabs"
+        android:layout_width="match_parent"
+        android:layout_height="68dp"
+        android:layout_gravity="bottom"
+        android:background="@color/white"
+        android:elevation="10dp"
+        android:gravity="center"
+        android:orientation="horizontal"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp">
+
+        <Button android:id="@+id/tabDashboardButton" style="@style/NavTabButton" android:layout_width="0dp" android:layout_weight="1" android:text="داشبورد" />
+        <Button android:id="@+id/tabMapButton" style="@style/NavTabButton" android:layout_width="0dp" android:layout_weight="1" android:text="نقشه" />
+        <Button android:id="@+id/tabSavedButton" style="@style/NavTabButton" android:layout_width="0dp" android:layout_weight="1" android:text="ذخیره‌ها" />
+        <Button android:id="@+id/tabProfileButton" style="@style/NavTabButton" android:layout_width="0dp" android:layout_weight="1" android:layout_marginEnd="0dp" android:text="پروفایل" />
+    </LinearLayout>
+</FrameLayout>
