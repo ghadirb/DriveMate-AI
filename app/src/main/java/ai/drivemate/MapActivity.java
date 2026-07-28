@@ -55,6 +55,8 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Date;
+import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -67,6 +69,7 @@ import ai.drivemate.model.SavedPlace;
 import ai.drivemate.routing.MapIrRoutingProvider;
 import ai.drivemate.routing.NavigationEngine;
 import ai.drivemate.routing.NeshanRoutingProvider;
+import ai.drivemate.routing.OpenRouteServiceRoutingProvider;
 import ai.drivemate.routing.PlaceSearchRepository;
 import ai.drivemate.routing.PoiCategory;
 import ai.drivemate.routing.RouteRepository;
@@ -78,6 +81,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     public static final String EXTRA_ORIGIN_LONGITUDE = "origin_longitude";
     public static final String EXTRA_NESHAN_KEY = "neshan_key";
     public static final String EXTRA_MAPIR_KEY = "mapir_key";
+    public static final String EXTRA_TOMTOM_KEY = "tomtom_key";
+    public static final String EXTRA_OPENROUTESERVICE_KEY = "openrouteservice_key";
     public static final String RESULT_LATITUDE = "destination_latitude";
     public static final String RESULT_LONGITUDE = "destination_longitude";
     public static final String RESULT_NAME = "destination_name";
@@ -86,6 +91,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     public static final String RESULT_OPEN_NAVIGATION_MAP = "open_navigation_map";
     public static final String RESULT_ROUTE_INDEX = "route_index";
     public static final String RESULT_STOP_NAVIGATION = "stop_navigation";
+    public static final String RESULT_MAIN_TAB = "main_tab";
     public static final String EXTRA_NAVIGATION_MODE = "navigation_mode";
     public static final String EXTRA_DESTINATION_LATITUDE = "navigation_destination_latitude";
     public static final String EXTRA_DESTINATION_LONGITUDE = "navigation_destination_longitude";
@@ -142,6 +148,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private boolean orientationWarningLogged;
     private PoiCategory activeNearbyCategory;
     private final List<Marker> nearbyMarkers = new ArrayList<>();
+    private final EnumSet<PoiCategory> enabledPoiLayers = EnumSet.noneOf(PoiCategory.class);
+    private final Map<PoiCategory, List<SavedPlace>> poiLayerPlaces = new EnumMap<>(PoiCategory.class);
+    private int activePoiLayerRequest;
     /** Backing list for the "نمایش روی نقشه" button on the search-results panel; holds
      *  whatever the last plain-text search returned so the button can plot it on demand. */
     private final List<SavedPlace> lastSearchResultsForMap = new ArrayList<>();
@@ -157,10 +166,13 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         navigationRouteIndex = Math.max(0, getIntent().getIntExtra(EXTRA_NAVIGATION_ROUTE_INDEX, 0));
         String neshanKey = getIntent().getStringExtra(EXTRA_NESHAN_KEY);
         String mapIrKey = getIntent().getStringExtra(EXTRA_MAPIR_KEY);
+        String tomtomKey = getIntent().getStringExtra(EXTRA_TOMTOM_KEY);
+        String openRouteServiceKey = getIntent().getStringExtra(EXTRA_OPENROUTESERVICE_KEY);
         NeshanRoutingProvider neshan = new NeshanRoutingProvider(neshanKey);
         MapIrRoutingProvider mapIr = new MapIrRoutingProvider(mapIrKey);
-        placeSearchRepository = new PlaceSearchRepository(neshan, mapIr);
-        routeRepository = new RouteRepository(neshan, mapIr);
+        placeSearchRepository = new PlaceSearchRepository(neshan, mapIr, tomtomKey);
+        routeRepository = new RouteRepository(neshan, mapIr,
+                new OpenRouteServiceRoutingProvider(openRouteServiceKey));
 
         destinationText = findViewById(R.id.mapDestinationText);
         routeText = findViewById(R.id.mapRouteText);
@@ -180,7 +192,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         turnStepsContent = findViewById(R.id.turnStepsContent);
         turnBannerContainer.setOnClickListener(v -> toggleTurnSteps());
         wireControls();
+        restorePoiLayerPreferences();
         initializeMap();
+        if (map != null && !enabledPoiLayers.isEmpty()) refreshPoiLayers();
         if (navigationMode) {
             navigationCameraEnabled = true;
             findViewById(R.id.startMapNavigationButton).setEnabled(true);
@@ -213,12 +227,17 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         findViewById(R.id.myLocationButton).setOnClickListener(v -> focusOrigin());
         findViewById(R.id.savedPlacesButton).setOnClickListener(v -> chooseSavedPlace());
         findViewById(R.id.nearMeButton).setOnClickListener(v -> showNearMeCategories());
+        findViewById(R.id.mapLayersButton).setOnClickListener(v -> showMapLayersDialog());
         findViewById(R.id.saveMapPlaceButton).setOnClickListener(v -> saveSelectedPlace());
         findViewById(R.id.routeOptionsButton).setOnClickListener(v -> centerOnSelectedRoute());
         findViewById(R.id.drivingOverviewButton).setOnClickListener(v -> showRouteOverview());
         View navigationCameraButton = findViewById(R.id.navigationCameraButton);
         navigationCameraButton.setTooltipText("نمای رانندگی و دنبال کردن خودرو");
         navigationCameraButton.setOnClickListener(v -> enableNavigationCamera());
+        findViewById(R.id.mapTabDashboardButton).setOnClickListener(v -> returnToMainTab("dashboard"));
+        findViewById(R.id.mapTabMapButton).setAlpha(1f);
+        findViewById(R.id.mapTabSavedButton).setOnClickListener(v -> returnToMainTab("saved"));
+        findViewById(R.id.mapTabProfileButton).setOnClickListener(v -> returnToMainTab("profile"));
         findViewById(R.id.stopMapNavigationButton).setOnClickListener(v -> stopNavigationFromMap());
         findViewById(R.id.startMapNavigationButton).setOnClickListener(v -> {
             if (navigationMode) finish(); else startSelectedDestination();
@@ -252,6 +271,13 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             }
             @Override public void afterTextChanged(Editable value) { }
         });
+    }
+
+    private void returnToMainTab(String tab) {
+        Intent result = new Intent();
+        result.putExtra(RESULT_MAIN_TAB, tab);
+        setResult(RESULT_OK, result);
+        finish();
     }
 
     private void initializeMap() {
@@ -377,6 +403,124 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                 .setTitle("اطراف من")
                 .setItems(items, (dialog, which) -> searchNearbyCategory(categories[which]))
                 .show();
+    }
+
+    /** Settings only exposes layers that this renderer can actually apply. */
+    private void showMapLayersDialog() {
+        String[] items = {
+                "مکان‌های اطراف روی نقشه",
+                "پاک‌کردن همهٔ لایه‌های مکان",
+                "منبع و نوع نقشه",
+                "ترافیک مسیر"
+        };
+        new AlertDialog.Builder(this)
+                .setTitle("تنظیمات نقشه")
+                .setItems(items, (dialog, which) -> {
+                    if (which == 0) showPoiLayerSelection();
+                    else if (which == 1) clearPoiLayers();
+                    else if (which == 2) showMapSourceInfo();
+                    else showTrafficLayerInfo();
+                })
+                .show();
+    }
+
+    private void showPoiLayerSelection() {
+        PoiCategory[] categories = PoiCategory.values();
+        String[] labels = new String[categories.length];
+        boolean[] checked = new boolean[categories.length];
+        for (int index = 0; index < categories.length; index++) {
+            labels[index] = categories[index].display();
+            checked[index] = enabledPoiLayers.contains(categories[index]);
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("نمایش مکان‌ها روی نقشه")
+                .setMultiChoiceItems(labels, checked, (dialog, which, isChecked) -> checked[which] = isChecked)
+                .setPositiveButton("اعمال", (dialog, which) -> {
+                    enabledPoiLayers.clear();
+                    for (int index = 0; index < categories.length; index++) {
+                        if (checked[index]) enabledPoiLayers.add(categories[index]);
+                    }
+                    savePoiLayerPreferences();
+                    refreshPoiLayers();
+                })
+                .setNegativeButton("انصراف", null)
+                .show();
+    }
+
+    private void showMapSourceInfo() {
+        new AlertDialog.Builder(this)
+                .setTitle("منبع و نوع نقشه")
+                .setMessage("نقشهٔ استاندارد نشان فعال است. این نسخه از SDK نشان، لایهٔ ماهواره‌ای یا تعویض مستقیم "
+                        + "به Google Maps و OpenStreetMap را ارائه نمی‌کند؛ بنابراین برای جلوگیری از انتخاب بی‌اثر، "
+                        + "آن‌ها به‌عنوان گزینهٔ قابل انتخاب نمایش داده نمی‌شوند.\n\n"
+                        + "دادهٔ مکان‌ها مستقل است: نشان، map.ir، TomTom و OpenStreetMap به‌ترتیب برای جست‌وجوی POI استفاده می‌شوند.")
+                .setPositiveButton("متوجه شدم", null)
+                .show();
+    }
+
+    private void showTrafficLayerInfo() {
+        String message = selectedRoute == null
+                ? "هنگام انتخاب مسیر، زمان رسیدن و تغییرات مسیر از پاسخ ترافیک‌محور نشان بررسی می‌شود. SDK نقشهٔ فعلی لایهٔ رنگی ترافیک جداگانه ارائه نمی‌کند."
+                : "زمان فعلی مسیر بر اساس پاسخ مسیریابی نمایش داده شده است. بازبینی دوره‌ای مسیر فقط در صورت تغییر معنادار، مسیر را جایگزین می‌کند. SDK نقشهٔ فعلی لایهٔ رنگی ترافیک جداگانه ارائه نمی‌کند.";
+        new AlertDialog.Builder(this).setTitle("ترافیک مسیر").setMessage(message)
+                .setPositiveButton("باشه", null).show();
+    }
+
+    private void clearPoiLayers() {
+        enabledPoiLayers.clear();
+        poiLayerPlaces.clear();
+        activePoiLayerRequest++;
+        clearNearbyMarkers();
+        savePoiLayerPreferences();
+        Toast.makeText(this, "لایه‌های مکان از نقشه حذف شدند.", Toast.LENGTH_SHORT).show();
+    }
+
+    private void refreshPoiLayers() {
+        clearNearbyMarkers();
+        poiLayerPlaces.clear();
+        int requestId = ++activePoiLayerRequest;
+        if (enabledPoiLayers.isEmpty()) return;
+        routeText.setText("در حال آماده‌سازی لایه‌های مکان...");
+        for (PoiCategory category : enabledPoiLayers) {
+            placeSearchRepository.searchAll(category.searchTerm, originLatitude, originLongitude,
+                    places -> runOnUiThread(() -> {
+                        if (isFinishing() || isDestroyed() || requestId != activePoiLayerRequest) return;
+                        poiLayerPlaces.put(category, places == null ? new ArrayList<>() : new ArrayList<>(places));
+                        renderPoiLayer(category, poiLayerPlaces.get(category));
+                    }),
+                    error -> Log.w("DriveMateMap", "POI layer unavailable for " + category.name() + ": " + error));
+        }
+    }
+
+    private void renderPoiLayer(PoiCategory category, List<SavedPlace> places) {
+        if (map == null || places == null) return;
+        MarkerStyle style = poiMarkerStyle(category.icon);
+        int limit = Math.min(15, places.size());
+        for (int index = 0; index < limit; index++) {
+            SavedPlace place = places.get(index);
+            Marker marker = new Marker(new LatLng(place.latitude, place.longitude), style);
+            map.addMarker(marker);
+            nearbyMarkers.add(marker);
+        }
+        routeText.setText("لایه‌های فعال: " + enabledPoiLayers.size() + " | " + nearbyMarkers.size() + " مکان روی نقشه");
+    }
+
+    private void savePoiLayerPreferences() {
+        StringBuilder values = new StringBuilder();
+        for (PoiCategory category : enabledPoiLayers) {
+            if (values.length() > 0) values.append(',');
+            values.append(category.name());
+        }
+        getSharedPreferences("map_layers", MODE_PRIVATE).edit().putString("poi_categories", values.toString()).apply();
+    }
+
+    private void restorePoiLayerPreferences() {
+        String saved = getSharedPreferences("map_layers", MODE_PRIVATE).getString("poi_categories", "");
+        if (saved == null || saved.trim().isEmpty()) return;
+        for (String name : saved.split(",")) {
+            try { enabledPoiLayers.add(PoiCategory.valueOf(name)); }
+            catch (IllegalArgumentException ignored) { }
+        }
     }
 
     private void searchNearbyCategory(PoiCategory category) {

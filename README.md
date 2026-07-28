@@ -94,6 +94,8 @@ Android Auto Backup نیز برای SharedPreferences برنامه پیکربن�
 
 - `NESHAN_API_KEY`: کلید متنی سرویس‌های نشان، نه فایل `neshan.license`
 - `MAPIR_API_KEY`
+- `TOMTOM_API_KEY`: optional nearby-POI fallback when Neshan and map.ir return too few local places
+- `OPENROUTESERVICE_API_KEY`: optional third routing fallback after Neshan and map.ir; it is not used for POI search because it is not a POI index
 - `AI_API_KEY`: اختیاری، برای سازگاری با تنظیم قبلی
 - `KEYS_DECRYPTION_SECRET`: گذرواژه رمزگشایی payload کلیدها
 

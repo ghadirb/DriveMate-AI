@@ -44,6 +44,7 @@ import ai.drivemate.model.SavedPlace;
 import ai.drivemate.model.TripRecord;
 import ai.drivemate.routing.MapIrRoutingProvider;
 import ai.drivemate.routing.NeshanRoutingProvider;
+import ai.drivemate.routing.OpenRouteServiceRoutingProvider;
 import ai.drivemate.routing.NavigationEngine;
 import ai.drivemate.routing.PlaceSearchRepository;
 import ai.drivemate.routing.PoiCategory;
@@ -94,6 +95,7 @@ public class MainActivity extends Activity {
     private DeviceLocationTracker locationTracker;
     private NeshanRoutingProvider neshanRoutingProvider;
     private MapIrRoutingProvider mapIrRoutingProvider;
+    private OpenRouteServiceRoutingProvider openRouteServiceRoutingProvider;
     private RouteRepository routeRepository;
     private PlaceSearchRepository placeSearchRepository;
     private VoiceCommandParser commandParser;
@@ -160,8 +162,10 @@ public class MainActivity extends Activity {
         locationTracker = new DeviceLocationTracker(this);
         neshanRoutingProvider = new NeshanRoutingProvider(BuildConfig.NESHAN_API_KEY);
         mapIrRoutingProvider = new MapIrRoutingProvider(BuildConfig.MAPIR_API_KEY);
-        routeRepository = new RouteRepository(neshanRoutingProvider, mapIrRoutingProvider);
-        placeSearchRepository = new PlaceSearchRepository(neshanRoutingProvider, mapIrRoutingProvider);
+        openRouteServiceRoutingProvider = new OpenRouteServiceRoutingProvider(BuildConfig.OPENROUTESERVICE_API_KEY);
+        routeRepository = new RouteRepository(neshanRoutingProvider, mapIrRoutingProvider, openRouteServiceRoutingProvider);
+        placeSearchRepository = new PlaceSearchRepository(neshanRoutingProvider, mapIrRoutingProvider,
+                BuildConfig.TOMTOM_API_KEY);
         commandParser = new VoiceCommandParser();
         aiAssistant = new AiAssistant(BuildConfig.AI_API_KEY);
         intelligenceCoordinator = new DrivingIntelligenceCoordinator(aiAssistant);
@@ -208,7 +212,7 @@ public class MainActivity extends Activity {
         findViewById(R.id.tabSavedButton).setOnClickListener(v -> selectMainTab(1));
         findViewById(R.id.tabProfileButton).setOnClickListener(v -> selectMainTab(2));
         findViewById(R.id.addSavedPlaceTabButton).setOnClickListener(v -> promptSaveCurrentPlace());
-        findViewById(R.id.manageSavedPlacesTabButton).setOnClickListener(v -> showPlaces(false));
+        findViewById(R.id.manageSavedPlacesTabButton).setOnClickListener(v -> choosePlace(new ArrayList<>(placeStore.allPlaces())));
         findViewById(R.id.profileSettingsButton).setOnClickListener(v -> showSettingsMenu());
         findViewById(R.id.profileSubscriptionButton).setOnClickListener(v -> showSubscriptionInfo());
         findViewById(R.id.profileBackupButton).setOnClickListener(v -> showBackupDialog());
@@ -246,7 +250,10 @@ public class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_MAP && resultCode == RESULT_OK && data != null) {
-            if (data.getBooleanExtra(MapActivity.RESULT_START_VOICE, false)) {
+            String requestedTab = data.getStringExtra(MapActivity.RESULT_MAIN_TAB);
+            if (requestedTab != null) {
+                selectMainTab("saved".equals(requestedTab) ? 1 : "profile".equals(requestedTab) ? 2 : 0);
+            } else if (data.getBooleanExtra(MapActivity.RESULT_START_VOICE, false)) {
                 toggleVoiceInput();
             } else if (data.getBooleanExtra(MapActivity.RESULT_STOP_NAVIGATION, false)) {
                 stopNavigation("مسیریابی متوقف شد.");
@@ -294,6 +301,8 @@ public class MainActivity extends Activity {
         // by GitHub Actions available to the map as a fallback.
         intent.putExtra(MapActivity.EXTRA_NESHAN_KEY, routingKey("NESHAN_API_KEY", BuildConfig.NESHAN_API_KEY));
         intent.putExtra(MapActivity.EXTRA_MAPIR_KEY, routingKey("MAPIR_API_KEY", BuildConfig.MAPIR_API_KEY));
+        intent.putExtra(MapActivity.EXTRA_TOMTOM_KEY, BuildConfig.TOMTOM_API_KEY);
+        intent.putExtra(MapActivity.EXTRA_OPENROUTESERVICE_KEY, BuildConfig.OPENROUTESERVICE_API_KEY);
         startActivityForResult(intent, REQ_MAP);
     }
 
@@ -310,6 +319,8 @@ public class MainActivity extends Activity {
         }
         intent.putExtra(MapActivity.EXTRA_NESHAN_KEY, routingKey("NESHAN_API_KEY", BuildConfig.NESHAN_API_KEY));
         intent.putExtra(MapActivity.EXTRA_MAPIR_KEY, routingKey("MAPIR_API_KEY", BuildConfig.MAPIR_API_KEY));
+        intent.putExtra(MapActivity.EXTRA_TOMTOM_KEY, BuildConfig.TOMTOM_API_KEY);
+        intent.putExtra(MapActivity.EXTRA_OPENROUTESERVICE_KEY, BuildConfig.OPENROUTESERVICE_API_KEY);
         intent.putExtra(MapActivity.EXTRA_NAVIGATION_MODE, true);
         intent.putExtra(MapActivity.EXTRA_DESTINATION_LATITUDE, destination.latitude);
         intent.putExtra(MapActivity.EXTRA_DESTINATION_LONGITUDE, destination.longitude);
@@ -612,7 +623,7 @@ public class MainActivity extends Activity {
         voiceHandler.removeCallbacks(tripAnalysisHide);
         hideTripAnalysis();
         if (!routeRepository.hasConfiguredProvider()) {
-            setStatus("کلید مسیریابی نشان یا map.ir در این APK موجود نیست. GitHub Secrets را بررسی کنید.");
+            setStatus("کلید مسیریابی نشان، map.ir یا OpenRouteService در این APK موجود نیست. GitHub Secrets را بررسی کنید.");
             return;
         }
         Location origin = locationTracker.getLastLocation();
@@ -1379,6 +1390,7 @@ public class MainActivity extends Activity {
             text.append("\n\n");
         }
         savedPlacesTabText.setText(text.length() == 0 ? "هنوز مکانی ذخیره نشده است." : text.toString().trim());
+        savedPlacesTabText.setOnClickListener(v -> choosePlace(new ArrayList<>(placeStore.allPlaces())));
     }
 
     private void showSubscriptionInfo() {
@@ -1420,14 +1432,45 @@ public class MainActivity extends Activity {
     }
 
     private void editOrNavigatePlace(SavedPlace place) {
-        final EditText input = new EditText(this);
+        new AlertDialog.Builder(this)
+                .setTitle(place.name)
+                .setItems(new String[]{"شروع مسیریابی", "ویرایش نام", "حذف مکان"}, (dialog, action) -> {
+                    if (action == 0) {
+                        startNavigation(place);
+                    } else if (action == 1) {
+                        editSavedPlaceName(place);
+                    } else {
+                        confirmDeleteSavedPlace(place);
+                    }
+                })
+                .show();
+    }
+
+    private void editSavedPlaceName(SavedPlace place) {
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
         input.setText(place.name);
         new AlertDialog.Builder(this)
-                .setTitle("ویرایش یا مسیریابی")
+                .setTitle("ویرایش نام مکان")
                 .setView(input)
-                .setPositiveButton("مسیریابی", (d, w) -> startNavigation(place))
-                .setNeutralButton("ذخیره نام", (d, w) -> {
-                    placeStore.upsert(new SavedPlace(input.getText().toString(), place.kind, place.latitude, place.longitude, place.address, System.currentTimeMillis(), place.favorite));
+                .setPositiveButton("ذخیره", (dialog, which) -> {
+                    String name = input.getText().toString().trim();
+                    if (name.isEmpty()) return;
+                    placeStore.upsert(new SavedPlace(name, place.kind, place.latitude, place.longitude,
+                            place.address, System.currentTimeMillis(), place.favorite));
+                    writeAutomaticBackup();
+                    refreshList();
+                })
+                .setNegativeButton("انصراف", null)
+                .show();
+    }
+
+    private void confirmDeleteSavedPlace(SavedPlace place) {
+        new AlertDialog.Builder(this)
+                .setTitle("حذف مکان")
+                .setMessage("«" + place.name + "» از ذخیره‌ها حذف شود؟")
+                .setPositiveButton("حذف", (dialog, which) -> {
+                    placeStore.delete(place);
                     writeAutomaticBackup();
                     refreshList();
                 })

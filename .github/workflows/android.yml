@@ -34,6 +34,8 @@ jobs:
         env:
           NESHAN_API_KEY: ${{ secrets.NESHAN_API_KEY }}
           MAPIR_API_KEY: ${{ secrets.MAPIR_API_KEY }}
+          TOMTOM_API_KEY: ${{ secrets.TOMTOM_API_KEY }}
+          OPENROUTESERVICE_API_KEY: ${{ secrets.OPENROUTESERVICE_API_KEY }}
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           KEYS_DECRYPTION_SECRET: ${{ secrets.KEYS_DECRYPTION_SECRET }}
         run: gradle assembleDebug --stacktrace
@@ -79,6 +81,8 @@ jobs:
         env:
           NESHAN_API_KEY: ${{ secrets.NESHAN_API_KEY }}
           MAPIR_API_KEY: ${{ secrets.MAPIR_API_KEY }}
+          TOMTOM_API_KEY: ${{ secrets.TOMTOM_API_KEY }}
+          OPENROUTESERVICE_API_KEY: ${{ secrets.OPENROUTESERVICE_API_KEY }}
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           KEYS_DECRYPTION_SECRET: ${{ secrets.KEYS_DECRYPTION_SECRET }}
           RELEASE_STORE_FILE: release.jks

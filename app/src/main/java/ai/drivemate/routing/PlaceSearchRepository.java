@@ -23,10 +23,18 @@ public class PlaceSearchRepository {
 
     private final NeshanRoutingProvider neshan;
     private final MapIrRoutingProvider mapir;
+    private final TomTomPoiProvider tomtom;
+    private final OverpassPoiProvider overpass;
 
     public PlaceSearchRepository(NeshanRoutingProvider neshan, MapIrRoutingProvider mapir) {
+        this(neshan, mapir, "");
+    }
+
+    public PlaceSearchRepository(NeshanRoutingProvider neshan, MapIrRoutingProvider mapir, String tomtomApiKey) {
         this.neshan = neshan;
         this.mapir = mapir;
+        this.tomtom = new TomTomPoiProvider(tomtomApiKey);
+        this.overpass = new OverpassPoiProvider();
     }
 
     public void search(String term, double latitude, double longitude, SuccessCallback success, ErrorCallback error) {
@@ -37,6 +45,17 @@ public class PlaceSearchRepository {
         new Thread(() -> {
             ArrayList<SavedPlace> results = new ArrayList<>();
             ArrayList<String> failures = new ArrayList<>();
+
+            if (isNearbyPoiQuery(term)) {
+                searchNearbyPoi(term, latitude, longitude, results, failures);
+                rankNearby(results, latitude, longitude);
+                if (!results.isEmpty()) {
+                    success.onSuccess(results.subList(0, Math.min(20, results.size())));
+                } else {
+                    error.onError("No nearby result. " + join(failures));
+                }
+                return;
+            }
 
             // Geocoding handles villages and full addresses that nearby POI search can rank poorly.
             try { addUnique(results, searchNeshanGeocoding(term)); }
@@ -58,6 +77,29 @@ public class PlaceSearchRepository {
             if (!results.isEmpty()) success.onSuccess(results.subList(0, Math.min(12, results.size())));
             else error.onError("Search failed. " + join(failures));
         }).start();
+    }
+
+    /**
+     * Category queries need a different policy from a named address. Keeping this local avoids
+     * a handful of country-wide results (for example six fuel stations) hiding nearby stations.
+     */
+    private void searchNearbyPoi(String term, double latitude, double longitude, List<SavedPlace> results,
+                                 List<String> failures) {
+        try { addUnique(results, searchNeshan(term, latitude, longitude)); }
+        catch (Exception exception) { failures.add("Neshan nearby: " + messageOf(exception)); }
+        try { addUnique(results, searchMapIrNearby(term, latitude, longitude)); }
+        catch (Exception exception) { failures.add("map.ir nearby: " + messageOf(exception)); }
+        // TomTom is optional. It is never required for the normal Neshan/map.ir experience.
+        if (results.size() < 10 && tomtom.isConfigured()) {
+            try { addUnique(results, tomtom.searchNearby(term, latitude, longitude)); }
+            catch (Exception exception) { failures.add("TomTom nearby: " + messageOf(exception)); }
+        }
+        // OpenStreetMap fills gaps in commercial POI indexes. It is only queried for recognised
+        // categories and only when the primary indexes leave the nearby list sparse.
+        if (results.size() < 10) {
+            try { addUnique(results, overpass.searchNearby(term, latitude, longitude)); }
+            catch (Exception exception) { failures.add("OpenStreetMap nearby: " + messageOf(exception)); }
+        }
     }
 
     private List<SavedPlace> searchNeshanGeocoding(String term) throws Exception {
@@ -109,6 +151,18 @@ public class PlaceSearchRepository {
         return mapIrPlaces(RoutingHttp.getJson(url, "x-api-key", key), term);
     }
 
+    private List<SavedPlace> searchMapIrNearby(String term, double latitude, double longitude) throws Exception {
+        String key = mapir.apiKey();
+        if (key == null) throw new IllegalStateException("map.ir API key is not configured.");
+        JSONObject request = new JSONObject();
+        request.put("text", term);
+        request.put("select", "nearby");
+        request.put("filter", "distance");
+        request.put("lat", latitude);
+        request.put("lon", longitude);
+        return mapIrPlaces(RoutingHttp.postJson("https://map.ir/search/v2", "x-api-key", key, request), term);
+    }
+
     private List<SavedPlace> mapIrPlaces(JSONObject body, String term) {
         JSONArray items = body.optJSONArray("value");
         if (items == null) items = body.optJSONArray("items");
@@ -129,6 +183,31 @@ public class PlaceSearchRepository {
         final String normalizedQuery = normalize(query);
         places.sort(Comparator.comparingInt((SavedPlace place) -> -score(place, normalizedQuery, originLatitude, originLongitude))
                 .thenComparing(place -> place.name == null ? "" : place.name));
+    }
+
+    private void rankNearby(List<SavedPlace> places, double originLatitude, double originLongitude) {
+        places.sort(Comparator.comparingDouble((SavedPlace place) ->
+                        distanceKm(originLatitude, originLongitude, place.latitude, place.longitude))
+                .thenComparing(place -> place.name == null ? "" : normalize(place.name)));
+    }
+
+    private boolean isNearbyPoiQuery(String value) {
+        String term = normalize(value);
+        return containsAny(term,
+                "\u067e\u0645\u067e", "\u0628\u0646\u0632\u06cc\u0646", "fuel", "gas station",
+                "\u0631\u0633\u062a\u0648\u0631\u0627\u0646", "\u06a9\u0627\u0641\u0647", "restaurant", "cafe",
+                "\u062f\u0627\u0631\u0648\u062e\u0627\u0646\u0647", "pharmacy", "\u0628\u06cc\u0645\u0627\u0631\u0633\u062a\u0627\u0646", "hospital",
+                "\u067e\u0627\u0631\u06a9\u06cc\u0646\u06af", "parking", "\u0628\u0627\u0646\u06a9", "bank",
+                "\u0627\u0633\u062a\u0631\u0627\u062d\u062a", "rest area", "services", "cng",
+                "\u062a\u0639\u0645\u06cc\u0631\u06af\u0627\u0647", "mechanic", "\u067e\u0646\u0686\u0631", "tyre", "tire",
+                "\u0628\u0627\u062a\u0631\u06cc", "\u0627\u0645\u062f\u0627\u062f", "\u062f\u0631\u0645\u0627\u0646\u06af\u0627\u0647", "clinic",
+                "\u06a9\u0644\u0627\u0646\u062a\u0631\u06cc", "police", "\u0645\u0633\u062c\u062f", "mosque",
+                "\u0633\u0631\u0648\u06cc\u0633", "toilet", "restroom", "\u062e\u0648\u062f\u067e\u0631\u062f\u0627\u0632", "atm");
+    }
+
+    private boolean containsAny(String value, String... values) {
+        for (String item : values) if (value.contains(item)) return true;
+        return false;
     }
 
     /**
