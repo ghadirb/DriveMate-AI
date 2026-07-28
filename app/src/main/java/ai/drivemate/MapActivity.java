@@ -331,7 +331,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         lastSearchResultsForMap.clear();
         lastSearchResultsForMap.addAll(places);
         searchResultsContent.removeAllViews();
-        addShowAllOnMapButton(places.size());
+        addShowAllOnMapButton(places.size(), this::showAllResultsOnMap);
         LinkedHashMap<String, List<SavedPlace>> groups = new LinkedHashMap<>();
         for (SavedPlace place : places) {
             String group = placeGroup(place);
@@ -412,10 +412,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         List<SavedPlace> sorted = new ArrayList<>(places);
         sorted.sort(Comparator.comparingDouble(place ->
                 distanceKm(originLatitude, originLongitude, place.latitude, place.longitude)));
+        addShowAllOnMapButton(sorted.size(), () -> showNearbyMarkers(sorted, category));
         addSectionTitle(category.display() + " در اطراف شما");
         for (SavedPlace place : sorted) addSearchResultCard(place, "");
         showSearchResultsPanel();
-        showNearbyMarkers(sorted, category);
         routeText.setText(sorted.size() + " مورد " + category.label + " پیدا شد. نزدیک‌ترین "
                 + formatDistance(sorted.get(0)) + " است.");
     }
@@ -464,10 +464,11 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         return builder.buildStyle();
     }
 
-    /** Tappable banner shown above the grouped result list; plots every current text-search
-     *  result as a numbered marker on the map in one tap, mirroring what "اطراف من" already
-     *  does automatically for POI categories. Hidden entirely if the map failed to load. */
-    private void addShowAllOnMapButton(int count) {
+    /** Tappable banner shown above the grouped result list; plots the given places (search
+     *  results or an "اطراف من" category) as markers in one tap and reveals the map by hiding
+     *  the results panel, so both flows behave identically. Hidden entirely if the map failed
+     *  to load. */
+    private void addShowAllOnMapButton(int count, Runnable plotAction) {
         if (map == null) return;
         MaterialCardView card = new MaterialCardView(this);
         card.setCardElevation(dp(2));
@@ -501,7 +502,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         label.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         row.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        card.setOnClickListener(view -> showAllResultsOnMap());
+        card.setOnClickListener(view -> {
+            plotAction.run();
+            hideSearchResults();
+        });
     }
 
     /** Plots every result from the last text search as a numbered marker (same order as the
