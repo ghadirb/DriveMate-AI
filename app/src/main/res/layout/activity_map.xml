@@ -236,23 +236,31 @@
         android:orientation="vertical"
         android:padding="16dp">
 
-        <TextView
-            android:id="@+id/mapDestinationText"
+        <LinearLayout
+            android:id="@+id/mapDestinationInfo"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="برای انتخاب مقصد، جست‌وجو کنید یا روی نقشه نگه دارید."
-            android:textColor="@color/drivemate_text"
-            android:textSize="16sp"
-            android:textStyle="bold" />
+            android:orientation="vertical"
+            android:visibility="gone">
 
-        <TextView
-            android:id="@+id/mapRouteText"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="5dp"
-            android:text="مبدأ: مکان فعلی"
-            android:textColor="@color/drivemate_muted"
-            android:textSize="14sp" />
+            <TextView
+                android:id="@+id/mapDestinationText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:textColor="@color/drivemate_text"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/mapRouteText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="5dp"
+                android:text="مبدأ: مکان فعلی"
+                android:textColor="@color/drivemate_muted"
+                android:textSize="14sp" />
+        </LinearLayout>
 
         <HorizontalScrollView
             android:id="@+id/routeOptionsScroll"

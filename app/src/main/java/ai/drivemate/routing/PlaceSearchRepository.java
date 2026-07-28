@@ -191,18 +191,44 @@ public class PlaceSearchRepository {
                 .thenComparing(place -> place.name == null ? "" : normalize(place.name)));
     }
 
+    /**
+     * Category queries (fuel, food, repair, health, etc.) must always take the nearby-first path
+     * below, or a distant same-name result can beat a genuinely close one - see rankNearby/
+     * keepBestMatchTier. The keyword list mirrors every PoiCategory the "اطراف من" button offers
+     * (so a category never silently regresses to the country-wide address search again the way
+     * "کافی‌شاپ" once did) plus common category words the driver may type that are not one of
+     * the app's own quick-pick categories.
+     */
     private boolean isNearbyPoiQuery(String value) {
         String term = normalize(value);
-        return containsAny(term,
-                "\u067e\u0645\u067e", "\u0628\u0646\u0632\u06cc\u0646", "fuel", "gas station",
-                "\u0631\u0633\u062a\u0648\u0631\u0627\u0646", "\u06a9\u0627\u0641\u0647", "restaurant", "cafe",
+        if (containsAny(term,
+                "\u067e\u0645\u067e", "\u0628\u0646\u0632\u06cc\u0646", "fuel", "gas station", "petrol",
+                "\u0631\u0633\u062a\u0648\u0631\u0627\u0646", "\u06a9\u0627\u0641\u0647", "\u06a9\u0627\u0641\u06cc", "restaurant", "cafe", "coffee",
                 "\u062f\u0627\u0631\u0648\u062e\u0627\u0646\u0647", "pharmacy", "\u0628\u06cc\u0645\u0627\u0631\u0633\u062a\u0627\u0646", "hospital",
                 "\u067e\u0627\u0631\u06a9\u06cc\u0646\u06af", "parking", "\u0628\u0627\u0646\u06a9", "bank",
                 "\u0627\u0633\u062a\u0631\u0627\u062d\u062a", "rest area", "services", "cng",
-                "\u062a\u0639\u0645\u06cc\u0631\u06af\u0627\u0647", "mechanic", "\u067e\u0646\u0686\u0631", "tyre", "tire",
+                "\u062a\u0639\u0645\u06cc\u0631\u06af\u0627\u0647", "\u0645\u06a9\u0627\u0646\u06cc\u06a9\u06cc", "mechanic", "\u067e\u0646\u0686\u0631", "tyre", "tire",
                 "\u0628\u0627\u062a\u0631\u06cc", "\u0627\u0645\u062f\u0627\u062f", "\u062f\u0631\u0645\u0627\u0646\u06af\u0627\u0647", "clinic",
                 "\u06a9\u0644\u0627\u0646\u062a\u0631\u06cc", "police", "\u0645\u0633\u062c\u062f", "mosque",
-                "\u0633\u0631\u0648\u06cc\u0633", "toilet", "restroom", "\u062e\u0648\u062f\u067e\u0631\u062f\u0627\u0632", "atm");
+                "\u0633\u0631\u0648\u06cc\u0633", "toilet", "restroom", "\u062e\u0648\u062f\u067e\u0631\u062f\u0627\u0632", "atm",
+                "\u0633\u0648\u067e\u0631\u0645\u0627\u0631\u06a9\u062a", "\u0645\u06cc\u0646\u06cc \u0645\u0627\u0631\u06a9\u062a", "supermarket", "market",
+                "\u0641\u0631\u0648\u0634\u06af\u0627\u0647", "\u0646\u0627\u0646\u0648\u0627\u06cc\u06cc", "bakery", "\u06a9\u0627\u0631\u0648\u0627\u0634", "car wash",
+                "\u0647\u062a\u0644", "hotel", "\u0645\u0633\u0627\u0641\u0631\u062e\u0627\u0646\u0647", "\u062a\u0631\u0645\u06cc\u0646\u0627\u0644", "terminal",
+                "\u0627\u06cc\u0633\u062a\u06af\u0627\u0647", "station", "\u062e\u0634\u06a9\u0634\u0648\u06cc\u06cc", "\u0622\u0631\u0627\u06cc\u0634\u06af\u0627\u0647",
+                "\u0644\u0648\u0627\u0632\u0645 \u06cc\u062f\u06a9\u06cc", "\u0645\u06cc\u0648\u0647 \u0641\u0631\u0648\u0634\u06cc")) {
+            return true;
+        }
+        // Only the query-contains-category direction is checked (never the reverse): a short
+        // query like "پارک" must not be swallowed by the longer "پارکینگ" category term.
+        for (PoiCategory category : PoiCategory.values()) {
+            String categoryTerm = normalize(category.searchTerm);
+            String categoryLabel = normalize(category.label);
+            if ((!categoryTerm.isEmpty() && term.contains(categoryTerm))
+                    || (!categoryLabel.isEmpty() && term.contains(categoryLabel))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean containsAny(String value, String... values) {

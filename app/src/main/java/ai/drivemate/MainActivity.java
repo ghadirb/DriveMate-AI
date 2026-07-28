@@ -48,6 +48,7 @@ import ai.drivemate.routing.OpenRouteServiceRoutingProvider;
 import ai.drivemate.routing.NavigationEngine;
 import ai.drivemate.routing.PlaceSearchRepository;
 import ai.drivemate.routing.PoiCategory;
+import ai.drivemate.routing.RoutePatternAnalyzer;
 import ai.drivemate.routing.RouteRepository;
 import ai.drivemate.storage.PlaceStore;
 import ai.drivemate.storage.TripStore;
@@ -123,6 +124,11 @@ public class MainActivity extends Activity {
     private long initialGuidanceHeldUntil;
     private SavedPlace pendingSuggestionPlace;
     private PoiCategory pendingSuggestionCategory;
+    private final RoutePatternAnalyzer routePatternAnalyzer = new RoutePatternAnalyzer();
+    private long nextPatternSuggestionCheckAt;
+    private boolean patternSuggestionDialogShowing;
+    private String dismissedPatternSuggestionKey;
+    private long dismissedPatternSuggestionUntil;
     private final android.os.Handler voiceHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private final Runnable automaticStop = this::finishOnlineRecording;
     private final Runnable trafficCheck = this::checkTrafficAndMaybeReroute;
@@ -184,6 +190,7 @@ public class MainActivity extends Activity {
             navigationEngine.onLocation(location);
             smartCompanion.onLocation(location);
             updateTripStats(location);
+            maybeSuggestRecurringDestination(location);
         });
         handleSharedIntent(getIntent());
         registerNavigationReceiver();
@@ -689,6 +696,48 @@ public class MainActivity extends Activity {
                     voicePlayer.announce("api_error", "در دریافت مسیر خطایی رخ داد.");
                     setStatus("خطا در دریافت مسیر: " + error);
                 }));
+    }
+
+    /** Learns recurring destinations purely from on-device trip history and, when the driver is
+     *  not already navigating, offers to start the same trip if today's weekday and time of day
+     *  match a repeated pattern closely enough. Runs at most every few minutes and never nags
+     *  again about the same suggestion for a couple of hours after the driver declines it. */
+    private void maybeSuggestRecurringDestination(Location location) {
+        if (location == null || activeRoute != null || patternSuggestionDialogShowing) return;
+        long now = System.currentTimeMillis();
+        if (now < nextPatternSuggestionCheckAt) return;
+        nextPatternSuggestionCheckAt = now + 5 * 60_000L;
+        final double latitude = location.getLatitude();
+        final double longitude = location.getLongitude();
+        new Thread(() -> {
+            List<TripRecord> trips = tripStore.recent(60);
+            RoutePatternAnalyzer.Suggestion suggestion = routePatternAnalyzer.suggestForNow(trips, now, latitude, longitude);
+            if (suggestion == null) return;
+            final String key = suggestion.place.name + "@" + Math.round(suggestion.place.latitude * 1000d)
+                    + "," + Math.round(suggestion.place.longitude * 1000d);
+            if (key.equals(dismissedPatternSuggestionKey) && now < dismissedPatternSuggestionUntil) return;
+            runOnUiThread(() -> showRecurringDestinationSuggestion(suggestion, key));
+        }).start();
+    }
+
+    private void showRecurringDestinationSuggestion(RoutePatternAnalyzer.Suggestion suggestion, String key) {
+        if (activeRoute != null || patternSuggestionDialogShowing || isFinishing()) return;
+        patternSuggestionDialogShowing = true;
+        new AlertDialog.Builder(this)
+                .setTitle("مسیر تکراری")
+                .setMessage("احتمالاً الان به «" + suggestion.place.name + "» می‌روید.\n" + suggestion.reason)
+                .setPositiveButton("شروع مسیریابی", (dialog, which) -> {
+                    patternSuggestionDialogShowing = false;
+                    startNavigation(suggestion.place);
+                })
+                .setNegativeButton("نه، الان نه", (dialog, which) -> {
+                    patternSuggestionDialogShowing = false;
+                    dismissedPatternSuggestionKey = key;
+                    dismissedPatternSuggestionUntil = System.currentTimeMillis() + 2 * 60 * 60_000L;
+                })
+                .setOnCancelListener(dialog -> patternSuggestionDialogShowing = false)
+                .setCancelable(true)
+                .show();
     }
 
     /** Keeps the dashboard's trip card current on every GPS sample instead of only right after

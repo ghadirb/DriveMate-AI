@@ -108,6 +108,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private Polyline routePolyline;
     private List<RouteResult> routeOptions = new ArrayList<>();
     private RouteResult selectedRoute;
+    private View destinationInfoContainer;
     private TextView destinationText;
     private TextView routeText;
     private EditText searchText;
@@ -160,8 +161,18 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         setContentView(R.layout.activity_map);
         placeStore = new PlaceStore(this);
         locationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
-        originLatitude = getIntent().getDoubleExtra(EXTRA_ORIGIN_LATITUDE, DEFAULT_LATITUDE);
-        originLongitude = getIntent().getDoubleExtra(EXTRA_ORIGIN_LONGITUDE, DEFAULT_LONGITUDE);
+        originLatitude = getIntent().getDoubleExtra(EXTRA_ORIGIN_LATITUDE, Double.NaN);
+        originLongitude = getIntent().getDoubleExtra(EXTRA_ORIGIN_LONGITUDE, Double.NaN);
+        if (Double.isNaN(originLatitude) || Double.isNaN(originLongitude)) {
+            // The caller had no GPS fix yet (e.g. app just launched). Falling straight back to
+            // the hardcoded Tehran default made every "nearby" POI search (fuel, etc.) run around
+            // Tehran instead of the driver's real position until a fresh GPS fix eventually landed
+            // in onResume. Try the device's last-known fix first - it is still far closer to the
+            // truth than a fixed point on the other side of the country.
+            Location lastKnown = bestKnownDeviceLocation();
+            originLatitude = lastKnown != null ? lastKnown.getLatitude() : DEFAULT_LATITUDE;
+            originLongitude = lastKnown != null ? lastKnown.getLongitude() : DEFAULT_LONGITUDE;
+        }
         navigationMode = getIntent().getBooleanExtra(EXTRA_NAVIGATION_MODE, false);
         navigationRouteIndex = Math.max(0, getIntent().getIntExtra(EXTRA_NAVIGATION_ROUTE_INDEX, 0));
         String neshanKey = getIntent().getStringExtra(EXTRA_NESHAN_KEY);
@@ -174,6 +185,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         routeRepository = new RouteRepository(neshan, mapIr,
                 new OpenRouteServiceRoutingProvider(openRouteServiceKey));
 
+        destinationInfoContainer = findViewById(R.id.mapDestinationInfo);
         destinationText = findViewById(R.id.mapDestinationText);
         routeText = findViewById(R.id.mapRouteText);
         searchText = findViewById(R.id.mapSearchText);
@@ -979,6 +991,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     private void selectDestinationWithOptions(SavedPlace place) {
         destination = place;
+        if (destinationInfoContainer != null) destinationInfoContainer.setVisibility(View.VISIBLE);
         destinationText.setText(place.name);
         routeText.setText("در حال آماده‌سازی مسیرهای پیشنهادی...");
         if (routeOptionsScroll != null) routeOptionsScroll.setVisibility(View.GONE);
@@ -999,6 +1012,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     private void selectDestination(SavedPlace place) {
         destination = place;
+        if (destinationInfoContainer != null) destinationInfoContainer.setVisibility(View.VISIBLE);
         destinationText.setText(place.name);
         routeText.setText("در حال آماده‌سازی پیش‌نمایش مسیر...");
         if (map != null) {
@@ -1247,6 +1261,24 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         });
     }
 
+    /** Best-effort synchronous device location: the last cached GPS fix, or the last cached
+     *  network fix if GPS has none, or null if permission is missing or neither exists yet. Used
+     *  as a same-frame fallback so the map never has to sit at a fixed Tehran point while waiting
+     *  for a fresh live GPS update to arrive. */
+    private Location bestKnownDeviceLocation() {
+        if (locationManager == null
+                || checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            return null;
+        }
+        try {
+            Location gps = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+            Location network = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
+            return gps != null ? gps : network;
+        } catch (SecurityException ignored) {
+            return null;
+        }
+    }
+
     private void focusOrigin() {
         if (!isLocationEnabled()) {
             Toast.makeText(this, "مکان گوشی خاموش است. آن را روشن کنید.", Toast.LENGTH_LONG).show();
@@ -1257,15 +1289,11 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             followVehicle = true;
             navigationCameraEnabled = true;
         }
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-            Location gps = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
-            Location network = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
-            Location latest = gps != null ? gps : network;
-            if (latest != null) {
-                originLatitude = latest.getLatitude();
-                originLongitude = latest.getLongitude();
-                showCurrentMarker();
-            }
+        Location latest = bestKnownDeviceLocation();
+        if (latest != null) {
+            originLatitude = latest.getLatitude();
+            originLongitude = latest.getLongitude();
+            showCurrentMarker();
         }
         if (navigationMode && navigationCameraEnabled) {
             updateNavigationCamera();
