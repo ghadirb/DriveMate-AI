@@ -61,7 +61,34 @@
                     android:textColor="@color/white"
                     android:textSize="16sp" />
             </LinearLayout>
+
+            <TextView
+                android:id="@+id/turnExpandIcon"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:text="▾"
+                android:textColor="@color/white"
+                android:textSize="20sp" />
         </LinearLayout>
+
+        <ScrollView
+            android:id="@+id/turnStepsScroll"
+            android:layout_width="match_parent"
+            android:layout_height="280dp"
+            android:layout_marginBottom="10dp"
+            android:background="@drawable/status_panel"
+            android:elevation="6dp"
+            android:fillViewport="true"
+            android:padding="6dp"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:id="@+id/turnStepsContent"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+        </ScrollView>
 
         <LinearLayout
             android:id="@+id/mapSearchBarRow"
@@ -162,6 +189,15 @@
             android:text="مکان" />
 
         <Button
+            android:id="@+id/nearMeButton"
+            android:layout_width="58dp"
+            android:layout_height="58dp"
+            android:layout_marginTop="8dp"
+            android:contentDescription="اطراف من"
+            android:textSize="11sp"
+            android:text="اطراف من" />
+
+        <Button
             android:id="@+id/drivingOverviewButton"
             android:layout_width="58dp"
             android:layout_height="58dp"
@@ -207,6 +243,21 @@
             android:textColor="@color/drivemate_muted"
             android:textSize="14sp" />
 
+        <HorizontalScrollView
+            android:id="@+id/routeOptionsScroll"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:scrollbars="none"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:id="@+id/routeOptionsRow"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal" />
+        </HorizontalScrollView>
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -218,7 +269,7 @@
                 android:layout_width="0dp"
                 android:layout_height="48dp"
                 android:layout_weight="1"
-                android:text="مسیرها" />
+                android:text="نمای کامل مسیر" />
 
             <Button
                 android:id="@+id/saveMapPlaceButton"

@@ -22,7 +22,10 @@ import android.widget.Toast;
 import androidx.core.content.FileProvider;
 
 import java.io.File;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -42,6 +45,7 @@ import ai.drivemate.routing.MapIrRoutingProvider;
 import ai.drivemate.routing.NeshanRoutingProvider;
 import ai.drivemate.routing.NavigationEngine;
 import ai.drivemate.routing.PlaceSearchRepository;
+import ai.drivemate.routing.PoiCategory;
 import ai.drivemate.routing.RouteRepository;
 import ai.drivemate.storage.PlaceStore;
 import ai.drivemate.storage.TripStore;
@@ -68,6 +72,12 @@ public class MainActivity extends Activity {
     private TextView analysisTitleText;
     private TextView analysisBodyText;
     private View analysisPanel;
+    private View tripStatsPanel;
+    private TextView tripEtaText;
+    private TextView tripRemainingText;
+    private TextView tripElapsedText;
+    private TextView tripSpeedText;
+    private final SimpleDateFormat tripEtaFormat = new SimpleDateFormat("HH:mm", Locale.US);
     private TextView listText;
     private Button voiceButton;
     private Button notificationButton;
@@ -88,6 +98,7 @@ public class MainActivity extends Activity {
     private LocalSpeechRecognizer localSpeechRecognizer;
     private SmartDriveCompanion smartCompanion;
     private final NavigationEngine navigationEngine = new NavigationEngine();
+    private RouteResult activeRoute;
     private RuntimeKeys runtimeKeys = new RuntimeKeys();
     private String lastInstruction = "start_navigation";
     private String lastInstructionText = "";
@@ -103,6 +114,8 @@ public class MainActivity extends Activity {
     private long tripStartedAt;
     private int activeTripDistanceMeters;
     private long initialGuidanceHeldUntil;
+    private SavedPlace pendingSuggestionPlace;
+    private PoiCategory pendingSuggestionCategory;
     private final android.os.Handler voiceHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private final Runnable automaticStop = this::finishOnlineRecording;
     private final Runnable trafficCheck = this::checkTrafficAndMaybeReroute;
@@ -121,6 +134,11 @@ public class MainActivity extends Activity {
         analysisPanel = findViewById(R.id.analysisPanel);
         analysisTitleText = findViewById(R.id.analysisTitleText);
         analysisBodyText = findViewById(R.id.analysisBodyText);
+        tripStatsPanel = findViewById(R.id.tripStatsPanel);
+        tripEtaText = findViewById(R.id.tripEtaText);
+        tripRemainingText = findViewById(R.id.tripRemainingText);
+        tripElapsedText = findViewById(R.id.tripElapsedText);
+        tripSpeedText = findViewById(R.id.tripSpeedText);
         listText = findViewById(R.id.listText);
         voiceButton = findViewById(R.id.voiceButton);
         notificationButton = findViewById(R.id.notificationButton);
@@ -152,6 +170,7 @@ public class MainActivity extends Activity {
         locationTracker.setUpdateListener(location -> {
             navigationEngine.onLocation(location);
             smartCompanion.onLocation(location);
+            updateTripStats(location);
         });
         handleSharedIntent(getIntent());
         registerNavigationReceiver();
@@ -474,6 +493,20 @@ public class MainActivity extends Activity {
             case FIND_REST:
                 searchAndNavigate("مجتمع خدماتی");
                 break;
+            case FIND_PLACE:
+                suggestNearbyPlace(command.poiCategory);
+                break;
+            case CONFIRM_SUGGESTION:
+                confirmPendingSuggestion();
+                break;
+            case DECLINE_SUGGESTION:
+                declinePendingSuggestion();
+                break;
+            case FUEL_REFILLED:
+                smartCompanion.resetFuelDistance();
+                voicePlayer.announce("fuel_refilled", "باشه، شمارش مسافت از آخرین سوخت‌گیری از نو شروع شد.");
+                setStatus("شمارش مسافت سوخت بازنشانی شد.");
+                break;
             case VOLUME_UP:
                 voicePlayer.increaseVolume();
                 voicePlayer.announce("voice_louder", "صدای راهنما بیشتر شد.");
@@ -585,6 +618,7 @@ public class MainActivity extends Activity {
                             route.distanceMeters, route.durationSeconds, System.currentTimeMillis()));
                     writeAutomaticBackup();
                     activeDestination = destination;
+                    activeRoute = route;
                     tripStartedAt = System.currentTimeMillis();
                     activeTripDistanceMeters = route.distanceMeters;
                     smartCompanion.start();
@@ -624,6 +658,46 @@ public class MainActivity extends Activity {
                     voicePlayer.announce("api_error", "در دریافت مسیر خطایی رخ داد.");
                     setStatus("خطا در دریافت مسیر: " + error);
                 }));
+    }
+
+    /** Keeps the dashboard's trip card current on every GPS sample instead of only right after
+     *  the route is chosen, so ETA, remaining distance, elapsed time and speed never go stale
+     *  while a trip is active. */
+    private void updateTripStats(Location location) {
+        if (tripStatsPanel == null) return;
+        if (!navigationEngine.isNavigating() || activeRoute == null || activeDestination == null) {
+            tripStatsPanel.setVisibility(View.GONE);
+            return;
+        }
+        tripStatsPanel.setVisibility(View.VISIBLE);
+        RouteStep step = navigationEngine.currentStep();
+        int remainingMeters;
+        if (step != null) {
+            Location target = new Location("route");
+            target.setLatitude(step.latitude);
+            target.setLongitude(step.longitude);
+            remainingMeters = Math.round(location.distanceTo(target));
+            int index = navigationEngine.currentStepIndex();
+            for (int i = index + 1; i < activeRoute.steps.size(); i++) remainingMeters += activeRoute.steps.get(i).distanceMeters;
+        } else {
+            remainingMeters = activeRoute.distanceMeters;
+        }
+        int totalMeters = Math.max(1, activeRoute.distanceMeters);
+        double fraction = Math.max(0.02, Math.min(1.0, remainingMeters / (double) totalMeters));
+        int remainingSeconds = (int) Math.round(activeRoute.durationSeconds * fraction);
+        long arrivalAt = System.currentTimeMillis() + remainingSeconds * 1000L;
+        int elapsedMinutes = tripStartedAt == 0L ? 0 : Math.max(0, (int) ((System.currentTimeMillis() - tripStartedAt) / 60_000L));
+        float speedKmh = location.hasSpeed() ? location.getSpeed() * 3.6f : 0f;
+        tripEtaText.setText("رسیدن ساعت " + tripEtaFormat.format(new java.util.Date(arrivalAt))
+                + " • " + formatTripDistance(remainingMeters) + " مانده");
+        tripRemainingText.setText(Math.max(1, Math.round(remainingSeconds / 60f)) + " دقیقه مانده");
+        tripElapsedText.setText(elapsedMinutes + " دقیقه طی شده");
+        tripSpeedText.setText(Math.round(speedKmh) + " کیلومتر/ساعت");
+    }
+
+    private String formatTripDistance(int meters) {
+        if (meters < 1000) return Math.max(0, meters) + " متر";
+        return String.format(Locale.US, "%.1f کیلومتر", meters / 1000.0);
     }
 
     private void openHomeOrWork(String kind, String defaultName) {
@@ -708,6 +782,7 @@ public class MainActivity extends Activity {
                 "destination_arrived", fallback, 15_000L);
         setStatus("به " + destination.name + " رسیدید.");
         activeDestination = null;
+        activeRoute = null;
         tripStartedAt = 0L;
         activeTripDistanceMeters = 0;
         initialGuidanceHeldUntil = 0L;
@@ -715,6 +790,7 @@ public class MainActivity extends Activity {
         voiceHandler.removeCallbacks(trafficCheck);
         stopBackgroundNavigation();
         hideTripAnalysis();
+        if (tripStatsPanel != null) tripStatsPanel.setVisibility(View.GONE);
     }
 
     private void searchAndNavigate(String term) {
@@ -928,24 +1004,16 @@ public class MainActivity extends Activity {
                     "رانندگی پیوسته طولانی شده است؛ در اولین محل امن توقف و استراحت کنید.", false, 25_000L);
             return;
         }
+        if ("fuel_low_guess".equals(event)) {
+            suggestFuelStop();
+            return;
+        }
         switch (event) {
-            case "speed":
-                voicePlayer.announce("speeding_danger", "لطفا سرعت خود را کم کنید.");
-                break;
-            case "slow":
-                voicePlayer.announce("heavy_traffic", "به نظر می‌رسد در مسیر ترافیک سنگینی وجود دارد.");
-                break;
             case "traffic_reroute":
                 rerouteForTraffic();
                 break;
             case "fuel_check":
                 voicePlayer.speak("حدود نود دقیقه از شروع سفر گذشته است. اگر نیاز به سوخت‌گیری دارید، بگویید پمپ بنزین.");
-                break;
-            case "rest":
-                askAi("یادآوری ایمنی: بیش از دو ساعت رانندگی پیوسته بدون توقف ده دقیقه‌ای ثبت شده است. یک هشدار فارسی بسیار کوتاه، آرام و عملی برای پیشنهاد استراحت بگو.");
-                break;
-            case "fatigue":
-                askAi("هشدار ایمنی غیرپزشکی: بیش از سه ساعت رانندگی پیوسته بدون توقف ده دقیقه‌ای ثبت شده است. در یک جمله کوتاه و آرام پیشنهاد توقف در محل امن بده؛ ادعای تشخیص پزشکی نکن.");
                 break;
             case "fatigue_offline":
                 voicePlayer.speak("بیش از دو ساعت است در حال رانندگی هستید. بهتر است در اولین فرصت استراحت کنید. برای پیدا کردن نزدیک‌ترین استراحتگاه بگویید «استراحتگاه».");
@@ -974,6 +1042,161 @@ public class MainActivity extends Activity {
             int meters = Math.round(location.distanceTo(found));
             voicePlayer.speak("نزدیک‌ترین " + term + ": " + place.name + "، حدود " + meters + " متر فاصله.");
         }), error -> runOnUiThread(() -> voicePlayer.speak("مکان نزدیک تأیید نشد.")));
+    }
+
+    /** Entry point for every "نزدیک‌ترین X کجاست؟" style voice command (FIND_PLACE). Looks up the
+     *  nearest match and speaks a distance-based suggestion; the driver confirms with "بله"/"باشه"
+     *  (CONFIRM_SUGGESTION) to actually start navigation, matching the requested dialogue style. */
+    private void suggestNearbyPlace(PoiCategory category) {
+        if (category == null) return;
+        Location location = locationTracker.getLastLocation();
+        if (location == null) { setStatus("برای پیدا کردن " + category.label + "، GPS باید آماده باشد."); return; }
+        setStatus("در حال پیدا کردن " + category.label + " در اطراف...");
+        boolean nightPriority = isLateNight()
+                && (category == PoiCategory.HOSPITAL || category == PoiCategory.CLINIC || category == PoiCategory.PHARMACY);
+        // Real opening hours aren't available from the search provider; biasing the query text
+        // toward "شبانه روزی" (24-hour) listings is an honest approximation, not verified live data.
+        String term = nightPriority ? category.searchTerm + " شبانه روزی" : category.searchTerm;
+        placeSearchRepository.searchAll(term, location.getLatitude(), location.getLongitude(),
+                places -> runOnUiThread(() -> announceNearbySuggestion(category, places, location, nightPriority)),
+                error -> runOnUiThread(() -> { setStatus(error); voicePlayer.speak(category.label + " در اطراف پیدا نشد."); }));
+    }
+
+    private void announceNearbySuggestion(PoiCategory category, List<SavedPlace> places, Location origin, boolean nightPriority) {
+        if (places == null || places.isEmpty()) {
+            voicePlayer.speak(category.label + " نزدیکی پیدا نشد.");
+            return;
+        }
+        List<SavedPlace> sorted = new ArrayList<>(places);
+        sorted.sort(Comparator.comparingDouble(place ->
+                distanceKm(origin.getLatitude(), origin.getLongitude(), place.latitude, place.longitude)));
+        SavedPlace nearest = sorted.get(0);
+        double km = distanceKm(origin.getLatitude(), origin.getLongitude(), nearest.latitude, nearest.longitude);
+        int etaMinutes = Math.max(1, (int) Math.round(km / 40.0 * 60.0));
+        pendingSuggestionPlace = nearest;
+        pendingSuggestionCategory = category;
+        String distancePhrase = km < 1d ? Math.round(km * 1000) + " متر" : String.format(Locale.US, "%.1f کیلومتر", km);
+        String message;
+        if (category == PoiCategory.RESTAURANT || category == PoiCategory.COFFEE_SHOP) {
+            message = sorted.size() + " " + category.label + " در نزدیکی مسیر است. نزدیک‌ترین حدود "
+                    + etaMinutes + " دقیقه دیگر است. مسیر عوض شود؟";
+        } else {
+            message = "نزدیک‌ترین " + category.label + " " + distancePhrase + " فاصله دارد. مسیر عوض شود؟";
+        }
+        if (nightPriority) message += " (بر اساس عنوان شبانه‌روزی ثبت‌شده؛ ساعت کاری واقعی تأیید نشده است.)";
+        setStatus(message);
+        voicePlayer.speak(message);
+    }
+
+    private void confirmPendingSuggestion() {
+        if (pendingSuggestionPlace == null) { voicePlayer.speak("در حال حاضر پیشنهادی برای تأیید وجود ندارد."); return; }
+        SavedPlace place = pendingSuggestionPlace;
+        pendingSuggestionPlace = null;
+        pendingSuggestionCategory = null;
+        startNavigation(place);
+    }
+
+    private void declinePendingSuggestion() {
+        if (pendingSuggestionPlace == null) return;
+        pendingSuggestionPlace = null;
+        pendingSuggestionCategory = null;
+        voicePlayer.speak("باشه، مسیر تغییر نمی‌کند.");
+    }
+
+    private boolean isLateNight() {
+        int hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY);
+        return hour >= 23 || hour < 6;
+    }
+
+    private double distanceKm(double latitudeA, double longitudeA, double latitudeB, double longitudeB) {
+        double latitudeDelta = Math.toRadians(latitudeB - latitudeA);
+        double longitudeDelta = Math.toRadians(longitudeB - longitudeA);
+        double value = Math.sin(latitudeDelta / 2d) * Math.sin(latitudeDelta / 2d)
+                + Math.cos(Math.toRadians(latitudeA)) * Math.cos(Math.toRadians(latitudeB))
+                * Math.sin(longitudeDelta / 2d) * Math.sin(longitudeDelta / 2d);
+        return 6371d * 2d * Math.atan2(Math.sqrt(value), Math.sqrt(1d - value));
+    }
+
+    /** Picks the nearest place for a proactive (non-voice-triggered) suggestion, arms the pending
+     *  confirmation just like a voice-triggered one, and returns a Persian clause to fold into the
+     *  existing "rest"/"fatigue"/"fuel_low_guess" spoken messages. Empty string if none found. */
+    private String nearestPlaceClause(List<SavedPlace> places, Location origin, PoiCategory category) {
+        if (places == null || places.isEmpty()) return "";
+        List<SavedPlace> sorted = new ArrayList<>(places);
+        sorted.sort(Comparator.comparingDouble(place ->
+                distanceKm(origin.getLatitude(), origin.getLongitude(), place.latitude, place.longitude)));
+        SavedPlace nearest = sorted.get(0);
+        double km = distanceKm(origin.getLatitude(), origin.getLongitude(), nearest.latitude, nearest.longitude);
+        pendingSuggestionPlace = nearest;
+        pendingSuggestionCategory = category;
+        String distancePhrase = km < 1d ? Math.round(km * 1000) + " متر" : String.format(Locale.US, "%.1f کیلومتر", km);
+        return " نزدیک‌ترین " + category.label + " (" + nearest.name + ") " + distancePhrase
+                + " فاصله دارد؛ برای مسیریابی به آنجا بگویید بله.";
+    }
+
+    /** Proactive version of the "rest" smart-event: same 2-hour reminder as before, now with the
+     *  nearest restaurant/rest option looked up and offered for confirmation. */
+    private void suggestRestStop() {
+        Location location = locationTracker.getLastLocation();
+        String baseFallback = "حدود دو ساعت رانندگی کرده‌اید؛ در اولین محل امن کمی استراحت کنید.";
+        if (location == null) {
+            playPreparedOrRequest("rest-reminder", DrivingIntelligenceCoordinator.Priority.DRIVING,
+                    "یادآوری ایمنی: بیش از دو ساعت رانندگی پیوسته بدون توقف ده دقیقه‌ای ثبت شده است. یک هشدار فارسی کوتاه و عملی برای استراحت بگو.",
+                    baseFallback, 25_000L);
+            return;
+        }
+        placeSearchRepository.searchAll(PoiCategory.RESTAURANT.searchTerm, location.getLatitude(), location.getLongitude(),
+                places -> runOnUiThread(() -> {
+                    String clause = nearestPlaceClause(places, location, PoiCategory.RESTAURANT);
+                    requestIntelligence(DrivingIntelligenceCoordinator.Priority.DRIVING,
+                            "یادآوری ایمنی: بیش از دو ساعت رانندگی پیوسته ثبت شده است." + clause
+                                    + " یک هشدار فارسی کوتاه و عملی برای استراحت بگو و همین مکان پیشنهادی را هم در جمله بیاور.",
+                            baseFallback + clause, false, 25_000L);
+                }),
+                error -> runOnUiThread(() -> playPreparedOrRequest("rest-reminder", DrivingIntelligenceCoordinator.Priority.DRIVING,
+                        "یادآوری ایمنی: بیش از دو ساعت رانندگی پیوسته ثبت شده. یک هشدار کوتاه بگو.", baseFallback, 25_000L)));
+    }
+
+    /** Proactive version of the "fatigue" smart-event: same 3-hour safety warning as before, now
+     *  paired with the nearest coffee shop for a concrete place to pull over. */
+    private void suggestFatigueBreak() {
+        Location location = locationTracker.getLastLocation();
+        String baseFallback = "رانندگی پیوسته طولانی شده است؛ در اولین محل امن توقف و استراحت کنید.";
+        if (location == null) {
+            requestIntelligence(DrivingIntelligenceCoordinator.Priority.SAFETY,
+                    "هشدار ایمنی غیرپزشکی: بیش از سه ساعت رانندگی پیوسته ثبت شده است. در یک جمله کوتاه و آرام پیشنهاد توقف در محل امن بده؛ ادعای تشخیص پزشکی نکن.",
+                    baseFallback, false, 25_000L);
+            return;
+        }
+        placeSearchRepository.searchAll(PoiCategory.COFFEE_SHOP.searchTerm, location.getLatitude(), location.getLongitude(),
+                places -> runOnUiThread(() -> {
+                    String clause = nearestPlaceClause(places, location, PoiCategory.COFFEE_SHOP);
+                    requestIntelligence(DrivingIntelligenceCoordinator.Priority.SAFETY,
+                            "هشدار ایمنی غیرپزشکی: بیش از سه ساعت رانندگی پیوسته ثبت شده است." + clause
+                                    + " در یک جمله کوتاه و آرام پیشنهاد توقف بده و همین مکان را بگو؛ ادعای تشخیص پزشکی نکن.",
+                            baseFallback + clause, false, 25_000L);
+                }),
+                error -> runOnUiThread(() -> requestIntelligence(DrivingIntelligenceCoordinator.Priority.SAFETY,
+                        "هشدار ایمنی غیرپزشکی: بیش از سه ساعت رانندگی پیوسته ثبت شده است. در یک جمله کوتاه پیشنهاد توقف بده.",
+                        baseFallback, false, 25_000L)));
+    }
+
+    /** Handles the SmartDriveCompanion "fuel_low_guess" event: an approximate distance-based
+     *  reminder (see SmartDriveCompanion's FUEL_GUESS_DISTANCE_METERS), paired with the nearest
+     *  real gas station. The driver resets the counter by saying "بنزین زدم". */
+    private void suggestFuelStop() {
+        Location location = locationTracker.getLastLocation();
+        String baseFallback = "مسافت قابل توجهی رانندگی کرده‌اید و ممکن است سوخت کم باشد. اگر سوخت‌گیری کرده‌اید بگویید «بنزین زدم».";
+        if (location == null) { voicePlayer.speak(baseFallback); return; }
+        placeSearchRepository.searchAll(PoiCategory.FUEL.searchTerm, location.getLatitude(), location.getLongitude(),
+                places -> runOnUiThread(() -> {
+                    String clause = nearestPlaceClause(places, location, PoiCategory.FUEL);
+                    requestIntelligence(DrivingIntelligenceCoordinator.Priority.DRIVING,
+                            "یادآوری تقریبی: مسافت زیادی از آخرین سوخت‌گیری تأییدشده رانندگی شده است؛ این تشخیص واقعی سطح سوخت نیست."
+                                    + clause + " یک یادآوری فارسی کوتاه و آرام بگو.",
+                            baseFallback + clause, false, 25_000L);
+                }),
+                error -> runOnUiThread(() -> voicePlayer.speak(baseFallback)));
     }
 
     private void speakShort(String answer) {
@@ -1203,6 +1426,7 @@ public class MainActivity extends Activity {
     }
 
     private void replaceRouteForTraffic(RouteResult route, SavedPlace destination, int gainSeconds) {
+        activeRoute = route;
         navigationEngine.start(route, new NavigationEngine.Listener() {
             @Override public void onInstruction(RouteStep step) { runOnUiThread(() -> announceRouteStep(step)); }
             @Override public void onOffRoute() { runOnUiThread(() -> rerouteFromCurrentLocation()); }
@@ -1275,6 +1499,8 @@ public class MainActivity extends Activity {
                 "مسیریابی متوقف شده است. یک پیام فارسی کوتاه و طبیعی برای راننده بگو.",
                 "stop_navigation", message, 12_000L);
         setStatus(message);
+        activeRoute = null;
+        if (tripStatsPanel != null) tripStatsPanel.setVisibility(View.GONE);
     }
 
     private void registerNavigationReceiver() {

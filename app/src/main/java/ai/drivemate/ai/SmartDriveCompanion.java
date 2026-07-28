@@ -15,6 +15,12 @@ import java.util.Map;
 public class SmartDriveCompanion {
     public interface Listener { void onSmartEvent(String event, String facts); }
 
+    /** No fuel sensor exists, so this is a rough distance-based reminder only, not a real fuel
+     *  gauge: after roughly this much driving in one session (reset by resetFuelDistance(), which
+     *  the driver triggers by saying they refueled) a low-fuel suggestion fires once. */
+    private static final double FUEL_GUESS_DISTANCE_METERS = 380_000d;
+    private static final long FUEL_GUESS_COOLDOWN_MS = 3 * 60 * 60_000L;
+
     private final Listener listener;
     private final Map<String, Long> lastEvents = new HashMap<>();
     private boolean active;
@@ -22,6 +28,8 @@ public class SmartDriveCompanion {
     private long slowSince;
     private long stoppedSince;
     private long continuousDrivingSince;
+    private Location previousFuelLocation;
+    private double fuelDistanceMeters;
 
     public SmartDriveCompanion(Listener listener) { this.listener = listener; }
 
@@ -31,14 +39,29 @@ public class SmartDriveCompanion {
         slowSince = 0L;
         stoppedSince = 0L;
         continuousDrivingSince = startedAt;
+        previousFuelLocation = null;
+        fuelDistanceMeters = 0d;
         lastEvents.clear();
     }
 
     public void stop() { active = false; slowSince = 0L; stoppedSince = 0L; }
 
+    /** Called when the driver says they refueled (e.g. "بنزین زدم"); restarts the distance count. */
+    public void resetFuelDistance() {
+        fuelDistanceMeters = 0d;
+        previousFuelLocation = null;
+        lastEvents.remove("fuel_low_guess");
+    }
+
     public void onLocation(Location location) {
         if (!active || location == null) return;
         long now = System.currentTimeMillis();
+        if (previousFuelLocation != null) fuelDistanceMeters += previousFuelLocation.distanceTo(location);
+        previousFuelLocation = location;
+        if (fuelDistanceMeters >= FUEL_GUESS_DISTANCE_METERS && allow("fuel_low_guess", now, FUEL_GUESS_COOLDOWN_MS)) {
+            listener.onSmartEvent("fuel_low_guess", "حدود " + Math.round(fuelDistanceMeters / 1000d)
+                    + " کیلومتر رانندگی بدون سوخت‌گیری تأییدشده ثبت شده است؛ این فقط یک برآورد تقریبی مسافت است، نه سطح واقعی سوخت.");
+        }
         float speedKmh = location.hasSpeed() ? location.getSpeed() * 3.6f : 0f;
 
         // Traffic crawl is not a rest. Only a near-full stop sustained for ten minutes resets

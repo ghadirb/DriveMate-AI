@@ -8,6 +8,11 @@ public enum CommandType {
     NAVIGATE_NAMED_PLACE,
     FIND_FUEL,
     FIND_REST,
+    /** Generic "find nearby POI" command; the target category travels on Command.poiCategory. */
+    FIND_PLACE,
+    CONFIRM_SUGGESTION,
+    DECLINE_SUGGESTION,
+    FUEL_REFILLED,
     VOLUME_UP,
     VOLUME_DOWN,
     REPEAT,

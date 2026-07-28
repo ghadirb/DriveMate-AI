@@ -8,9 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 import ai.drivemate.model.SavedPlace;
 
@@ -201,13 +199,23 @@ public class PlaceSearchRepository {
 
     private void addUnique(List<SavedPlace> target, List<SavedPlace> additions) {
         if (additions == null) return;
-        Set<String> seen = new HashSet<>();
-        for (SavedPlace place : target) seen.add(keyOf(place));
-        for (SavedPlace place : additions) if (seen.add(keyOf(place))) target.add(place);
+        for (SavedPlace place : additions) {
+            if (!hasNearDuplicate(target, place)) target.add(place);
+        }
     }
 
-    private String keyOf(SavedPlace place) {
-        return normalize(place.name) + "|" + Math.round(place.latitude * 10000d) + "|" + Math.round(place.longitude * 10000d);
+    /**
+     * Providers rarely agree on the exact coordinate for the same POI (different centroid or
+     * entrance point), so an exact-key match misses genuine duplicates. Treat two results as the
+     * same place when the normalized name matches and they sit within typical provider variance.
+     */
+    private boolean hasNearDuplicate(List<SavedPlace> target, SavedPlace candidate) {
+        String candidateName = normalize(candidate.name);
+        for (SavedPlace existing : target) {
+            if (candidateName.isEmpty() || !normalize(existing.name).equals(candidateName)) continue;
+            if (distanceKm(existing.latitude, existing.longitude, candidate.latitude, candidate.longitude) <= 0.15d) return true;
+        }
+        return false;
     }
 
     private String normalize(String value) {

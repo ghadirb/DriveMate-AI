@@ -31,6 +31,7 @@ import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
@@ -52,6 +53,7 @@ import org.neshan.mapsdk.model.Polyline;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -66,6 +68,7 @@ import ai.drivemate.routing.MapIrRoutingProvider;
 import ai.drivemate.routing.NavigationEngine;
 import ai.drivemate.routing.NeshanRoutingProvider;
 import ai.drivemate.routing.PlaceSearchRepository;
+import ai.drivemate.routing.PoiCategory;
 import ai.drivemate.routing.RouteRepository;
 import ai.drivemate.storage.PlaceStore;
 
@@ -106,6 +109,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private ProgressBar searchProgress;
     private ScrollView searchResultsPanel;
     private LinearLayout searchResultsContent;
+    private HorizontalScrollView routeOptionsScroll;
+    private LinearLayout routeOptionsRow;
+    private final List<Polyline> alternateRoutePolylines = new ArrayList<>();
     private SavedPlace destination;
     private double originLatitude;
     private double originLongitude;
@@ -125,11 +131,20 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private TextView turnArrowText;
     private TextView turnDistanceText;
     private TextView turnInstructionText;
+    private TextView turnExpandIcon;
+    private ScrollView turnStepsScroll;
+    private LinearLayout turnStepsContent;
+    private boolean turnStepsExpanded;
     private final Handler searchHandler = new Handler(Looper.getMainLooper());
     private Runnable pendingSuggestionSearch;
     private int activeSearchRequest;
     private boolean selectingSearchResult;
     private boolean orientationWarningLogged;
+    private PoiCategory activeNearbyCategory;
+    private final List<Marker> nearbyMarkers = new ArrayList<>();
+    /** Backing list for the "نمایش روی نقشه" button on the search-results panel; holds
+     *  whatever the last plain-text search returned so the button can plot it on demand. */
+    private final List<SavedPlace> lastSearchResultsForMap = new ArrayList<>();
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -154,11 +169,16 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         searchProgress = findViewById(R.id.mapSearchProgress);
         searchResultsPanel = findViewById(R.id.searchResultsPanel);
         searchResultsContent = findViewById(R.id.searchResultsContent);
+        routeOptionsScroll = findViewById(R.id.routeOptionsScroll);
+        routeOptionsRow = findViewById(R.id.routeOptionsRow);
         turnBannerContainer = findViewById(R.id.turnBannerContainer);
         turnArrowText = findViewById(R.id.turnArrowText);
         turnDistanceText = findViewById(R.id.turnDistanceText);
         turnInstructionText = findViewById(R.id.turnInstructionText);
-        turnBannerContainer.setOnClickListener(v -> showTurnByTurnSteps());
+        turnExpandIcon = findViewById(R.id.turnExpandIcon);
+        turnStepsScroll = findViewById(R.id.turnStepsScroll);
+        turnStepsContent = findViewById(R.id.turnStepsContent);
+        turnBannerContainer.setOnClickListener(v -> toggleTurnSteps());
         wireControls();
         initializeMap();
         if (navigationMode) {
@@ -175,8 +195,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             findViewById(R.id.navigationCameraButton).setVisibility(View.VISIBLE);
             findViewById(R.id.routeOptionsButton).setVisibility(View.GONE);
             findViewById(R.id.saveMapPlaceButton).setVisibility(View.GONE);
+            findViewById(R.id.routeOptionsScroll).setVisibility(View.GONE);
             findViewById(R.id.mapSearchBarRow).setVisibility(View.GONE);
             findViewById(R.id.savedPlacesButton).setVisibility(View.GONE);
+            findViewById(R.id.nearMeButton).setVisibility(View.GONE);
         }
     }
 
@@ -190,8 +212,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         findViewById(R.id.mapCloseButton).setOnClickListener(v -> finish());
         findViewById(R.id.myLocationButton).setOnClickListener(v -> focusOrigin());
         findViewById(R.id.savedPlacesButton).setOnClickListener(v -> chooseSavedPlace());
+        findViewById(R.id.nearMeButton).setOnClickListener(v -> showNearMeCategories());
         findViewById(R.id.saveMapPlaceButton).setOnClickListener(v -> saveSelectedPlace());
-        findViewById(R.id.routeOptionsButton).setOnClickListener(v -> chooseRouteOption());
+        findViewById(R.id.routeOptionsButton).setOnClickListener(v -> centerOnSelectedRoute());
         findViewById(R.id.drivingOverviewButton).setOnClickListener(v -> showRouteOverview());
         View navigationCameraButton = findViewById(R.id.navigationCameraButton);
         navigationCameraButton.setTooltipText("نمای رانندگی و دنبال کردن خودرو");
@@ -278,6 +301,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     private void performSearch(String term, boolean userInitiated) {
+        activeNearbyCategory = null;
+        clearNearbyMarkers();
         final int requestId = ++activeSearchRequest;
         setSearchLoading(true);
         if (userInitiated) routeText.setText("در حال جست‌وجوی مقصد...");
@@ -297,12 +322,16 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     private void showSearchResults(List<SavedPlace> places, String query) {
         if (places == null || places.isEmpty()) {
+            lastSearchResultsForMap.clear();
             searchResultsContent.removeAllViews();
             addSectionTitle("نتیجه‌ای پیدا نشد");
             showSearchResultsPanel();
             return;
         }
+        lastSearchResultsForMap.clear();
+        lastSearchResultsForMap.addAll(places);
         searchResultsContent.removeAllViews();
+        addShowAllOnMapButton(places.size());
         LinkedHashMap<String, List<SavedPlace>> groups = new LinkedHashMap<>();
         for (SavedPlace place : places) {
             String group = placeGroup(place);
@@ -322,6 +351,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     private void showRecentSearches() {
         if (navigationMode) return;
+        activeNearbyCategory = null;
+        clearNearbyMarkers();
+        lastSearchResultsForMap.clear();
         List<SavedPlace> recent = placeStore.recentPlaces();
         if (recent == null || recent.isEmpty()) {
             hideSearchResults();
@@ -332,6 +364,213 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         int limit = Math.min(6, recent.size());
         for (int i = 0; i < limit; i++) addSearchResultCard(recent.get(i), "");
         showSearchResultsPanel();
+    }
+
+    /** Entry point for the "اطراف من" button: lets the driver pick a POI type, then searches
+     *  and shows it exactly like a text search (same result cards, same tap-to-select-destination
+     *  behavior) but also drops a marker for every nearby match on the map itself. */
+    private void showNearMeCategories() {
+        PoiCategory[] categories = PoiCategory.values();
+        String[] items = new String[categories.length];
+        for (int i = 0; i < categories.length; i++) items[i] = categories[i].display();
+        new AlertDialog.Builder(this)
+                .setTitle("اطراف من")
+                .setItems(items, (dialog, which) -> searchNearbyCategory(categories[which]))
+                .show();
+    }
+
+    private void searchNearbyCategory(PoiCategory category) {
+        if (pendingSuggestionSearch != null) searchHandler.removeCallbacks(pendingSuggestionSearch);
+        activeNearbyCategory = category;
+        searchText.setText("");
+        closeSearchUi();
+        setSearchLoading(true);
+        routeText.setText("در حال جست‌وجوی " + category.label + " در اطراف شما...");
+        final int requestId = ++activeSearchRequest;
+        placeSearchRepository.searchAll(category.searchTerm, originLatitude, originLongitude,
+                places -> runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed() || requestId != activeSearchRequest) return;
+                    setSearchLoading(false);
+                    showNearbyResults(places, category);
+                }),
+                error -> runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed() || requestId != activeSearchRequest) return;
+                    setSearchLoading(false);
+                    routeText.setText(category.label + " در اطراف پیدا نشد: " + error);
+                }));
+    }
+
+    private void showNearbyResults(List<SavedPlace> places, PoiCategory category) {
+        clearNearbyMarkers();
+        searchResultsContent.removeAllViews();
+        if (places == null || places.isEmpty()) {
+            addSectionTitle(category.display() + " - موردی در اطراف پیدا نشد");
+            showSearchResultsPanel();
+            routeText.setText("موردی برای " + category.label + " در اطراف پیدا نشد.");
+            return;
+        }
+        List<SavedPlace> sorted = new ArrayList<>(places);
+        sorted.sort(Comparator.comparingDouble(place ->
+                distanceKm(originLatitude, originLongitude, place.latitude, place.longitude)));
+        addSectionTitle(category.display() + " در اطراف شما");
+        for (SavedPlace place : sorted) addSearchResultCard(place, "");
+        showSearchResultsPanel();
+        showNearbyMarkers(sorted, category);
+        routeText.setText(sorted.size() + " مورد " + category.label + " پیدا شد. نزدیک‌ترین "
+                + formatDistance(sorted.get(0)) + " است.");
+    }
+
+    private void showNearbyMarkers(List<SavedPlace> places, PoiCategory category) {
+        if (map == null) return;
+        MarkerStyle style = poiMarkerStyle(category.icon);
+        int limit = Math.min(20, places.size());
+        for (int i = 0; i < limit; i++) {
+            SavedPlace place = places.get(i);
+            Marker marker = new Marker(new LatLng(place.latitude, place.longitude), style);
+            map.addMarker(marker);
+            nearbyMarkers.add(marker);
+        }
+        SavedPlace nearest = places.get(0);
+        map.moveCamera(new LatLng(nearest.latitude, nearest.longitude), 0.3f);
+        map.setZoom(14f, 0.3f);
+    }
+
+    private void clearNearbyMarkers() {
+        if (map != null) for (Marker marker : nearbyMarkers) map.removeMarker(marker);
+        nearbyMarkers.clear();
+    }
+
+    /** Same round-badge style as other markers, with the category emoji drawn on top so POI
+     *  markers are visually distinct from the plain destination/vehicle dots. */
+    private MarkerStyle poiMarkerStyle(String emoji) {
+        Bitmap bitmap = Bitmap.createBitmap(72, 72, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        Paint circle = new Paint(Paint.ANTI_ALIAS_FLAG);
+        circle.setColor(0xffffffff);
+        canvas.drawCircle(36f, 36f, 30f, circle);
+        circle.setStyle(Paint.Style.STROKE);
+        circle.setStrokeWidth(3f);
+        circle.setColor(0xff176b87);
+        canvas.drawCircle(36f, 36f, 30f, circle);
+        Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
+        text.setTextSize(34f);
+        text.setTextAlign(Paint.Align.CENTER);
+        Paint.FontMetrics metrics = text.getFontMetrics();
+        float y = 36f - (metrics.ascent + metrics.descent) / 2f;
+        canvas.drawText(emoji, 36f, y, text);
+        MarkerStyleBuilder builder = new MarkerStyleBuilder();
+        builder.setSize(38f);
+        builder.setBitmap(BitmapUtils.createBitmapFromAndroidBitmap(bitmap));
+        return builder.buildStyle();
+    }
+
+    /** Tappable banner shown above the grouped result list; plots every current text-search
+     *  result as a numbered marker on the map in one tap, mirroring what "اطراف من" already
+     *  does automatically for POI categories. Hidden entirely if the map failed to load. */
+    private void addShowAllOnMapButton(int count) {
+        if (map == null) return;
+        MaterialCardView card = new MaterialCardView(this);
+        card.setCardElevation(dp(2));
+        card.setRadius(dp(14));
+        card.setCardBackgroundColor(0xff176b87);
+        card.setRippleColor(ColorStateList.valueOf(0x33ffffff));
+        card.setClickable(true);
+        card.setFocusable(true);
+        card.setUseCompatPadding(true);
+        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        cardParams.setMargins(0, dp(2), 0, dp(9));
+        searchResultsContent.addView(card, cardParams);
+
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setPadding(dp(14), dp(11), dp(12), dp(11));
+        card.addView(row, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView icon = new TextView(this);
+        icon.setText("\ud83d\udccd");
+        icon.setTextSize(19f);
+        row.addView(icon, new LinearLayout.LayoutParams(dp(30), ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView label = new TextView(this);
+        label.setText("نمایش " + count + " نتیجه روی نقشه");
+        label.setTextColor(0xffffffff);
+        label.setTextSize(15f);
+        label.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        row.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        card.setOnClickListener(view -> showAllResultsOnMap());
+    }
+
+    /** Plots every result from the last text search as a numbered marker (same order as the
+     *  list below) and frames the camera so all of them fit on screen at once. Reuses the same
+     *  nearbyMarkers list/clear path as the "اطراف من" flow, so the two never leave stray pins
+     *  behind for each other. */
+    private void showAllResultsOnMap() {
+        if (map == null || lastSearchResultsForMap.isEmpty()) return;
+        clearNearbyMarkers();
+        int limit = Math.min(30, lastSearchResultsForMap.size());
+        double minLatitude = Double.MAX_VALUE, maxLatitude = -Double.MAX_VALUE;
+        double minLongitude = Double.MAX_VALUE, maxLongitude = -Double.MAX_VALUE;
+        for (int i = 0; i < limit; i++) {
+            SavedPlace place = lastSearchResultsForMap.get(i);
+            Marker marker = new Marker(new LatLng(place.latitude, place.longitude), numberedMarkerStyle(i + 1));
+            map.addMarker(marker);
+            nearbyMarkers.add(marker);
+            minLatitude = Math.min(minLatitude, place.latitude);
+            maxLatitude = Math.max(maxLatitude, place.latitude);
+            minLongitude = Math.min(minLongitude, place.longitude);
+            maxLongitude = Math.max(maxLongitude, place.longitude);
+        }
+        double centerLatitude = (minLatitude + maxLatitude) / 2d;
+        double centerLongitude = (minLongitude + maxLongitude) / 2d;
+        double spanDegrees = Math.max(maxLatitude - minLatitude, maxLongitude - minLongitude);
+        map.moveCamera(new LatLng(centerLatitude, centerLongitude), 0.3f);
+        map.setZoom(zoomForSpan(spanDegrees), 0.3f);
+        Toast.makeText(this, limit + " مورد روی نقشه نمایش داده شد.", Toast.LENGTH_SHORT).show();
+    }
+
+    /** Rough zoom-from-bounding-box heuristic: the Neshan map SDK used here has no fitBounds
+     *  call, so this picks a fixed zoom step from the span in degrees, the same fixed-zoom
+     *  approach the activity already uses elsewhere (e.g. showRouteOverview). */
+    private float zoomForSpan(double spanDegrees) {
+        if (spanDegrees <= 0.003d) return 15f;
+        if (spanDegrees <= 0.01d) return 14f;
+        if (spanDegrees <= 0.03d) return 12.5f;
+        if (spanDegrees <= 0.08d) return 11f;
+        if (spanDegrees <= 0.2d) return 9.5f;
+        if (spanDegrees <= 0.5d) return 8f;
+        if (spanDegrees <= 1.2d) return 6.5f;
+        return 5f;
+    }
+
+    /** Same round-badge look as poiMarkerStyle but filled with the brand color and a number
+     *  instead of a category emoji, so plain text-search pins read as "list item #N" rather
+     *  than being confused with a POI-category marker from "اطراف من". */
+    private MarkerStyle numberedMarkerStyle(int number) {
+        Bitmap bitmap = Bitmap.createBitmap(72, 72, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        Paint circle = new Paint(Paint.ANTI_ALIAS_FLAG);
+        circle.setColor(0xff176b87);
+        canvas.drawCircle(36f, 36f, 30f, circle);
+        circle.setStyle(Paint.Style.STROKE);
+        circle.setStrokeWidth(3f);
+        circle.setColor(0xffffffff);
+        canvas.drawCircle(36f, 36f, 30f, circle);
+        Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
+        text.setColor(0xffffffff);
+        text.setTextSize(30f);
+        text.setTypeface(Typeface.DEFAULT_BOLD);
+        text.setTextAlign(Paint.Align.CENTER);
+        Paint.FontMetrics metrics = text.getFontMetrics();
+        float y = 36f - (metrics.ascent + metrics.descent) / 2f;
+        canvas.drawText(String.valueOf(number), 36f, y, text);
+        MarkerStyleBuilder builder = new MarkerStyleBuilder();
+        builder.setSize(38f);
+        builder.setBitmap(BitmapUtils.createBitmapFromAndroidBitmap(bitmap));
+        return builder.buildStyle();
     }
 
     private void addSectionTitle(String title) {
@@ -486,6 +725,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     private String placeTypeLabel(SavedPlace place) {
+        if (activeNearbyCategory != null) return activeNearbyCategory.label;
         String value = normalizeForUi((place.name == null ? "" : place.name) + " "
                 + (place.address == null ? "" : place.address) + " " + (place.kind == null ? "" : place.kind));
         if (value.contains("پمپ بنزین") || value.contains("جایگاه سوخت")) return "سوخت";
@@ -498,6 +738,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     private String placeIcon(SavedPlace place) {
+        if (activeNearbyCategory != null) return activeNearbyCategory.icon;
         String type = placeTypeLabel(place);
         if ("سوخت".equals(type)) return "\u26fd";
         if ("درمانی".equals(type)) return "\u2695";
@@ -592,6 +833,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         destination = place;
         destinationText.setText(place.name);
         routeText.setText("در حال آماده‌سازی مسیرهای پیشنهادی...");
+        if (routeOptionsScroll != null) routeOptionsScroll.setVisibility(View.GONE);
         showDestinationMarker(place);
         routeRepository.getRoutes(originLatitude, originLongitude, place.latitude, place.longitude,
                 routes -> runOnUiThread(() -> showRouteOptions(routes)),
@@ -627,54 +869,114 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         routeOptions = routes == null ? new ArrayList<>() : new ArrayList<>(routes);
         if (routeOptions.isEmpty()) {
             routeText.setText("مسیر قابل استفاده‌ای پیدا نشد.");
+            routeOptionsScroll.setVisibility(View.GONE);
             return;
         }
         selectedRoute = routeOptions.get(navigationMode
                 ? Math.min(navigationRouteIndex, routeOptions.size() - 1) : 0);
         showRoutePreview(selectedRoute);
         if (navigationMode) startTurnByTurn(selectedRoute);
-        if (!navigationMode && routeOptions.size() > 1) chooseRouteOption();
+        else renderRouteChips();
     }
 
-    private void chooseRouteOption() {
-        if (routeOptions.isEmpty()) {
-            Toast.makeText(this, "ابتدا یک مقصد انتخاب کنید.", Toast.LENGTH_SHORT).show();
+    /** Every alternative is drawn on the map itself instead of behind a dialog; the driver taps a
+     *  chip at the bottom of the screen to switch which one is highlighted, then continues with
+     *  the existing bottom-panel buttons — nothing opens a separate screen. */
+    private void renderRouteChips() {
+        if (routeOptionsRow == null || routeOptionsScroll == null) return;
+        routeOptionsRow.removeAllViews();
+        if (routeOptions.size() <= 1) {
+            routeOptionsScroll.setVisibility(View.GONE);
             return;
         }
-        String[] labels = new String[routeOptions.size()];
         for (int i = 0; i < routeOptions.size(); i++) {
             RouteResult route = routeOptions.get(i);
-            labels[i] = "مسیر " + (i + 1) + " - " + Math.max(1, (int) Math.ceil(route.durationSeconds / 60.0))
-                    + " دقیقه - " + String.format(Locale.US, "%.1f", route.distanceMeters / 1000.0) + " کیلومتر";
+            boolean isSelected = route == selectedRoute;
+            int minutes = Math.max(1, (int) Math.ceil(route.durationSeconds / 60.0));
+            Button chip = new Button(this);
+            chip.setAllCaps(false);
+            chip.setText("مسیر " + (i + 1) + " • " + minutes + " دقیقه");
+            chip.setTextSize(13f);
+            chip.setPadding(dp(16), dp(6), dp(16), dp(6));
+            chip.setMinWidth(0);
+            chip.setMinimumWidth(0);
+            chip.setMinHeight(0);
+            chip.setMinimumHeight(0);
+            chip.setBackgroundResource(isSelected ? R.drawable.primary_button : R.drawable.status_panel);
+            chip.setTextColor(isSelected ? 0xffffffff : 0xff17324d);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            params.setMarginEnd(dp(8));
+            chip.setOnClickListener(v -> {
+                selectedRoute = route;
+                showRoutePreview(route);
+                renderRouteChips();
+            });
+            routeOptionsRow.addView(chip, params);
         }
-        new AlertDialog.Builder(this).setTitle("مسیرهای پیشنهادی")
-                .setSingleChoiceItems(labels, Math.max(0, routeOptions.indexOf(selectedRoute)), (dialog, which) -> {
-                    selectedRoute = routeOptions.get(which);
-                    showRoutePreview(selectedRoute);
-                    dialog.dismiss();
-                }).show();
+        routeOptionsScroll.setVisibility(View.VISIBLE);
+    }
+
+    /** Approximate fit-bounds using only camera primitives this SDK build is known to support
+     *  (moveCamera + setZoom), rather than an unverified bounds API. */
+    private void centerOnSelectedRoute() {
+        if (map == null || selectedRoute == null || selectedRoute.geometry.isEmpty()) return;
+        double minLat = Double.MAX_VALUE, maxLat = -Double.MAX_VALUE, minLng = Double.MAX_VALUE, maxLng = -Double.MAX_VALUE;
+        for (RoutePoint point : selectedRoute.geometry) {
+            minLat = Math.min(minLat, point.latitude);
+            maxLat = Math.max(maxLat, point.latitude);
+            minLng = Math.min(minLng, point.longitude);
+            maxLng = Math.max(maxLng, point.longitude);
+        }
+        double centerLat = (minLat + maxLat) / 2d;
+        double centerLng = (minLng + maxLng) / 2d;
+        double spanKm = Math.max(distanceKm(minLat, minLng, maxLat, maxLng), 0.3d);
+        float zoom = (float) Math.max(10.5d, Math.min(15.5d, 15.5d - Math.log(spanKm) / Math.log(1.55d)));
+        map.moveCamera(new LatLng(centerLat, centerLng), 0.3f);
+        map.setZoom(zoom, 0.3f);
     }
 
     private void showRoutePreview(RouteResult route) {
         int minutes = Math.max(1, (int) Math.ceil(route.durationSeconds / 60.0));
         routeText.setText("مسیر پیشنهادی " + route.providerName + " | " + minutes + " دقیقه | "
                 + String.format(Locale.US, "%.1f", route.distanceMeters / 1000.0) + " کیلومتر");
+        drawAllRoutes();
+        if (map != null && !navigationMode) {
+            map.moveCamera(new LatLng(originLatitude, originLongitude), 0.25f);
+            map.setZoom(12.5f, 0.25f);
+        }
+    }
+
+    /** Draws every fetched alternative on the map at once (selected route prominent, the rest
+     *  dimmed) instead of a single polyline behind a picker dialog. */
+    private void drawAllRoutes() {
         if (map == null) return;
-        if (routePolyline != null) map.removePolyline(routePolyline);
+        for (Polyline polyline : alternateRoutePolylines) map.removePolyline(polyline);
+        alternateRoutePolylines.clear();
+        if (routePolyline != null) {
+            map.removePolyline(routePolyline);
+            routePolyline = null;
+        }
+        List<RouteResult> routesToDraw = routeOptions.isEmpty() && selectedRoute != null
+                ? java.util.Collections.singletonList(selectedRoute) : routeOptions;
+        for (RouteResult route : routesToDraw) {
+            ArrayList<LatLng> points = routePoints(route);
+            if (points.size() < 2) continue;
+            boolean isSelected = route == selectedRoute;
+            Polyline polyline = new Polyline(points, isSelected ? routeLineStyle() : alternateRouteLineStyle());
+            map.addPolyline(polyline);
+            if (isSelected) routePolyline = polyline; else alternateRoutePolylines.add(polyline);
+        }
+    }
+
+    private ArrayList<LatLng> routePoints(RouteResult route) {
         ArrayList<LatLng> points = new ArrayList<>();
         for (RoutePoint point : route.geometry) points.add(new LatLng(point.latitude, point.longitude));
         if (points.size() < 2) {
             points.add(new LatLng(originLatitude, originLongitude));
             for (RouteStep step : route.steps) points.add(new LatLng(step.latitude, step.longitude));
         }
-        if (points.size() > 1) {
-            routePolyline = new Polyline(points, routeLineStyle());
-            map.addPolyline(routePolyline);
-            if (!navigationMode) {
-                map.moveCamera(new LatLng(originLatitude, originLongitude), 0.25f);
-                map.setZoom(12.5f, 0.25f);
-            }
-        }
+        return points;
     }
 
     /** Starts real turn-by-turn tracking for the active route: shows the first maneuver right
@@ -689,6 +991,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         navigationEngine.start(route, this, current);
         turnBannerContainer.setVisibility(View.VISIBLE);
         turnDistanceText.setText("");
+        turnStepsExpanded = false;
+        turnStepsScroll.setVisibility(View.GONE);
+        turnExpandIcon.setText("▾");
         if (!navigationEngine.announceCurrentInstruction()) {
             turnInstructionText.setText("به سمت مقصد حرکت کنید");
             turnArrowText.setText("↑");
@@ -758,6 +1063,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         if (destination == null) return;
         routeRepository.getRoute(originLatitude, originLongitude, destination.latitude, destination.longitude,
                 route -> runOnUiThread(() -> {
+                    routeOptions = new ArrayList<>();
+                    routeOptions.add(route);
                     selectedRoute = route;
                     showRoutePreview(route);
                     startTurnByTurn(route);
@@ -771,6 +1078,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                     ? "ادامه در مسیر" : step.instruction;
             turnInstructionText.setText(instruction);
             turnArrowText.setText(arrowForInstruction(instruction));
+            if (turnStepsExpanded) renderTurnSteps();
         });
     }
 
@@ -933,20 +1241,37 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         return lastBearing;
     }
 
-    private void showTurnByTurnSteps() {
+    private void toggleTurnSteps() {
         if (selectedRoute == null || selectedRoute.steps.isEmpty()) return;
-        String[] steps = new String[selectedRoute.steps.size()];
+        turnStepsExpanded = !turnStepsExpanded;
+        if (turnStepsExpanded) renderTurnSteps();
+        turnStepsScroll.setVisibility(turnStepsExpanded ? View.VISIBLE : View.GONE);
+        turnExpandIcon.setText(turnStepsExpanded ? "▴" : "▾");
+    }
+
+    /** Renders every remaining maneuver inline in the same card the driver already tapped, instead
+     *  of opening a separate screen; the current maneuver is highlighted so it reads like a live
+     *  itinerary rather than a static list. */
+    private void renderTurnSteps() {
+        if (turnStepsContent == null || selectedRoute == null) return;
+        turnStepsContent.removeAllViews();
+        int current = navigationMode
+                ? Math.min(navigationEngine.currentStepIndex(), selectedRoute.steps.size() - 1) : -1;
         for (int i = 0; i < selectedRoute.steps.size(); i++) {
             RouteStep step = selectedRoute.steps.get(i);
             String instruction = step.instruction == null || step.instruction.trim().isEmpty()
                     ? "ادامه مسیر" : step.instruction;
-            steps[i] = formatDistance(Math.max(0, step.distanceMeters)) + "\n" + instruction;
+            boolean isCurrent = i == current;
+            TextView row = new TextView(this);
+            row.setText(formatDistance(Math.max(0, step.distanceMeters)) + "  •  " + instruction);
+            row.setTextSize(15f);
+            row.setPadding(dp(10), dp(10), dp(10), dp(10));
+            row.setTextColor(isCurrent ? 0xff176b87 : 0xff2c3e46);
+            row.setTypeface(Typeface.DEFAULT, isCurrent ? Typeface.BOLD : Typeface.NORMAL);
+            if (isCurrent) row.setBackgroundColor(0xffeaf7f1);
+            turnStepsContent.addView(row, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
-        new AlertDialog.Builder(this)
-                .setTitle("راهنمای مسیر تا مقصد")
-                .setSingleChoiceItems(steps, Math.min(navigationEngine.currentStepIndex(), steps.length - 1), null)
-                .setPositiveButton("بستن", null)
-                .show();
     }
 
     private LatLng pointAhead(LatLng origin, float bearing, double meters) {
@@ -1064,6 +1389,16 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         LineStyleBuilder builder = new LineStyleBuilder();
         builder.setColor(new Color((short) 23, (short) 107, (short) 135, (short) 230));
         builder.setWidth(9f);
+        builder.setStretchFactor(0f);
+        return builder.buildStyle();
+    }
+
+    /** Muted style for alternative routes drawn alongside the selected one, so the highlighted
+     *  route reads clearly without hiding the others entirely. */
+    private LineStyle alternateRouteLineStyle() {
+        LineStyleBuilder builder = new LineStyleBuilder();
+        builder.setColor(new Color((short) 150, (short) 162, (short) 170, (short) 200));
+        builder.setWidth(6f);
         builder.setStretchFactor(0f);
         return builder.buildStyle();
     }
