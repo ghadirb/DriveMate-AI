@@ -51,8 +51,10 @@ public class PlaceSearchRepository {
             if (isNearbyPoiQuery(term)) {
                 searchNearbyPoi(term, latitude, longitude, results, failures);
                 rankNearby(results, latitude, longitude);
+                // Matches Overpass's own widened item cap (60) - the old 30 ceiling here silently
+                // discarded half of what a wide-radius OSM-first search could actually return.
                 if (!results.isEmpty()) {
-                    success.onSuccess(results.subList(0, Math.min(30, results.size())));
+                    success.onSuccess(results.subList(0, Math.min(60, results.size())));
                 } else {
                     error.onError("No nearby result. " + join(failures));
                 }
@@ -103,36 +105,76 @@ public class PlaceSearchRepository {
      * Category queries need a different policy from a named address. Keeping this local avoids
      * a handful of country-wide results (for example six fuel stations) hiding nearby stations.
      *
-     * Neshan's `/v1/search` and map.ir's own indexes are business-registration based, so their
-     * coverage is denser in some provinces than others (for example Tehran/central-west vs. the
-     * northeast) - the same category query can return a dozen hits in one city and a single
-     * result in another through no fault of the ranking logic. OpenStreetMap/Overpass does not
-     * have that commercial bias and is usually the most complete source for plain category POIs
-     * like fuel stations everywhere in Iran, so it is now always queried alongside the commercial
-     * providers for a nearby category search instead of only when the commercial results are
-     * sparse - previously it only ran as a last resort when results.size() was still under 10,
-     * which meant a thin-but-not-empty commercial result silently skipped OSM entirely.
+     * OpenStreetMap (Overpass + Nominatim) needs no API key, has no per-key quota, and is not
+     * subject to Neshan/map.ir's business-registration bias (denser in some provinces, e.g.
+     * Tehran/central-west, than others, e.g. Mashhad/the northeast) - so it is tried FIRST for
+     * every category search. Neshan and map.ir are only queried afterward, and only if OSM's own
+     * combined results are still thin: this skips their API-key usage entirely on the common case
+     * where OSM alone already has enough, and avoids waiting on their failure/timeout (Neshan's
+     * key can reject with HTTP 485, map.ir's endpoint can be unreachable for minutes at a time -
+     * both seen in the field) when they were never going to be needed anyway.
      */
+    private static final int OSM_SUFFICIENT_RESULT_COUNT = 15;
+
     private void searchNearbyPoi(String term, double latitude, double longitude, List<SavedPlace> results,
                                  List<String> failures) {
-        try { addUnique(results, searchNeshan(term, latitude, longitude)); }
-        catch (Exception exception) { failures.add("Neshan nearby: " + messageOf(exception)); }
-        try { addUnique(results, searchMapIrNearby(term, latitude, longitude)); }
-        catch (Exception exception) { failures.add("map.ir nearby: " + messageOf(exception)); }
-        // OpenStreetMap fills coverage gaps in commercial POI indexes and is not subject to the
-        // same regional business-registration bias, so it always runs for category searches.
-        try { addUnique(results, overpass.searchNearby(term, latitude, longitude)); }
-        catch (Exception exception) { failures.add("OpenStreetMap nearby: " + messageOf(exception)); }
-        // Nominatim also indexes named POIs (fuel stations, hospitals, etc.) and, unlike the fixed
-        // 10km Overpass radius above, is not distance-limited, so it helps in low-density regions
-        // (e.g. around Mashhad/the northeast) where the nearest match may be further away.
-        try { addUnique(results, nominatim.search(term, latitude, longitude)); }
-        catch (Exception exception) { failures.add("OpenStreetMap (Nominatim) nearby: " + messageOf(exception)); }
-        // TomTom is optional and only needed if the combined result set is still thin.
+        ProviderOutcome overpassOutcome = new ProviderOutcome();
+        ProviderOutcome nominatimOutcome = new ProviderOutcome();
+        Thread overpassThread = runProvider(() -> overpass.searchNearby(term, latitude, longitude), overpassOutcome);
+        Thread nominatimThread = runProvider(() -> nominatim.search(term, latitude, longitude), nominatimOutcome);
+        joinQuietly(overpassThread);
+        joinQuietly(nominatimThread);
+        mergeOutcome(results, failures, overpassOutcome, "OpenStreetMap nearby");
+        mergeOutcome(results, failures, nominatimOutcome, "OpenStreetMap (Nominatim) nearby");
+
+        if (results.size() < OSM_SUFFICIENT_RESULT_COUNT) {
+            ProviderOutcome neshanOutcome = new ProviderOutcome();
+            ProviderOutcome mapIrOutcome = new ProviderOutcome();
+            Thread neshanThread = runProvider(() -> searchNeshan(term, latitude, longitude), neshanOutcome);
+            Thread mapIrThread = runProvider(() -> searchMapIrNearby(term, latitude, longitude), mapIrOutcome);
+            joinQuietly(neshanThread);
+            joinQuietly(mapIrThread);
+            mergeOutcome(results, failures, neshanOutcome, "Neshan nearby");
+            mergeOutcome(results, failures, mapIrOutcome, "map.ir nearby");
+        }
+        // TomTom is optional and only needed if the combined result set is still thin; kept
+        // sequential and last since it is the least-often-needed provider (isConfigured() is
+        // false whenever no TomTom key was supplied at all, which is the common case).
         if (results.size() < 10 && tomtom.isConfigured()) {
             try { addUnique(results, tomtom.searchNearby(term, latitude, longitude)); }
             catch (Exception exception) { failures.add("TomTom nearby: " + messageOf(exception)); }
         }
+    }
+
+    /** Holds one provider thread's result so it can be merged back on the calling thread only
+     *  after every provider thread has finished - addUnique/hasNearDuplicate are not thread-safe
+     *  to call concurrently from multiple provider threads against the same shared list. */
+    private static final class ProviderOutcome {
+        volatile List<SavedPlace> places;
+        volatile Exception error;
+    }
+
+    private interface ProviderCall {
+        List<SavedPlace> call() throws Exception;
+    }
+
+    private Thread runProvider(ProviderCall call, ProviderOutcome outcome) {
+        Thread thread = new Thread(() -> {
+            try { outcome.places = call.call(); }
+            catch (Exception exception) { outcome.error = exception; }
+        });
+        thread.start();
+        return thread;
+    }
+
+    private void joinQuietly(Thread thread) {
+        try { thread.join(); }
+        catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+    }
+
+    private void mergeOutcome(List<SavedPlace> results, List<String> failures, ProviderOutcome outcome, String label) {
+        if (outcome.error != null) failures.add(label + ": " + messageOf(outcome.error));
+        else addUnique(results, outcome.places);
     }
 
     private List<SavedPlace> searchNeshanGeocoding(String term) throws Exception {

@@ -70,8 +70,11 @@ class RoutingHttp {
 
     static JSONObject postFormJson(String url, String parameterName, String value) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
-        connection.setConnectTimeout(6000);
-        connection.setReadTimeout(8000);
+        // Overpass is the only caller; a wide-radius POI query can legitimately take longer than
+        // a small nearby lookup, so this allows enough headroom for the interpreter's own
+        // [timeout:20] to finish and reply before the client itself gives up.
+        connection.setConnectTimeout(8000);
+        connection.setReadTimeout(21000);
         connection.setRequestMethod("POST");
         connection.setDoOutput(true);
         connection.setRequestProperty("Accept", "application/json");

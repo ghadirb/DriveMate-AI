@@ -57,10 +57,12 @@ import java.util.Comparator;
 import java.util.Date;
 import java.util.EnumMap;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 import ai.drivemate.model.RouteResult;
 import ai.drivemate.model.RoutePoint;
@@ -70,6 +72,7 @@ import ai.drivemate.routing.MapIrRoutingProvider;
 import ai.drivemate.routing.NavigationEngine;
 import ai.drivemate.routing.NeshanRoutingProvider;
 import ai.drivemate.routing.OpenRouteServiceRoutingProvider;
+import ai.drivemate.routing.OverpassPoiProvider;
 import ai.drivemate.routing.PlaceSearchRepository;
 import ai.drivemate.routing.PoiCategory;
 import ai.drivemate.routing.RouteRepository;
@@ -152,6 +155,23 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private final EnumSet<PoiCategory> enabledPoiLayers = EnumSet.noneOf(PoiCategory.class);
     private final Map<PoiCategory, List<SavedPlace>> poiLayerPlaces = new EnumMap<>(PoiCategory.class);
     private int activePoiLayerRequest;
+    /** Progressive nationwide widening for enabled POI layers: each category starts at the same
+     *  tight "اطراف من" radius as before (see refreshPoiLayers), then every
+     *  POI_LAYER_EXPANSION_INTERVAL_MS widens to the next ring in POI_LAYER_EXPANSION_RADII_METERS,
+     *  using OpenStreetMap only (never Neshan/map.ir, which are not radius-controllable and would
+     *  just repeat the same nearby result at extra API-key cost). This spreads a wide/whole-country
+     *  style search out over minutes instead of firing one enormous query that would overload the
+     *  public Overpass mirrors or dump thousands of markers on the map at once - and it always goes
+     *  through OverpassPoiProvider's existing shared request lock, so widening rings never bypass
+     *  the 700ms-minimum-gap / mirror-failover protection already in place for every other caller. */
+    private static final double[] POI_LAYER_EXPANSION_RADII_METERS = {45_000d, 120_000d, 260_000d, 520_000d, 1_000_000d};
+    private static final int[] POI_LAYER_EXPANSION_ITEM_CAPS = {60, 150, 300, 450, 600};
+    private static final long POI_LAYER_EXPANSION_INTERVAL_MS = 75_000L;
+    private static final int POI_LAYER_MAX_MARKERS_PER_CATEGORY = 600;
+    private final Map<PoiCategory, Integer> poiLayerExpansionStage = new EnumMap<>(PoiCategory.class);
+    private final Map<PoiCategory, Set<String>> poiLayerKnownIds = new EnumMap<>(PoiCategory.class);
+    private final Handler poiExpansionHandler = new Handler(Looper.getMainLooper());
+    private final OverpassPoiProvider layerExpansionProvider = new OverpassPoiProvider();
     /** Backing list for the "نمایش روی نقشه" button on the search-results panel; holds
      *  whatever the last plain-text search returned so the button can plot it on demand. */
     private final List<SavedPlace> lastSearchResultsForMap = new ArrayList<>();
@@ -458,6 +478,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private void clearPoiLayers() {
         enabledPoiLayers.clear();
         poiLayerPlaces.clear();
+        poiLayerExpansionStage.clear();
+        poiLayerKnownIds.clear();
+        poiExpansionHandler.removeCallbacksAndMessages(null);
         activePoiLayerRequest++;
         clearNearbyMarkers();
         savePoiLayerPreferences();
@@ -467,24 +490,93 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private void refreshPoiLayers() {
         clearNearbyMarkers();
         poiLayerPlaces.clear();
+        poiLayerExpansionStage.clear();
+        poiLayerKnownIds.clear();
+        poiExpansionHandler.removeCallbacksAndMessages(null);
         int requestId = ++activePoiLayerRequest;
         if (enabledPoiLayers.isEmpty()) return;
         routeText.setText("در حال آماده‌سازی لایه‌های مکان...");
         for (PoiCategory category : enabledPoiLayers) {
+            poiLayerExpansionStage.put(category, 0);
+            poiLayerKnownIds.put(category, new HashSet<>());
             placeSearchRepository.searchAll(category.searchTerm, originLatitude, originLongitude,
                     places -> runOnUiThread(() -> {
                         if (isFinishing() || isDestroyed() || requestId != activePoiLayerRequest) return;
-                        poiLayerPlaces.put(category, places == null ? new ArrayList<>() : new ArrayList<>(places));
-                        renderPoiLayer(category, poiLayerPlaces.get(category));
+                        List<SavedPlace> initial = places == null ? new ArrayList<>() : new ArrayList<>(places);
+                        poiLayerPlaces.put(category, initial);
+                        for (SavedPlace place : initial) poiLayerKnownIds.get(category).add(place.kind);
+                        renderPoiLayer(category, initial);
+                        scheduleNextPoiLayerExpansion(category, requestId);
                     }),
                     error -> Log.w("DriveMateMap", "POI layer unavailable for " + category.name() + ": " + error));
+        }
+    }
+
+    /** Widens one category's coverage by one ring after POI_LAYER_EXPANSION_INTERVAL_MS, merges only
+     *  the genuinely new OSM results (deduped by their stable OSM-element-id kind string) into the
+     *  existing markers, and re-schedules itself for the next ring - stopping once the category is
+     *  disabled, this refresh cycle is stale, the ring list is exhausted, or
+     *  POI_LAYER_MAX_MARKERS_PER_CATEGORY is reached. */
+    private void scheduleNextPoiLayerExpansion(PoiCategory category, int requestId) {
+        int nextStage = poiLayerExpansionStage.getOrDefault(category, 0) + 1;
+        if (nextStage >= POI_LAYER_EXPANSION_RADII_METERS.length) return;
+        poiExpansionHandler.postDelayed(() -> {
+            if (isFinishing() || isDestroyed() || requestId != activePoiLayerRequest
+                    || !enabledPoiLayers.contains(category)) return;
+            List<SavedPlace> known = poiLayerPlaces.get(category);
+            if (known != null && known.size() >= POI_LAYER_MAX_MARKERS_PER_CATEGORY) return;
+            new Thread(() -> {
+                List<SavedPlace> widened;
+                try {
+                    widened = layerExpansionProvider.searchNearby(category.searchTerm, originLatitude, originLongitude,
+                            POI_LAYER_EXPANSION_RADII_METERS[nextStage], POI_LAYER_EXPANSION_ITEM_CAPS[nextStage]);
+                } catch (Exception exception) {
+                    Log.w("DriveMateMap", "POI layer expansion failed for " + category.name() + ": " + exception.getMessage());
+                    return;
+                }
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed() || requestId != activePoiLayerRequest
+                            || !enabledPoiLayers.contains(category)) return;
+                    poiLayerExpansionStage.put(category, nextStage);
+                    Set<String> ids = poiLayerKnownIds.get(category);
+                    List<SavedPlace> current = poiLayerPlaces.get(category);
+                    if (ids == null || current == null || widened == null) { scheduleNextPoiLayerExpansion(category, requestId); return; }
+                    ArrayList<SavedPlace> freshOnly = new ArrayList<>();
+                    for (SavedPlace place : widened) {
+                        if (current.size() + freshOnly.size() >= POI_LAYER_MAX_MARKERS_PER_CATEGORY) break;
+                        if (ids.add(place.kind)) freshOnly.add(place);
+                    }
+                    if (!freshOnly.isEmpty()) {
+                        current.addAll(freshOnly);
+                        addPoiLayerMarkers(category, freshOnly);
+                        routeText.setText("لایه‌های فعال: " + enabledPoiLayers.size() + " | " + nearbyMarkers.size() + " مکان روی نقشه");
+                    }
+                    scheduleNextPoiLayerExpansion(category, requestId);
+                });
+            }).start();
+        }, POI_LAYER_EXPANSION_INTERVAL_MS);
+    }
+
+    /** Draws only the newly-discovered places from a widening ring (not the whole category again),
+     *  so an expansion tick never re-adds duplicate markers for places already on the map. */
+    private void addPoiLayerMarkers(PoiCategory category, List<SavedPlace> newPlaces) {
+        if (map == null) return;
+        MarkerStyle style = poiMarkerStyle(category.icon);
+        for (SavedPlace place : newPlaces) {
+            Marker marker = new Marker(new LatLng(place.latitude, place.longitude), style);
+            map.addMarker(marker);
+            nearbyMarkers.add(marker);
         }
     }
 
     private void renderPoiLayer(PoiCategory category, List<SavedPlace> places) {
         if (map == null || places == null) return;
         MarkerStyle style = poiMarkerStyle(category.icon);
-        int limit = Math.min(15, places.size());
+        // Capped at POI_LAYER_MAX_MARKERS_PER_CATEGORY rather than the initial 60-item search
+        // ceiling: this method is also used to redraw the FULL cumulative set once progressive
+        // expansion (see scheduleNextPoiLayerExpansion) has grown a category beyond its first batch,
+        // e.g. when onResume redraws cached markers after the map's rendering surface lost them.
+        int limit = Math.min(POI_LAYER_MAX_MARKERS_PER_CATEGORY, places.size());
         for (int index = 0; index < limit; index++) {
             SavedPlace place = places.get(index);
             Marker marker = new Marker(new LatLng(place.latitude, place.longitude), style);
@@ -556,7 +648,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private void showNearbyMarkers(List<SavedPlace> places, PoiCategory category) {
         if (map == null) return;
         MarkerStyle style = poiMarkerStyle(category.icon);
-        int limit = Math.min(20, places.size());
+        // Matches renderPoiLayer's cap so "اطراف من" and a map POI layer never show a different
+        // count of pins for the exact same category/location result set (PlaceSearchRepository
+        // caps nearby results at 60).
+        int limit = Math.min(60, places.size());
         for (int i = 0; i < limit; i++) {
             SavedPlace place = places.get(i);
             Marker marker = new Marker(new LatLng(place.latitude, place.longitude), style);
@@ -1558,6 +1653,13 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     @Override protected void onResume() {
         super.onResume();
+        // Some native map SDK builds tear down and rebuild their rendering surface across an
+        // onPause/onResume cycle (e.g. leaving to another app and coming back) without telling the
+        // app, silently dropping every previously-added marker even though this activity instance
+        // (and its in-memory poiLayerPlaces cache) survives untouched. Re-adding the cached markers
+        // here is cheap (no network call, just the same places already fetched) and fixes POI layers
+        // appearing to vanish after leaving and reopening the map.
+        redrawCachedPoiLayers();
         if (locationManager == null || checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) return;
         if (isLocationEnabled()) {
             long minTimeMs = navigationMode ? 1000L : 2500L;
@@ -1566,9 +1668,23 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         }
     }
 
+    private void redrawCachedPoiLayers() {
+        if (map == null || enabledPoiLayers.isEmpty()) return;
+        clearNearbyMarkers();
+        for (PoiCategory category : enabledPoiLayers) {
+            List<SavedPlace> cached = poiLayerPlaces.get(category);
+            if (cached != null && !cached.isEmpty()) renderPoiLayer(category, cached);
+        }
+    }
+
     @Override protected void onPause() {
         if (locationManager != null) locationManager.removeUpdates(this);
         super.onPause();
+    }
+
+    @Override protected void onDestroy() {
+        poiExpansionHandler.removeCallbacksAndMessages(null);
+        super.onDestroy();
     }
 
     @Override public void onLocationChanged(Location location) {

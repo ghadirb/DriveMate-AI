@@ -102,17 +102,34 @@ public final class OverpassPoiProvider {
     }
 
     List<SavedPlace> searchNearby(String term, double latitude, double longitude) throws Exception {
+        // 45km (was 20km, originally 10km): OSM is now queried as the primary, no-key source for
+        // "اطراف من" and map POI layers (see PlaceSearchRepository), so its own radius needs to be wide
+        // enough to stand on its own without Neshan/map.ir - not just fill in their gaps. A literal
+        // whole-country query is deliberately avoided here: for a common category like fuel stations
+        // it would return thousands of nodes in one shot, overload the public Overpass mirrors (the
+        // same 429 rate-limiting already seen with only a handful of concurrent requests), and flood
+        // the map with more markers than are useful at any single zoom level. See the overload below
+        // for MapActivity's progressive, rate-limit-safe way of eventually covering much more ground.
+        return searchNearby(term, latitude, longitude, 45_000d, 60);
+    }
+
+    /**
+     * Same category lookup as above but with a caller-chosen radius/item cap, so a map POI layer can
+     * widen its coverage outward in rings over time (see MapActivity's progressive layer expansion)
+     * instead of only ever querying the tight "اطراف من" radius. This still goes through the same
+     * request() method below, so a wider ring never bypasses the shared 700ms-minimum-gap/mirror-
+     * failover throttling every other Overpass caller in the app is subject to.
+     */
+    public List<SavedPlace> searchNearby(String term, double latitude, double longitude, double radiusMeters, int itemCap) throws Exception {
         String selector = selectorFor(term);
         if (selector == null) return Collections.emptyList();
-        // 20km (was 10km): denser cities do not need the extra radius, but sparser regions
-        // (e.g. around Mashhad/the northeast) otherwise come back with too few or zero results.
-        String query = "[out:json][timeout:10];(nwr" + selector + "(around:20000," + latitude + "," + longitude
-                + "););out center 25;";
+        String query = "[out:json][timeout:25];(nwr" + selector + "(around:" + Math.round(radiusMeters) + "," + latitude + "," + longitude
+                + "););out center " + itemCap + ";";
         JSONObject body = request(query);
         JSONArray items = body.optJSONArray("elements");
         ArrayList<SavedPlace> places = new ArrayList<>();
         if (items == null) return places;
-        for (int index = 0; index < items.length() && index < 25; index++) {
+        for (int index = 0; index < items.length() && index < itemCap; index++) {
             JSONObject item = items.optJSONObject(index);
             if (item == null) continue;
             JSONObject center = item.optJSONObject("center");
@@ -132,22 +149,41 @@ public final class OverpassPoiProvider {
         return places;
     }
 
+    /** Overpass's public mirrors rate-limit (HTTP 429) or start timing out when several requests
+     *  land at once - exactly what happened when multiple map POI layers (see MapActivity's
+     *  refreshPoiLayers) each fired their own concurrent Overpass call. Serializing every
+     *  Overpass call in the app through this single lock, with a minimum gap between them,
+     *  keeps requests sequential so a burst of layers/hazard lookups no longer collide. */
+    private static final Object REQUEST_LOCK = new Object();
+    private static final long MIN_REQUEST_GAP_MS = 700L;
+    private static long lastRequestFinishedAt = 0L;
+
     private JSONObject request(String query) throws Exception {
         String[] mirrors = {
                 "https://overpass-api.de/api/interpreter",
                 "https://overpass.private.coffee/api/interpreter",
                 "https://overpass.kumi.systems/api/interpreter"
         };
-        StringBuilder combinedFailure = new StringBuilder();
-        for (String mirror : mirrors) {
+        synchronized (REQUEST_LOCK) {
+            long waitMs = MIN_REQUEST_GAP_MS - (System.currentTimeMillis() - lastRequestFinishedAt);
+            if (waitMs > 0) {
+                try { Thread.sleep(waitMs); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+            }
             try {
-                return RoutingHttp.postFormJson(mirror, "data", query);
-            } catch (Exception exception) {
-                if (combinedFailure.length() > 0) combinedFailure.append(" | ");
-                combinedFailure.append(mirror).append(": ").append(exception.getMessage());
+                StringBuilder combinedFailure = new StringBuilder();
+                for (String mirror : mirrors) {
+                    try {
+                        return RoutingHttp.postFormJson(mirror, "data", query);
+                    } catch (Exception exception) {
+                        if (combinedFailure.length() > 0) combinedFailure.append(" | ");
+                        combinedFailure.append(mirror).append(": ").append(exception.getMessage());
+                    }
+                }
+                throw new IllegalStateException("Overpass unavailable: " + combinedFailure);
+            } finally {
+                lastRequestFinishedAt = System.currentTimeMillis();
             }
         }
-        throw new IllegalStateException("Overpass unavailable: " + combinedFailure);
     }
 
     private String selectorFor(String rawTerm) {
