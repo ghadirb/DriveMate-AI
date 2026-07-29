@@ -21,7 +21,14 @@ public enum PoiCategory {
     COFFEE_SHOP("کافی‌شاپ", "\ud83e\udd64", "کافی شاپ"),
     MOSQUE("مسجد", "\ud83d\udd4c", "مسجد"),
     RESTROOM("سرویس بهداشتی", "\ud83d\udebb", "سرویس بهداشتی عمومی"),
-    ATM("خودپرداز", "\ud83c\udfe7", "خودپرداز بانک");
+    ATM("خودپرداز", "\ud83c\udfe7", "خودپرداز بانک"),
+    /** Community-tagged OpenStreetMap hazard points only (highway=speed_camera, traffic_calming,
+     *  barrier=checkpoint, highway=stop/give_way) - not official traffic data and never live
+     *  enforcement presence. See OverpassPoiProvider for coverage caveats. */
+    SPEED_CAMERA("دوربین سرعت", "\ud83d\udcf7", "دوربین سرعت"),
+    SPEED_BUMP("سرعت‌گیر / دست‌انداز", "\ud83d\udea7", "سرعت‌گیر"),
+    POLICE_CHECKPOINT("ایست بازرسی", "\ud83d\udea8", "ایست بازرسی"),
+    TRAFFIC_SIGN("تابلوی ایست", "\ud83d\uded1", "تابلو ایست");
 
     public final String label;
     public final String icon;

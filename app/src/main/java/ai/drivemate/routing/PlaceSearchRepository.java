@@ -25,6 +25,7 @@ public class PlaceSearchRepository {
     private final MapIrRoutingProvider mapir;
     private final TomTomPoiProvider tomtom;
     private final OverpassPoiProvider overpass;
+    private final NominatimSearchProvider nominatim;
 
     public PlaceSearchRepository(NeshanRoutingProvider neshan, MapIrRoutingProvider mapir) {
         this(neshan, mapir, "");
@@ -35,6 +36,7 @@ public class PlaceSearchRepository {
         this.mapir = mapir;
         this.tomtom = new TomTomPoiProvider(tomtomApiKey);
         this.overpass = new OverpassPoiProvider();
+        this.nominatim = new NominatimSearchProvider();
     }
 
     public void search(String term, double latitude, double longitude, SuccessCallback success, ErrorCallback error) {
@@ -50,7 +52,7 @@ public class PlaceSearchRepository {
                 searchNearbyPoi(term, latitude, longitude, results, failures);
                 rankNearby(results, latitude, longitude);
                 if (!results.isEmpty()) {
-                    success.onSuccess(results.subList(0, Math.min(20, results.size())));
+                    success.onSuccess(results.subList(0, Math.min(30, results.size())));
                 } else {
                     error.onError("No nearby result. " + join(failures));
                 }
@@ -71,6 +73,24 @@ public class PlaceSearchRepository {
             catch (Exception exception) { failures.add("map.ir search: " + messageOf(exception)); }
             try { addUnique(results, searchMapIrAutocomplete(term, latitude, longitude)); }
             catch (Exception exception) { failures.add("map.ir autocomplete: " + messageOf(exception)); }
+            // Neshan/map.ir are business-registration indexes and are documented to be denser in
+            // some provinces (e.g. Tehran/central-west) than others (e.g. Mashhad/the northeast).
+            // Nominatim (OpenStreetMap) indexes every named place/address nationwide with no such
+            // regional bias and needs no API key, so it always runs for a general text search
+            // instead of only when the commercial results are already thin.
+            try { addUnique(results, nominatim.search(term, latitude, longitude)); }
+            catch (Exception exception) { failures.add("OpenStreetMap (Nominatim) search: " + messageOf(exception)); }
+            // A named business ("کبابی رضا") or a plain category word the isNearbyPoiQuery keyword
+            // list does not happen to cover can still be a POI lookup rather than an address lookup;
+            // only spend the extra Overpass/TomTom calls when the above providers came back thin.
+            if (results.size() < 5) {
+                try { addUnique(results, overpass.searchNearby(term, latitude, longitude)); }
+                catch (Exception exception) { failures.add("OpenStreetMap nearby: " + messageOf(exception)); }
+                if (results.size() < 5 && tomtom.isConfigured()) {
+                    try { addUnique(results, tomtom.searchNearby(term, latitude, longitude)); }
+                    catch (Exception exception) { failures.add("TomTom nearby: " + messageOf(exception)); }
+                }
+            }
 
             rank(results, term, latitude, longitude);
             results = keepBestMatchTier(results, term);
@@ -82,6 +102,16 @@ public class PlaceSearchRepository {
     /**
      * Category queries need a different policy from a named address. Keeping this local avoids
      * a handful of country-wide results (for example six fuel stations) hiding nearby stations.
+     *
+     * Neshan's `/v1/search` and map.ir's own indexes are business-registration based, so their
+     * coverage is denser in some provinces than others (for example Tehran/central-west vs. the
+     * northeast) - the same category query can return a dozen hits in one city and a single
+     * result in another through no fault of the ranking logic. OpenStreetMap/Overpass does not
+     * have that commercial bias and is usually the most complete source for plain category POIs
+     * like fuel stations everywhere in Iran, so it is now always queried alongside the commercial
+     * providers for a nearby category search instead of only when the commercial results are
+     * sparse - previously it only ran as a last resort when results.size() was still under 10,
+     * which meant a thin-but-not-empty commercial result silently skipped OSM entirely.
      */
     private void searchNearbyPoi(String term, double latitude, double longitude, List<SavedPlace> results,
                                  List<String> failures) {
@@ -89,16 +119,19 @@ public class PlaceSearchRepository {
         catch (Exception exception) { failures.add("Neshan nearby: " + messageOf(exception)); }
         try { addUnique(results, searchMapIrNearby(term, latitude, longitude)); }
         catch (Exception exception) { failures.add("map.ir nearby: " + messageOf(exception)); }
-        // TomTom is optional. It is never required for the normal Neshan/map.ir experience.
+        // OpenStreetMap fills coverage gaps in commercial POI indexes and is not subject to the
+        // same regional business-registration bias, so it always runs for category searches.
+        try { addUnique(results, overpass.searchNearby(term, latitude, longitude)); }
+        catch (Exception exception) { failures.add("OpenStreetMap nearby: " + messageOf(exception)); }
+        // Nominatim also indexes named POIs (fuel stations, hospitals, etc.) and, unlike the fixed
+        // 10km Overpass radius above, is not distance-limited, so it helps in low-density regions
+        // (e.g. around Mashhad/the northeast) where the nearest match may be further away.
+        try { addUnique(results, nominatim.search(term, latitude, longitude)); }
+        catch (Exception exception) { failures.add("OpenStreetMap (Nominatim) nearby: " + messageOf(exception)); }
+        // TomTom is optional and only needed if the combined result set is still thin.
         if (results.size() < 10 && tomtom.isConfigured()) {
             try { addUnique(results, tomtom.searchNearby(term, latitude, longitude)); }
             catch (Exception exception) { failures.add("TomTom nearby: " + messageOf(exception)); }
-        }
-        // OpenStreetMap fills gaps in commercial POI indexes. It is only queried for recognised
-        // categories and only when the primary indexes leave the nearby list sparse.
-        if (results.size() < 10) {
-            try { addUnique(results, overpass.searchNearby(term, latitude, longitude)); }
-            catch (Exception exception) { failures.add("OpenStreetMap nearby: " + messageOf(exception)); }
         }
     }
 

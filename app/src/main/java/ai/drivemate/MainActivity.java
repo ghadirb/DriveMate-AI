@@ -38,6 +38,7 @@ import ai.drivemate.ai.SmartDriveCompanion;
 import ai.drivemate.location.AddressResolver;
 import ai.drivemate.location.DeviceLocationTracker;
 import ai.drivemate.location.SharedLocationParser;
+import ai.drivemate.model.RoutePoint;
 import ai.drivemate.model.RouteStep;
 import ai.drivemate.model.RouteResult;
 import ai.drivemate.model.SavedPlace;
@@ -46,6 +47,7 @@ import ai.drivemate.routing.MapIrRoutingProvider;
 import ai.drivemate.routing.NeshanRoutingProvider;
 import ai.drivemate.routing.OpenRouteServiceRoutingProvider;
 import ai.drivemate.routing.NavigationEngine;
+import ai.drivemate.routing.OverpassPoiProvider;
 import ai.drivemate.routing.PlaceSearchRepository;
 import ai.drivemate.routing.PoiCategory;
 import ai.drivemate.routing.RoutePatternAnalyzer;
@@ -107,6 +109,13 @@ public class MainActivity extends Activity {
     private SmartDriveCompanion smartCompanion;
     private final NavigationEngine navigationEngine = new NavigationEngine();
     private RouteResult activeRoute;
+    /** Community-mapped OpenStreetMap speed camera / speed bump / police-checkpoint points along
+     *  the active route. Neshan and map.ir do not expose this through any public developer API,
+     *  so it is the only source available; see OverpassPoiProvider for coverage caveats. */
+    private final OverpassPoiProvider hazardProvider = new OverpassPoiProvider();
+    private List<double[]> activeRouteHazards = new ArrayList<>();
+    private boolean[] activeRouteHazardAnnounced = new boolean[0];
+    private int hazardFetchRequestId;
     private RuntimeKeys runtimeKeys = new RuntimeKeys();
     private String lastInstruction = "start_navigation";
     private String lastInstructionText = "";
@@ -191,6 +200,7 @@ public class MainActivity extends Activity {
             smartCompanion.onLocation(location);
             updateTripStats(location);
             maybeSuggestRecurringDestination(location);
+            checkRouteHazards(location);
         });
         handleSharedIntent(getIntent());
         registerNavigationReceiver();
@@ -660,6 +670,7 @@ public class MainActivity extends Activity {
                     tripStartedAt = System.currentTimeMillis();
                     activeTripDistanceMeters = route.distanceMeters;
                     smartCompanion.start();
+                    fetchRouteHazards(route);
                     startBackgroundNavigation();
                     lastTrafficEtaSeconds = route.durationSeconds;
                     lastTrafficEtaMeasuredAt = System.currentTimeMillis();
@@ -863,6 +874,9 @@ public class MainActivity extends Activity {
         setStatus("به " + destination.name + " رسیدید.");
         activeDestination = null;
         activeRoute = null;
+        ++hazardFetchRequestId;
+        activeRouteHazards = new ArrayList<>();
+        activeRouteHazardAnnounced = new boolean[0];
         tripStartedAt = 0L;
         activeTripDistanceMeters = 0;
         initialGuidanceHeldUntil = 0L;
@@ -1580,6 +1594,7 @@ public class MainActivity extends Activity {
 
     private void replaceRouteForTraffic(RouteResult route, SavedPlace destination, int gainSeconds) {
         activeRoute = route;
+        fetchRouteHazards(route);
         navigationEngine.start(route, new NavigationEngine.Listener() {
             @Override public void onInstruction(RouteStep step) { runOnUiThread(() -> announceRouteStep(step)); }
             @Override public void onOffRoute() { runOnUiThread(() -> rerouteFromCurrentLocation()); }
@@ -1637,6 +1652,9 @@ public class MainActivity extends Activity {
 
     private void stopNavigation(String message) {
         ++routeRequestSequence;
+        ++hazardFetchRequestId;
+        activeRouteHazards = new ArrayList<>();
+        activeRouteHazardAnnounced = new boolean[0];
         navigationEngine.stop();
         smartCompanion.stop();
         intelligenceCoordinator.cancelAll();
@@ -1662,6 +1680,82 @@ public class MainActivity extends Activity {
         else registerReceiver(navigationStopReceiver, filter);
     }
 
+    /**
+     * Loads community-mapped OpenStreetMap speed camera / speed bump / police-checkpoint points
+     * along the given route in the background. Neither Neshan nor map.ir expose this data through
+     * any public developer API, so OpenStreetMap/Overpass is the only source; results are
+     * best-effort and depend entirely on what contributors have mapped for that road (see
+     * OverpassPoiProvider). This never represents live police presence.
+     */
+    private void fetchRouteHazards(RouteResult route) {
+        activeRouteHazards = new ArrayList<>();
+        activeRouteHazardAnnounced = new boolean[0];
+        final int requestId = ++hazardFetchRequestId;
+        final List<RoutePoint> geometry = route.geometry;
+        new Thread(() -> {
+            List<double[]> hazards;
+            try {
+                hazards = hazardProvider.hazardsNear(geometry);
+            } catch (Exception exception) {
+                android.util.Log.w("DriveMateHazard", "Route hazard lookup failed: " + exception.getMessage());
+                return;
+            }
+            runOnUiThread(() -> {
+                if (requestId != hazardFetchRequestId) return;
+                activeRouteHazards = hazards == null ? new ArrayList<>() : hazards;
+                activeRouteHazardAnnounced = new boolean[activeRouteHazards.size()];
+            });
+        }).start();
+    }
+
+    /**
+     * Warns the driver once, shortly before arrival, at each known hazard point. Proximity-based
+     * only (no route-projection/order check) to keep this simple and robust to GPS noise; each
+     * point announces at most once per route thanks to activeRouteHazardAnnounced.
+     */
+    private void checkRouteHazards(Location location) {
+        if (location == null || activeRouteHazards.isEmpty() || !navigationEngine.isNavigating()) return;
+        for (int index = 0; index < activeRouteHazards.size(); index++) {
+            if (index >= activeRouteHazardAnnounced.length || activeRouteHazardAnnounced[index]) continue;
+            double[] hazard = activeRouteHazards.get(index);
+            Location hazardLocation = new Location("osm_hazard");
+            hazardLocation.setLatitude(hazard[0]);
+            hazardLocation.setLongitude(hazard[1]);
+            float meters = location.distanceTo(hazardLocation);
+            if (meters > 350f) continue;
+            activeRouteHazardAnnounced[index] = true;
+            announceRouteHazard(hazard[2]);
+        }
+    }
+
+    private void announceRouteHazard(double type) {
+        if (type == OverpassPoiProvider.HAZARD_CAMERA) {
+            speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
+                    "داده OpenStreetMap درباره دوربین سرعت در این نزدیکی هشدار داده است. یک هشدار فارسی بسیار کوتاه، طبیعی و آرام بگو.",
+                    "speed_camera", "دوربین سرعت احتمالی در این نزدیکی است.", 10_000L);
+            smartCompanion.routeHazard("دوربین سرعت (OSM)");
+        } else if (type == OverpassPoiProvider.HAZARD_SPEED_BUMP) {
+            speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
+                    "داده OpenStreetMap درباره دست‌انداز یا سرعت‌گیر در این نزدیکی هشدار داده است. یک هشدار فارسی بسیار کوتاه، طبیعی و آرام بگو.",
+                    "speed_bump_warning", "دست‌انداز یا سرعت‌گیر احتمالی در این نزدیکی است.", 10_000L);
+            smartCompanion.routeHazard("دست‌انداز/سرعت‌گیر (OSM)");
+        } else if (type == OverpassPoiProvider.HAZARD_TRAFFIC_SIGN) {
+            // Static OSM highway=stop / highway=give_way / traffic_sign=* tag only - reuses the
+            // existing unused stop_ahead.wav clip, distinct from the police/checkpoint branch below.
+            speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
+                    "داده OpenStreetMap به تابلوی ایست یا تقدم عبور در این نزدیکی اشاره کرده است. یک هشدار فارسی بسیار کوتاه، طبیعی و آرام بگو.",
+                    "stop_ahead", "تابلوی ایست در این نزدیکی است.", 10_000L);
+            smartCompanion.routeHazard("تابلوی ایست (OSM)");
+        } else {
+            // Static, community-tagged police station / checkpoint location only - never live
+            // enforcement presence. Phrased as "احتمالی" (possible) to avoid implying certainty.
+            speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
+                    "داده OpenStreetMap به ایست بازرسی یا کلانتری ثبت‌شده در این نزدیکی اشاره کرده است؛ این داده زنده نیست. یک هشدار فارسی بسیار کوتاه، طبیعی و آرام بگو.",
+                    "danger_ahead", "ایست بازرسی یا کلانتری ثبت‌شده در این نزدیکی است.", 10_000L);
+            smartCompanion.routeHazard("ایست بازرسی/پلیس (OSM، غیرزنده)");
+        }
+    }
+
     private void announceRouteStep(RouteStep step) {
         if (System.currentTimeMillis() < initialGuidanceHeldUntil) {
             lastInstruction = "continue_route";
@@ -1684,6 +1778,14 @@ public class MainActivity extends Activity {
                     "داده مسیر درباره دست‌انداز هشدار داده است. یک هشدار فارسی بسیار کوتاه، طبیعی و آرام بگو.",
                     "speed_bump_warning", "دست انداز در مسیر است.", 10_000L);
             smartCompanion.routeHazard("دست انداز");
+            setStatus(text);
+            return;
+        }
+        if (lower.contains("police") || text.contains("پلیس راه") || text.contains("پلیس") || text.contains("ایست بازرسی")) {
+            speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
+                    "داده مسیر به پلیس راه یا ایست بازرسی اشاره کرده است. یک هشدار فارسی بسیار کوتاه، طبیعی و آرام بگو.",
+                    "police_checkpoint", "پلیس راه یا ایست بازرسی در مسیر است.", 10_000L);
+            smartCompanion.routeHazard("پلیس راه");
             setStatus(text);
             return;
         }

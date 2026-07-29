@@ -42,6 +42,16 @@ public class VoiceCommandParser {
                 "دستشویی دارم", "سرویس بهداشتی می خوام", "توالت نزدیک"});
         CATEGORY_PHRASES.put(PoiCategory.ATM, new String[]{
                 "عابر بانک می خوام", "خودپرداز نزدیک", "پول نقد لازم دارم"});
+        // Hazard categories - purely informational lookups, sourced only from OpenStreetMap;
+        // see PoiCategory/OverpassPoiProvider for the "not live enforcement" disclaimer.
+        CATEGORY_PHRASES.put(PoiCategory.SPEED_CAMERA, new String[]{
+                "دوربین سرعت کجاست", "نزدیکترین دوربین سرعت", "دوربین کنترل سرعت کجاست"});
+        CATEGORY_PHRASES.put(PoiCategory.SPEED_BUMP, new String[]{
+                "سرعتگیر کجاست", "دست انداز کجاست", "نزدیکترین سرعتگیر"});
+        CATEGORY_PHRASES.put(PoiCategory.POLICE_CHECKPOINT, new String[]{
+                "ایست بازرسی کجاست", "نزدیکترین ایست بازرسی"});
+        CATEGORY_PHRASES.put(PoiCategory.TRAFFIC_SIGN, new String[]{
+                "تابلو ایست کجاست", "تابلوی ایست کجاست"});
     }
 
     public Command parse(String rawText) {

@@ -7,14 +7,106 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
+import ai.drivemate.model.RoutePoint;
 import ai.drivemate.model.SavedPlace;
 
-/** Public OpenStreetMap fallback for nearby categories that Iranian commercial indexes miss. */
-final class OverpassPoiProvider {
+/** Public OpenStreetMap fallback for nearby categories that Iranian commercial indexes miss,
+ *  and for route hazards (speed cameras, speed bumps, and best-effort police/checkpoint points)
+ *  that no Iranian commercial provider exposes through a public developer API at all. */
+public final class OverpassPoiProvider {
+
+    /** Hazard type codes returned as the third element of each hazardsNear() entry. */
+    public static final double HAZARD_CAMERA = 0d;
+    public static final double HAZARD_SPEED_BUMP = 1d;
+    public static final double HAZARD_POLICE = 2d;
+    public static final double HAZARD_TRAFFIC_SIGN = 3d;
+
+    /**
+     * Best-effort, community-maintained speed camera (highway=speed_camera), speed bump
+     * (traffic_calming=*), police/checkpoint (amenity=police, barrier=checkpoint,
+     * highway=checkpoint) and traffic-sign (highway=stop, highway=give_way, traffic_sign=*)
+     * points that fall within a short distance of the given route geometry.
+     * This is not official Neshan/map.ir data - their public developer API does not expose one,
+     * only their own first-party consumer app has that - so coverage depends purely on what
+     * OpenStreetMap contributors have mapped for that road. The police/checkpoint points are
+     * static, community-tagged locations only; this never includes live police presence, which
+     * has no static-map representation at all and must never be implied to the driver.
+     */
+    public List<double[]> hazardsNear(List<RoutePoint> geometry) throws Exception {
+        if (geometry == null || geometry.size() < 2) return Collections.emptyList();
+        double minLat = 90d, maxLat = -90d, minLon = 180d, maxLon = -180d;
+        for (RoutePoint point : geometry) {
+            minLat = Math.min(minLat, point.latitude);
+            maxLat = Math.max(maxLat, point.latitude);
+            minLon = Math.min(minLon, point.longitude);
+            maxLon = Math.max(maxLon, point.longitude);
+        }
+        double pad = 0.01d; // roughly 1km, enough to cover route curvature near the bbox edges
+        minLat -= pad; maxLat += pad; minLon -= pad; maxLon += pad;
+        // A very long intercity route would make the bbox (and the Overpass query) too large and
+        // slow; skip the hazard lookup rather than stall the trip on a multi-hundred-km request.
+        if ((maxLat - minLat) > 3d || (maxLon - minLon) > 3d) return Collections.emptyList();
+        String bbox = minLat + "," + minLon + "," + maxLat + "," + maxLon;
+        String query = "[out:json][timeout:15];(node[\"highway\"=\"speed_camera\"](" + bbox + ");"
+                + "node[\"traffic_calming\"](" + bbox + ");"
+                + "node[\"amenity\"=\"police\"](" + bbox + ");"
+                + "node[\"barrier\"=\"checkpoint\"](" + bbox + ");"
+                + "node[\"highway\"=\"checkpoint\"](" + bbox + ");"
+                + "node[\"highway\"=\"stop\"](" + bbox + ");"
+                + "node[\"highway\"=\"give_way\"](" + bbox + ");"
+                + "node[\"traffic_sign\"](" + bbox + "););out;";
+        JSONObject body = request(query);
+        JSONArray items = body.optJSONArray("elements");
+        ArrayList<double[]> hazards = new ArrayList<>();
+        if (items == null) return hazards;
+        for (int index = 0; index < items.length(); index++) {
+            JSONObject item = items.optJSONObject(index);
+            if (item == null) continue;
+            double lat = item.optDouble("lat", Double.NaN);
+            double lon = item.optDouble("lon", Double.NaN);
+            if (Double.isNaN(lat) || Double.isNaN(lon) || !isInIran(lat, lon)) continue;
+            // The bbox is a rectangle around the whole route, so a point inside it is not
+            // necessarily on the road the driver will actually take; only keep points genuinely
+            // close to the route line itself. Police/checkpoint points get a wider corridor since
+            // they are sparser and their OSM position is often the station entrance, not the road.
+            JSONObject tags = item.optJSONObject("tags");
+            boolean isCamera = tags != null && "speed_camera".equals(tags.optString("highway", ""));
+            boolean isPolice = tags != null && ("police".equals(tags.optString("amenity", ""))
+                    || "checkpoint".equals(tags.optString("barrier", ""))
+                    || "checkpoint".equals(tags.optString("highway", "")));
+            boolean isSign = tags != null && ("stop".equals(tags.optString("highway", ""))
+                    || "give_way".equals(tags.optString("highway", "")) || tags.has("traffic_sign"));
+            double corridor = isPolice ? 150d : 60d;
+            if (!nearRoute(geometry, lat, lon, corridor)) continue;
+            double type = isCamera ? HAZARD_CAMERA : isPolice ? HAZARD_POLICE
+                    : isSign ? HAZARD_TRAFFIC_SIGN : HAZARD_SPEED_BUMP;
+            hazards.add(new double[]{lat, lon, type});
+        }
+        return hazards;
+    }
+
+    private boolean nearRoute(List<RoutePoint> geometry, double lat, double lon, double thresholdMeters) {
+        for (RoutePoint point : geometry) {
+            if (distanceMeters(point.latitude, point.longitude, lat, lon) <= thresholdMeters) return true;
+        }
+        return false;
+    }
+
+    private double distanceMeters(double latitudeA, double longitudeA, double latitudeB, double longitudeB) {
+        double latitudeDelta = Math.toRadians(latitudeB - latitudeA);
+        double longitudeDelta = Math.toRadians(longitudeB - longitudeA);
+        double a = Math.sin(latitudeDelta / 2d) * Math.sin(latitudeDelta / 2d)
+                + Math.cos(Math.toRadians(latitudeA)) * Math.cos(Math.toRadians(latitudeB))
+                * Math.sin(longitudeDelta / 2d) * Math.sin(longitudeDelta / 2d);
+        return 6371000d * 2d * Math.atan2(Math.sqrt(a), Math.sqrt(1d - a));
+    }
+
     List<SavedPlace> searchNearby(String term, double latitude, double longitude) throws Exception {
         String selector = selectorFor(term);
         if (selector == null) return Collections.emptyList();
-        String query = "[out:json][timeout:8];(nwr" + selector + "(around:10000," + latitude + "," + longitude
+        // 20km (was 10km): denser cities do not need the extra radius, but sparser regions
+        // (e.g. around Mashhad/the northeast) otherwise come back with too few or zero results.
+        String query = "[out:json][timeout:10];(nwr" + selector + "(around:20000," + latitude + "," + longitude
                 + "););out center 25;";
         JSONObject body = request(query);
         JSONArray items = body.optJSONArray("elements");
@@ -41,18 +133,21 @@ final class OverpassPoiProvider {
     }
 
     private JSONObject request(String query) throws Exception {
-        Exception firstFailure;
-        try {
-            return RoutingHttp.postFormJson("https://overpass-api.de/api/interpreter", "data", query);
-        } catch (Exception exception) {
-            firstFailure = exception;
+        String[] mirrors = {
+                "https://overpass-api.de/api/interpreter",
+                "https://overpass.private.coffee/api/interpreter",
+                "https://overpass.kumi.systems/api/interpreter"
+        };
+        StringBuilder combinedFailure = new StringBuilder();
+        for (String mirror : mirrors) {
+            try {
+                return RoutingHttp.postFormJson(mirror, "data", query);
+            } catch (Exception exception) {
+                if (combinedFailure.length() > 0) combinedFailure.append(" | ");
+                combinedFailure.append(mirror).append(": ").append(exception.getMessage());
+            }
         }
-        try {
-            return RoutingHttp.postFormJson("https://overpass.private.coffee/api/interpreter", "data", query);
-        } catch (Exception fallbackFailure) {
-            throw new IllegalStateException("Overpass unavailable: " + firstFailure.getMessage()
-                    + " | " + fallbackFailure.getMessage());
-        }
+        throw new IllegalStateException("Overpass unavailable: " + combinedFailure);
     }
 
     private String selectorFor(String rawTerm) {
@@ -70,7 +165,11 @@ final class OverpassPoiProvider {
         if (contains(term, "\u067e\u0646\u0686\u0631", "tyre", "tire")) return "[\"shop\"=\"tyres\"]";
         if (contains(term, "\u0628\u0627\u062a\u0631\u06cc")) return "[\"shop\"=\"car_parts\"]";
         if (contains(term, "\u062f\u0631\u0645\u0627\u0646\u06af\u0627\u0647", "clinic")) return "[\"amenity\"=\"clinic\"]";
-        if (contains(term, "\u06a9\u0644\u0627\u0646\u062a\u0631\u06cc", "police")) return "[\"amenity\"=\"police\"]";
+        if (contains(term, "\u06a9\u0644\u0627\u0646\u062a\u0631\u06cc", "police station")) return "[\"amenity\"=\"police\"]";
+        if (contains(term, "\u062f\u0648\u0631\u0628\u06cc\u0646\u0020\u0633\u0631\u0639\u062a", "\u062f\u0648\u0631\u0628\u06cc\u0646\u0020\u06a9\u0646\u062a\u0631\u0644\u0020\u0633\u0631\u0639\u062a", "speed camera")) return "[\"highway\"=\"speed_camera\"]";
+        if (contains(term, "\u0633\u0631\u0639\u062a\u200c\u06af\u06cc\u0631", "\u0633\u0631\u0639\u062a\u0020\u06af\u06cc\u0631", "\u062f\u0633\u062a\u0020\u0627\u0646\u062f\u0627\u0632", "\u062f\u0633\u062a\u200c\u0627\u0646\u062f\u0627\u0632", "speed bump")) return "[\"traffic_calming\"]";
+        if (contains(term, "\u0627\u06cc\u0633\u062a\u0020\u0628\u0627\u0632\u0631\u0633\u06cc", "checkpoint")) return "[\"barrier\"=\"checkpoint\"]";
+        if (contains(term, "\u062a\u0627\u0628\u0644\u0648\u0020\u0627\u06cc\u0633\u062a", "\u062a\u0627\u0628\u0644\u0648\u06cc\u0020\u0627\u06cc\u0633\u062a", "stop sign")) return "[\"highway\"=\"stop\"]";
         if (contains(term, "\u0645\u0633\u062c\u062f", "mosque")) return "[\"amenity\"=\"place_of_worship\"]";
         if (contains(term, "\u0633\u0631\u0648\u06cc\u0633", "toilet", "restroom")) return "[\"amenity\"=\"toilets\"]";
         if (contains(term, "\u062e\u0648\u062f\u067e\u0631\u062f\u0627\u0632", "atm")) return "[\"amenity\"=\"atm\"]";
