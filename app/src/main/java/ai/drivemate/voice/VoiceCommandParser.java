@@ -62,6 +62,10 @@ public class VoiceCommandParser {
         if (containsAny(text, "برو محل کار", "به محل کار", "سر کار")) return new Command(CommandType.NAVIGATE_WORK, rawText);
         if (containsAny(text, "بنزین زدم", "باک را پر کردم", "باک پر شد", "سوخت زدم", "پر کردم باک"))
             return new Command(CommandType.FUEL_REFILLED, rawText);
+        if (containsAny(text, "اسم برنامه", "نام برنامه", "اسمت چیه", "اسمت چیست", "نامت چیست", "نامت چیه",
+                "اسم تو چیه", "اسم تو چیست", "تو کی هستی", "تو چی هستی", "خودتو معرفی کن", "خودت رو معرفی کن",
+                "خودت را معرفی کن", "معرفی کن خودتو"))
+            return new Command(CommandType.ASK_APP_NAME, rawText);
         for (Map.Entry<PoiCategory, String[]> entry : CATEGORY_PHRASES.entrySet()) {
             if (containsAny(text, entry.getValue())) return new Command(CommandType.FIND_PLACE, rawText, entry.getKey());
         }

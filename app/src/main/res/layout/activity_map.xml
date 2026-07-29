@@ -72,6 +72,22 @@
                 android:textSize="20sp" />
         </LinearLayout>
 
+        <TextView
+            android:id="@+id/roadSpeedLimitText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="start"
+            android:layout_marginBottom="8dp"
+            android:background="@drawable/status_panel"
+            android:paddingStart="12dp"
+            android:paddingTop="7dp"
+            android:paddingEnd="12dp"
+            android:paddingBottom="7dp"
+            android:text="محدودیت: نامشخص"
+            android:textColor="@color/drivemate_text"
+            android:textSize="13sp"
+            android:visibility="gone" />
+
         <ScrollView
             android:id="@+id/turnStepsScroll"
             android:layout_width="match_parent"

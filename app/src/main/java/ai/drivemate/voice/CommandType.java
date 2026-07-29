@@ -16,6 +16,9 @@ public enum CommandType {
     VOLUME_UP,
     VOLUME_DOWN,
     REPEAT,
+    /** "اسم برنامه چیه؟" / "تو کی هستی؟" style questions - answered instantly and offline with the Persian
+     *  app name, never sent to the AI model, so it can never come back with the English name. */
+    ASK_APP_NAME,
     ASK_AI,
     UNKNOWN
 }

@@ -8,6 +8,7 @@ import java.util.List;
 
 import ai.drivemate.model.RouteResult;
 import ai.drivemate.model.RouteStep;
+import ai.drivemate.model.SpeedLimitPoint;
 
 public class NeshanRoutingProvider implements RoutingProvider {
     private String apiKey;
@@ -52,6 +53,7 @@ public class NeshanRoutingProvider implements RoutingProvider {
         int duration = trafficDuration != null ? trafficDuration.optInt("value")
                 : (leg.optJSONObject("duration") == null ? 0 : leg.getJSONObject("duration").optInt("value"));
         ArrayList<RouteStep> steps = new ArrayList<>();
+        ArrayList<SpeedLimitPoint> speedLimits = new ArrayList<>();
         JSONArray rawSteps = leg.optJSONArray("steps");
         if (rawSteps != null) for (int i = 0; i < rawSteps.length(); i++) {
             JSONObject step = rawSteps.optJSONObject(i);
@@ -66,12 +68,34 @@ public class NeshanRoutingProvider implements RoutingProvider {
             if (!Double.isNaN(latitude) && !Double.isNaN(longitude)) {
                 steps.add(new RouteStep(latitude, longitude, step.optString("instruction"),
                         stepDistance == null ? 0 : stepDistance.optInt("value")));
+                int speedLimit = explicitSpeedLimit(step);
+                if (speedLimit > 0) speedLimits.add(new SpeedLimitPoint(latitude, longitude, speedLimit, name()));
             }
         }
         // Neshan step coordinates mark the start of each maneuver. Keep arrival at the real
         // destination instead of the start of the provider's final arrive step.
         steps.add(new RouteStep(destinationLat, destinationLng, "Arrive at destination", 0));
         return new RouteResult(name(), distance, duration, leg.optString("summary"), steps,
-                RouteGeometry.fromRoute(route, steps, originLat, originLng, destinationLat, destinationLng));
+                RouteGeometry.fromRoute(route, steps, originLat, originLng, destinationLat, destinationLng), speedLimits);
+    }
+
+    /** The documented Neshan response does not currently expose maxspeed. This parses only an
+     * explicit numeric field if a future response adds one; no value is derived from ETA or road type. */
+    private int explicitSpeedLimit(JSONObject step) {
+        return numericValue(step, "maxspeed", "maxSpeed", "speed_limit", "speedLimit");
+    }
+
+    private int numericValue(JSONObject item, String... keys) {
+        for (String key : keys) {
+            if (!item.has(key)) continue;
+            Object raw = item.opt(key);
+            String value = String.valueOf(raw).trim().toLowerCase();
+            if (!value.matches("\\d{1,3}(\\s*(km/h|kph))?")) continue;
+            try {
+                int parsed = Integer.parseInt(value.replaceAll("[^0-9]", ""));
+                if (parsed >= 10 && parsed <= 160) return parsed;
+            } catch (NumberFormatException ignored) { }
+        }
+        return -1;
     }
 }

@@ -9,6 +9,7 @@ import java.util.List;
 
 import ai.drivemate.model.RoutePoint;
 import ai.drivemate.model.SavedPlace;
+import ai.drivemate.model.SpeedLimitPoint;
 
 /** Public OpenStreetMap fallback for nearby categories that Iranian commercial indexes miss,
  *  and for route hazards (speed cameras, speed bumps, and best-effort police/checkpoint points)
@@ -83,6 +84,73 @@ public final class OverpassPoiProvider {
             hazards.add(new double[]{lat, lon, type});
         }
         return hazards;
+    }
+
+    /**
+     * Reads numeric {@code maxspeed} tags from roads close to a route.  This intentionally skips
+     * country defaults, conditional values and advisory speeds: guessing a number from road shape
+     * or national rules could produce a false "illegal speed" warning.  The provider returns only
+     * a best-effort mapped value that can be shown as "OSM" in the UI.
+     */
+    public List<SpeedLimitPoint> speedLimitsNear(List<RoutePoint> geometry) throws Exception {
+        if (geometry == null || geometry.size() < 2) return Collections.emptyList();
+        double minLat = 90d, maxLat = -90d, minLon = 180d, maxLon = -180d;
+        for (RoutePoint point : geometry) {
+            minLat = Math.min(minLat, point.latitude);
+            maxLat = Math.max(maxLat, point.latitude);
+            minLon = Math.min(minLon, point.longitude);
+            maxLon = Math.max(maxLon, point.longitude);
+        }
+        double pad = 0.004d; // roughly 400m: wide enough for parallel carriageways, not a city-wide scan
+        minLat -= pad; maxLat += pad; minLon -= pad; maxLon += pad;
+        if ((maxLat - minLat) > 3d || (maxLon - minLon) > 3d) return Collections.emptyList();
+        String bbox = minLat + "," + minLon + "," + maxLat + "," + maxLon;
+        JSONObject body = request("[out:json][timeout:18];way[\"highway\"][\"maxspeed\"](" + bbox
+                + ");out tags geom 500;");
+        JSONArray items = body.optJSONArray("elements");
+        ArrayList<SpeedLimitPoint> limits = new ArrayList<>();
+        if (items == null) return limits;
+        for (int index = 0; index < items.length(); index++) {
+            JSONObject item = items.optJSONObject(index);
+            JSONObject tags = item == null ? null : item.optJSONObject("tags");
+            int limit = parseKilometersPerHour(tags == null ? "" : tags.optString("maxspeed", ""));
+            if (limit <= 0) continue;
+            JSONArray points = item.optJSONArray("geometry");
+            if (points == null) continue;
+            double closestLat = Double.NaN, closestLon = Double.NaN, closestDistance = Double.MAX_VALUE;
+            for (int pointIndex = 0; pointIndex < points.length(); pointIndex++) {
+                JSONObject point = points.optJSONObject(pointIndex);
+                if (point == null) continue;
+                double lat = point.optDouble("lat", Double.NaN);
+                double lon = point.optDouble("lon", Double.NaN);
+                if (Double.isNaN(lat) || Double.isNaN(lon) || !isInIran(lat, lon)) continue;
+                for (RoutePoint routePoint : geometry) {
+                    double distance = distanceMeters(routePoint.latitude, routePoint.longitude, lat, lon);
+                    if (distance < closestDistance) {
+                        closestDistance = distance;
+                        closestLat = lat;
+                        closestLon = lon;
+                    }
+                }
+            }
+            if (closestDistance <= 90d) limits.add(new SpeedLimitPoint(closestLat, closestLon, limit, "OSM"));
+        }
+        return limits;
+    }
+
+    private int parseKilometersPerHour(String rawValue) {
+        if (rawValue == null) return -1;
+        String value = rawValue.trim().toLowerCase();
+        if (value.contains(";") || value.contains("@") || value.contains("mph") || !value.matches("\\d{1,3}(\\s*(km/h|kph))?")) {
+            return -1;
+        }
+        String digits = value.replaceAll("[^0-9]", "");
+        try {
+            int parsed = Integer.parseInt(digits);
+            return parsed >= 10 && parsed <= 160 ? parsed : -1;
+        } catch (NumberFormatException ignored) {
+            return -1;
+        }
     }
 
     private boolean nearRoute(List<RoutePoint> geometry, double lat, double lon, double thresholdMeters) {

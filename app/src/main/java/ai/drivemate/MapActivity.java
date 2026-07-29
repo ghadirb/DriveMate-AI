@@ -68,6 +68,7 @@ import ai.drivemate.model.RouteResult;
 import ai.drivemate.model.RoutePoint;
 import ai.drivemate.model.RouteStep;
 import ai.drivemate.model.SavedPlace;
+import ai.drivemate.model.SpeedLimitPoint;
 import ai.drivemate.routing.MapIrRoutingProvider;
 import ai.drivemate.routing.NavigationEngine;
 import ai.drivemate.routing.NeshanRoutingProvider;
@@ -142,6 +143,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private TextView turnDistanceText;
     private TextView turnInstructionText;
     private TextView turnExpandIcon;
+    private TextView roadSpeedLimitText;
     private ScrollView turnStepsScroll;
     private LinearLayout turnStepsContent;
     private boolean turnStepsExpanded;
@@ -172,6 +174,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private final Map<PoiCategory, Set<String>> poiLayerKnownIds = new EnumMap<>(PoiCategory.class);
     private final Handler poiExpansionHandler = new Handler(Looper.getMainLooper());
     private final OverpassPoiProvider layerExpansionProvider = new OverpassPoiProvider();
+    private final List<SpeedLimitPoint> routeSpeedLimits = new ArrayList<>();
+    private int speedLimitRequestId;
     /** Backing list for the "نمایش روی نقشه" button on the search-results panel; holds
      *  whatever the last plain-text search returned so the button can plot it on demand. */
     private final List<SavedPlace> lastSearchResultsForMap = new ArrayList<>();
@@ -220,6 +224,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         turnDistanceText = findViewById(R.id.turnDistanceText);
         turnInstructionText = findViewById(R.id.turnInstructionText);
         turnExpandIcon = findViewById(R.id.turnExpandIcon);
+        roadSpeedLimitText = findViewById(R.id.roadSpeedLimitText);
         turnStepsScroll = findViewById(R.id.turnStepsScroll);
         turnStepsContent = findViewById(R.id.turnStepsContent);
         turnBannerContainer.setOnClickListener(v -> toggleTurnSteps());
@@ -441,15 +446,33 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private void showMapLayersDialog() {
         String[] items = {
                 "مکان‌های اطراف روی نقشه",
+                isSpeedLimitLayerEnabled() ? "نمایش محدودیت سرعت OSM: روشن" : "نمایش محدودیت سرعت OSM: خاموش",
                 "پاک‌کردن همهٔ لایه‌های مکان"
         };
         new AlertDialog.Builder(this)
                 .setTitle("تنظیمات نقشه")
                 .setItems(items, (dialog, which) -> {
                     if (which == 0) showPoiLayerSelection();
-                    else clearPoiLayers();
+                    else if (which == 1) {
+                        boolean enabled = !isSpeedLimitLayerEnabled();
+                        getSharedPreferences("map_layers", MODE_PRIVATE).edit()
+                                .putBoolean("speed_limit_osm", enabled).apply();
+                        if (!enabled) {
+                            routeSpeedLimits.clear();
+                            roadSpeedLimitText.setVisibility(View.GONE);
+                        } else if (selectedRoute != null) {
+                            loadRouteSpeedLimits(selectedRoute);
+                        }
+                        Toast.makeText(this, enabled
+                                ? "نمایش و هشدار محدودیت‌های ثبت‌شدهٔ OSM فعال شد."
+                                : "نمایش و هشدار محدودیت‌های ثبت‌شدهٔ OSM غیرفعال شد.", Toast.LENGTH_LONG).show();
+                    } else clearPoiLayers();
                 })
                 .show();
+    }
+
+    private boolean isSpeedLimitLayerEnabled() {
+        return getSharedPreferences("map_layers", MODE_PRIVATE).getBoolean("speed_limit_osm", true);
     }
 
     private void showPoiLayerSelection() {
@@ -1174,6 +1197,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         int minutes = Math.max(1, (int) Math.ceil(route.durationSeconds / 60.0));
         routeText.setText("مسیر پیشنهادی " + route.providerName + " | " + minutes + " دقیقه | "
                 + String.format(Locale.US, "%.1f", route.distanceMeters / 1000.0) + " کیلومتر");
+        loadRouteSpeedLimits(route);
         drawAllRoutes();
         if (map != null && !navigationMode) {
             map.moveCamera(new LatLng(originLatitude, originLongitude), 0.25f);
@@ -1266,6 +1290,67 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         long arrivalAt = System.currentTimeMillis() + remainingSeconds * 1000L;
         routeText.setText(formatDistance(remainingMeters) + " مانده • "
                 + formatDuration(remainingSeconds) + " دیگر • رسیدن ساعت " + etaFormat.format(new Date(arrivalAt)));
+    }
+
+    /** The lookup is route-scoped, not location-scoped, so following the vehicle never causes a
+     * network request per GPS sample. Values are community-mapped OSM maxspeed tags, not an
+     * official enforcement feed. */
+    private void loadRouteSpeedLimits(RouteResult route) {
+        routeSpeedLimits.clear();
+        roadSpeedLimitText.setVisibility(View.GONE);
+        if (!isSpeedLimitLayerEnabled() || route == null || route.geometry.size() < 2) return;
+        final int requestId = ++speedLimitRequestId;
+        new Thread(() -> {
+            try {
+                List<SpeedLimitPoint> found = layerExpansionProvider.speedLimitsNear(route.geometry);
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed() || requestId != speedLimitRequestId) return;
+                    routeSpeedLimits.clear();
+                    if (found != null) routeSpeedLimits.addAll(found);
+                    if (routeSpeedLimits.isEmpty() && route.providerSpeedLimits != null) {
+                        routeSpeedLimits.addAll(route.providerSpeedLimits);
+                    }
+                    updateRoadSpeedLimit(originLatitude, originLongitude);
+                });
+            } catch (Exception error) {
+                Log.w("DriveMateSpeed", "Map speed-limit lookup failed: " + error.getMessage());
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed() || requestId != speedLimitRequestId) return;
+                    routeSpeedLimits.clear();
+                    if (route.providerSpeedLimits != null) routeSpeedLimits.addAll(route.providerSpeedLimits);
+                    // Stage three: a visible unknown state, without enabling any speed alert.
+                    updateRoadSpeedLimit(originLatitude, originLongitude);
+                });
+            }
+        }).start();
+    }
+
+    private void updateRoadSpeedLimit(double latitude, double longitude) {
+        if (!isSpeedLimitLayerEnabled()) {
+            roadSpeedLimitText.setVisibility(View.GONE);
+            return;
+        }
+        SpeedLimitPoint closest = null;
+        double closestMeters = Double.MAX_VALUE;
+        for (SpeedLimitPoint item : routeSpeedLimits) {
+            double meters = distanceMeters(latitude, longitude, item.latitude, item.longitude);
+            if (meters < closestMeters) { closestMeters = meters; closest = item; }
+        }
+        if (closest == null || closestMeters > 110d) {
+            roadSpeedLimitText.setText("محدودیت: نامشخص (دادهٔ OSM)");
+        } else {
+            roadSpeedLimitText.setText("محدودیت ثبت‌شده: " + closest.kilometersPerHour + " کیلومتر/ساعت (" + closest.source + ")");
+        }
+        roadSpeedLimitText.setVisibility(View.VISIBLE);
+    }
+
+    private double distanceMeters(double latitudeA, double longitudeA, double latitudeB, double longitudeB) {
+        double latitudeDelta = Math.toRadians(latitudeB - latitudeA);
+        double longitudeDelta = Math.toRadians(longitudeB - longitudeA);
+        double value = Math.sin(latitudeDelta / 2d) * Math.sin(latitudeDelta / 2d)
+                + Math.cos(Math.toRadians(latitudeA)) * Math.cos(Math.toRadians(latitudeB))
+                * Math.sin(longitudeDelta / 2d) * Math.sin(longitudeDelta / 2d);
+        return 6371000d * 2d * Math.atan2(Math.sqrt(value), Math.sqrt(1d - value));
     }
 
     private String formatDistance(int meters) {
@@ -1696,6 +1781,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         }
         runOnUiThread(() -> {
             showCurrentMarker();
+            if (selectedRoute != null) updateRoadSpeedLimit(location.getLatitude(), location.getLongitude());
             if (navigationMode && navigationEngine.isNavigating()) {
                 navigationEngine.onLocation(location);
                 updateTurnBanner(location);

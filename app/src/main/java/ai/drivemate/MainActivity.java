@@ -42,6 +42,7 @@ import ai.drivemate.model.RoutePoint;
 import ai.drivemate.model.RouteStep;
 import ai.drivemate.model.RouteResult;
 import ai.drivemate.model.SavedPlace;
+import ai.drivemate.model.SpeedLimitPoint;
 import ai.drivemate.model.TripRecord;
 import ai.drivemate.routing.MapIrRoutingProvider;
 import ai.drivemate.routing.NeshanRoutingProvider;
@@ -116,6 +117,11 @@ public class MainActivity extends Activity {
     private List<double[]> activeRouteHazards = new ArrayList<>();
     private boolean[] activeRouteHazardAnnounced = new boolean[0];
     private int hazardFetchRequestId;
+    /** Numeric OSM maxspeed tags near the active route. Never treated as an official legal feed. */
+    private List<SpeedLimitPoint> activeRouteSpeedLimits = new ArrayList<>();
+    private int speedLimitFetchRequestId;
+    private long lastSpeedLimitWarningAt;
+    private int lastWarnedMappedSpeedLimit;
     private RuntimeKeys runtimeKeys = new RuntimeKeys();
     private String lastInstruction = "start_navigation";
     private String lastInstructionText = "";
@@ -201,6 +207,7 @@ public class MainActivity extends Activity {
             updateTripStats(location);
             maybeSuggestRecurringDestination(location);
             checkRouteHazards(location);
+            checkRouteSpeedLimit(location);
         });
         handleSharedIntent(getIntent());
         registerNavigationReceiver();
@@ -574,6 +581,10 @@ public class MainActivity extends Activity {
                     voicePlayer.play(lastInstruction);
                 }
                 break;
+            case ASK_APP_NAME:
+                voicePlayer.speak("من «همراه راننده» هستم؛ دستیار هوشمند رانندگی شما.");
+                setStatus("من همراه راننده هستم.");
+                break;
             case ASK_AI:
                 askAi(text);
                 break;
@@ -875,8 +886,10 @@ public class MainActivity extends Activity {
         activeDestination = null;
         activeRoute = null;
         ++hazardFetchRequestId;
+        ++speedLimitFetchRequestId;
         activeRouteHazards = new ArrayList<>();
         activeRouteHazardAnnounced = new boolean[0];
+        activeRouteSpeedLimits = new ArrayList<>();
         tripStartedAt = 0L;
         activeTripDistanceMeters = 0;
         initialGuidanceHeldUntil = 0L;
@@ -1324,20 +1337,56 @@ public class MainActivity extends Activity {
         return text == null ? "" : text.replaceFirst("^(برو|به|مسیریابی)\\s+", "").trim();
     }
 
+    /** Builds the full context sent to the AI model: current trip status, every saved place, a
+     *  longer trip history and the driver's most frequently visited destinations. This lets the
+     *  model act like a companion who genuinely knows the driver's routine, not just the active
+     *  destination. Precise GPS coordinates are still never sent - only names and summaries the
+     *  driver has already chosen to save or that come from destinations they navigated to. */
     private String drivingContext() {
         StringBuilder context = new StringBuilder();
-        if (activeDestination != null) context.append("مقصد فعلی: ").append(activeDestination.name).append(". ");
+        if (activeDestination != null) {
+            context.append("مقصد فعلی: ").append(activeDestination.name).append(". ");
+            if (activeRoute != null) {
+                context.append("فاصله کل مسیر حدود ").append(Math.round(activeRoute.distanceMeters / 1000f))
+                        .append(" کیلومتر و زمان تقریبی ").append(Math.max(1, activeRoute.durationSeconds / 60))
+                        .append(" دقیقه است. ");
+            }
+        }
         ArrayList<SavedPlace> places = new ArrayList<>(placeStore.allPlaces());
         if (!places.isEmpty()) {
-            context.append("مکان‌های ذخیره‌شده: ");
-            for (int i = 0; i < places.size() && i < 6; i++) context.append(places.get(i).name).append(i == Math.min(places.size(), 6) - 1 ? ". " : "، ");
+            context.append("همه مکان‌های ذخیره‌شده کاربر: ");
+            for (int i = 0; i < places.size(); i++) context.append(places.get(i).name).append(i == places.size() - 1 ? ". " : "، ");
         }
-        java.util.List<TripRecord> trips = tripStore.recent(5);
+        java.util.List<TripRecord> trips = tripStore.recent(60);
         if (!trips.isEmpty()) {
-            context.append("مقصدهای سفر اخیر: ");
-            for (int i = 0; i < trips.size(); i++) context.append(trips.get(i).destinationName).append(i == trips.size() - 1 ? "." : "، ");
+            int shown = Math.min(trips.size(), 15);
+            context.append("تاریخچه سفرهای اخیر کاربر (از جدید به قدیم): ");
+            for (int i = 0; i < shown; i++) context.append(trips.get(i).destinationName).append(i == shown - 1 ? ". " : "، ");
+            String frequent = mostFrequentDestinations(trips, 3);
+            if (!frequent.isEmpty()) context.append("مقصدهایی که کاربر بیشتر از همه به آن‌ها رفته: ").append(frequent).append(". ");
         }
         return context.toString();
+    }
+
+    /** Counts destination names across the trip history to surface the driver's routine places
+     *  (e.g. work, gym, a relative's home) so the model can reason about habits, not just the
+     *  single most recent trip. */
+    private String mostFrequentDestinations(java.util.List<TripRecord> trips, int topN) {
+        java.util.LinkedHashMap<String, Integer> counts = new java.util.LinkedHashMap<>();
+        for (TripRecord trip : trips) {
+            String name = trip.destinationName == null ? "" : trip.destinationName.trim();
+            if (name.isEmpty()) continue;
+            counts.merge(name, 1, Integer::sum);
+        }
+        java.util.List<java.util.Map.Entry<String, Integer>> sorted = new ArrayList<>(counts.entrySet());
+        sorted.sort((a, b) -> b.getValue() - a.getValue());
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < Math.min(topN, sorted.size()); i++) {
+            if (sorted.get(i).getValue() < 2) break;
+            if (builder.length() > 0) builder.append("، ");
+            builder.append(sorted.get(i).getKey()).append(" (").append(sorted.get(i).getValue()).append(" بار)");
+        }
+        return builder.toString();
     }
 
     private DrivingIntelligenceCoordinator.Mode readIntelligenceMode() {
@@ -1653,8 +1702,12 @@ public class MainActivity extends Activity {
     private void stopNavigation(String message) {
         ++routeRequestSequence;
         ++hazardFetchRequestId;
+        ++speedLimitFetchRequestId;
         activeRouteHazards = new ArrayList<>();
         activeRouteHazardAnnounced = new boolean[0];
+        activeRouteSpeedLimits = new ArrayList<>();
+        lastSpeedLimitWarningAt = 0L;
+        lastWarnedMappedSpeedLimit = 0;
         navigationEngine.stop();
         smartCompanion.stop();
         intelligenceCoordinator.cancelAll();
@@ -1706,6 +1759,68 @@ public class MainActivity extends Activity {
                 activeRouteHazardAnnounced = new boolean[activeRouteHazards.size()];
             });
         }).start();
+        fetchRouteSpeedLimits(route);
+    }
+
+    /** Fetch once per route rather than on every GPS update, preserving both battery and the
+     * public Overpass service. The map-layer toggle also controls the spoken mapped-speed alert. */
+    private void fetchRouteSpeedLimits(RouteResult route) {
+        activeRouteSpeedLimits = new ArrayList<>();
+        final int requestId = ++speedLimitFetchRequestId;
+        final List<RoutePoint> geometry = route.geometry;
+        new Thread(() -> {
+            try {
+                List<SpeedLimitPoint> limits = hazardProvider.speedLimitsNear(geometry);
+                runOnUiThread(() -> {
+                    if (requestId == speedLimitFetchRequestId) {
+                        // Priority 1: explicit OSM maxspeed. Priority 2: only use a numeric value
+                        // explicitly returned by a routing provider; never infer a legal limit.
+                        activeRouteSpeedLimits = limits == null ? new ArrayList<>() : limits;
+                        if (activeRouteSpeedLimits.isEmpty() && route.providerSpeedLimits != null) {
+                            activeRouteSpeedLimits = new ArrayList<>(route.providerSpeedLimits);
+                        }
+                    }
+                });
+            } catch (Exception exception) {
+                android.util.Log.w("DriveMateSpeed", "Mapped speed-limit lookup failed: " + exception.getMessage());
+                runOnUiThread(() -> {
+                    if (requestId == speedLimitFetchRequestId) {
+                        // OSM unavailable: stage two can still use an explicit provider value.
+                        activeRouteSpeedLimits = route.providerSpeedLimits == null
+                                ? new ArrayList<>() : new ArrayList<>(route.providerSpeedLimits);
+                    }
+                });
+            }
+        }).start();
+    }
+
+    private void checkRouteSpeedLimit(Location location) {
+        if (!getSharedPreferences("map_layers", MODE_PRIVATE).getBoolean("speed_limit_osm", true)
+                || location == null || !location.hasSpeed() || !navigationEngine.isNavigating()
+                || activeRouteSpeedLimits.isEmpty()) return;
+        SpeedLimitPoint closest = null;
+        float closestMeters = Float.MAX_VALUE;
+        for (SpeedLimitPoint limit : activeRouteSpeedLimits) {
+            Location point = new Location("osm_maxspeed");
+            point.setLatitude(limit.latitude);
+            point.setLongitude(limit.longitude);
+            float meters = location.distanceTo(point);
+            if (meters < closestMeters) { closestMeters = meters; closest = limit; }
+        }
+        if (closest == null || closestMeters > 110f) return;
+        float currentKph = location.getSpeed() * 3.6f;
+        // GPS speed has normal variance; avoid warning close to the mapped value or repeating it.
+        if (currentKph < closest.kilometersPerHour + 7f) return;
+        long now = System.currentTimeMillis();
+        if (now - lastSpeedLimitWarningAt < 90_000L && lastWarnedMappedSpeedLimit == closest.kilometersPerHour) return;
+        lastSpeedLimitWarningAt = now;
+        lastWarnedMappedSpeedLimit = closest.kilometersPerHour;
+        String fallback = "سرعت شما از محدودیت ثبت‌شدهٔ این مسیر، " + closest.kilometersPerHour + " کیلومتر بر ساعت، بالاتر است.";
+        speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
+                "محدودیت سرعت ثبت‌شده از " + closest.source + " برای مسیر " + closest.kilometersPerHour
+                        + " کیلومتر بر ساعت است و سرعت GPS کاربر حدود " + Math.round(currentKph)
+                        + " است. فقط یک هشدار فارسی بسیار کوتاه، آرام و ایمن بگو؛ ادعای تخلف قانونی نکن.",
+                "speed_limit_osm", fallback, 12_000L);
     }
 
     /**
