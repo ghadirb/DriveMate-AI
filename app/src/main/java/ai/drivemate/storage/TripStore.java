@@ -19,7 +19,7 @@ public class TripStore {
     public TripStore(Context context) { preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE); }
 
     public void add(TripRecord record) {
-        List<TripRecord> current = recent(24);
+        List<TripRecord> current = recent(60);
         current.add(0, record);
         while (current.size() > 60) current.remove(current.size() - 1);
         JSONArray values = new JSONArray();
@@ -28,6 +28,18 @@ public class TripStore {
             catch (org.json.JSONException ignored) { }
         }
         preferences.edit().putString(KEY_HISTORY, values.toString()).apply();
+    }
+
+    public void remove(long startedAt) {
+        List<TripRecord> current = recent(60);
+        for (int i = current.size() - 1; i >= 0; i--) {
+            if (current.get(i).startedAt == startedAt) current.remove(i);
+        }
+        restore(current);
+    }
+
+    public void clear() {
+        preferences.edit().remove(KEY_HISTORY).apply();
     }
 
     public List<TripRecord> recent(int limit) {

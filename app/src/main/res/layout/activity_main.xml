@@ -302,6 +302,7 @@
             <Button android:id="@+id/profileSettingsButton" style="@style/HomeActionButton" android:layout_width="match_parent" android:layout_marginTop="16dp" android:text="تنظیمات" />
             <Button android:id="@+id/profileSubscriptionButton" style="@style/HomeActionButton" android:layout_width="match_parent" android:layout_marginTop="8dp" android:text="اشتراک" />
             <Button android:id="@+id/profileBackupButton" style="@style/HomeActionButton" android:layout_width="match_parent" android:layout_marginTop="8dp" android:text="پشتیبان‌گیری و بازگردانی" />
+            <Button android:id="@+id/profileTripsButton" style="@style/HomeActionButton" android:layout_width="match_parent" android:layout_marginTop="8dp" android:text="گزارش سفرها" />
             <Button android:id="@+id/profileAboutButton" style="@style/HomeActionButton" android:layout_width="match_parent" android:layout_marginTop="8dp" android:text="درباره برنامه" />
         </LinearLayout>
     </ScrollView>

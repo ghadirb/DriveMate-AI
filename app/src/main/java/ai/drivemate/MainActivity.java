@@ -176,6 +176,9 @@ public class MainActivity extends Activity {
     private boolean voiceRequestedWhileKeysLoad;
     private long tripStartedAt;
     private int activeTripDistanceMeters;
+    private double activeTripOriginLatitude = Double.NaN;
+    private double activeTripOriginLongitude = Double.NaN;
+    private Location lastTripLocation;
     private long initialGuidanceHeldUntil;
     private SavedPlace pendingSuggestionPlace;
     private PoiCategory pendingSuggestionCategory;
@@ -252,6 +255,7 @@ public class MainActivity extends Activity {
         locationTracker.setUpdateListener(location -> {
             navigationEngine.onLocation(location);
             smartCompanion.onLocation(location);
+            recordTripLocation(location);
             updateTripStats(location);
             maybeSuggestRecurringDestination(location);
             checkRouteHazards(location);
@@ -298,6 +302,7 @@ public class MainActivity extends Activity {
         findViewById(R.id.profileSettingsButton).setOnClickListener(v -> showSettingsMenu());
         findViewById(R.id.profileSubscriptionButton).setOnClickListener(v -> showSubscriptionInfo());
         findViewById(R.id.profileBackupButton).setOnClickListener(v -> showBackupDialog());
+        findViewById(R.id.profileTripsButton).setOnClickListener(v -> showTripHistory());
         findViewById(R.id.profileAboutButton).setOnClickListener(v -> showAboutDialog());
         selectMainTab(0);
     }
@@ -765,14 +770,14 @@ public class MainActivity extends Activity {
                     RouteResult route = routes.get(Math.min(preferredRouteIndex, routes.size() - 1));
                     if (requestSequence != routeRequestSequence) return;
                     placeStore.addRecent(destination);
-                    tripStore.add(new TripRecord(destination.name, originLatitude, originLongitude, destination.latitude, destination.longitude,
-                            route.distanceMeters, route.durationSeconds, System.currentTimeMillis()));
-                    writeAutomaticBackup();
                     activeDestination = destination;
                     activeRoute = route;
                     activeWaypoints = new ArrayList<>(requestedWaypoints);
                     tripStartedAt = System.currentTimeMillis();
-                    activeTripDistanceMeters = route.distanceMeters;
+                    activeTripDistanceMeters = 0;
+                    activeTripOriginLatitude = originLatitude;
+                    activeTripOriginLongitude = originLongitude;
+                    lastTripLocation = new Location(origin);
                     smartCompanion.start();
                     fetchRouteHazards(route);
                     fetchRouteSafetyAlerts(route);
@@ -902,6 +907,125 @@ public class MainActivity extends Activity {
         return String.format(Locale.US, "%.1f کیلومتر", meters / 1000.0);
     }
 
+    /** Adds only plausible GPS movement samples, avoiding jumps caused by a weak location fix. */
+    private void recordTripLocation(Location location) {
+        if (location == null || !navigationEngine.isNavigating() || tripStartedAt == 0L) return;
+        if (location.hasAccuracy() && location.getAccuracy() > 75f) return;
+        if (lastTripLocation == null) {
+            lastTripLocation = new Location(location);
+            return;
+        }
+        float delta = lastTripLocation.distanceTo(location);
+        if (delta >= 2f && delta <= 1_500f) activeTripDistanceMeters += Math.round(delta);
+        lastTripLocation = new Location(location);
+    }
+
+    private TripRecord buildTripRecord(SavedPlace destination, boolean completed) {
+        if (destination == null || activeRoute == null || tripStartedAt == 0L) return null;
+        long endedAt = System.currentTimeMillis();
+        int actualDuration = Math.max(0, (int) ((endedAt - tripStartedAt) / 1000L));
+        return new TripRecord(destination.name, activeTripOriginLatitude, activeTripOriginLongitude,
+                destination.latitude, destination.longitude, activeRoute.distanceMeters, activeRoute.durationSeconds,
+                tripStartedAt, endedAt, activeTripDistanceMeters, activeRoute.providerName,
+                activeWaypoints.size(), completed);
+    }
+
+    private void saveTripRecord(TripRecord record) {
+        if (record == null) return;
+        tripStore.add(record);
+        writeAutomaticBackup();
+    }
+
+    private String formatTripDuration(int seconds) {
+        int minutes = Math.max(0, seconds / 60);
+        int hours = minutes / 60;
+        return hours > 0 ? hours + " ساعت و " + (minutes % 60) + " دقیقه" : Math.max(1, minutes) + " دقیقه";
+    }
+
+    private String tripDistanceLabel(TripRecord record) {
+        if (record.traveledDistanceMeters > 0) return formatTripDistance(record.traveledDistanceMeters) + " طی‌شده";
+        return formatTripDistance(record.distanceMeters) + " برآورد مسیر";
+    }
+
+    private String tripDateLabel(long time) {
+        return new SimpleDateFormat("EEEE، yyyy/MM/dd - HH:mm", new Locale("fa", "IR"))
+                .format(new java.util.Date(time));
+    }
+
+    private void showTripCompletionReport(TripRecord record) {
+        if (record == null || isFinishing()) return;
+        new AlertDialog.Builder(this)
+                .setTitle(record.completed ? "گزارش پایان سفر" : "گزارش مسیریابی متوقف‌شده")
+                .setMessage(tripDetailText(record))
+                .setPositiveButton("بستن", null)
+                .setNeutralButton("تاریخچه سفرها", (dialog, which) -> showTripHistory())
+                .show();
+    }
+
+    private void showTripHistory() {
+        List<TripRecord> records = tripStore.recent(60);
+        if (records.isEmpty()) {
+            new AlertDialog.Builder(this).setTitle("گزارش سفرها")
+                    .setMessage("هنوز سفر تکمیل‌شده یا متوقف‌شده‌ای ثبت نشده است.")
+                    .setPositiveButton("بستن", null).show();
+            return;
+        }
+        String[] rows = new String[records.size()];
+        for (int i = 0; i < records.size(); i++) {
+            TripRecord record = records.get(i);
+            rows[i] = tripDateLabel(record.startedAt) + "\n" + record.destinationName + " | "
+                    + tripDistanceLabel(record) + " | "
+                    + formatTripDuration(record.endedAt > record.startedAt
+                    ? (int) ((record.endedAt - record.startedAt) / 1000L) : record.durationSeconds);
+        }
+        new AlertDialog.Builder(this).setTitle("گزارش سفرها")
+                .setItems(rows, (dialog, which) -> showTripDetail(records.get(which), true))
+                .setNeutralButton("پاک کردن همه", (dialog, which) -> confirmClearTrips())
+                .setPositiveButton("بستن", null)
+                .show();
+    }
+
+    private void showTripDetail(TripRecord record, boolean allowDelete) {
+        AlertDialog.Builder builder = new AlertDialog.Builder(this).setTitle("جزئیات سفر")
+                .setMessage(tripDetailText(record)).setPositiveButton("بستن", null);
+        if (allowDelete) {
+            builder.setNegativeButton("حذف", (dialog, which) -> {
+                tripStore.remove(record.startedAt);
+                writeAutomaticBackup();
+                showTripHistory();
+            });
+        }
+        builder.show();
+    }
+
+    private String tripDetailText(TripRecord record) {
+        int elapsed = record.endedAt > record.startedAt
+                ? (int) ((record.endedAt - record.startedAt) / 1000L) : record.durationSeconds;
+        String status = record.endedAt == 0L ? "ثبت قدیمی (برنامه‌ریزی‌شده)"
+                : record.completed ? "رسیدن به مقصد" : "مسیریابی متوقف شد";
+        return "مسیر: موقعیت شروع GPS ← " + record.destinationName
+                + "\nتاریخ شروع: " + tripDateLabel(record.startedAt)
+                + (record.endedAt > 0 ? "\nپایان: " + tripDateLabel(record.endedAt) : "")
+                + "\nوضعیت: " + status
+                + "\nمسافت: " + tripDistanceLabel(record)
+                + "\nمدت: " + formatTripDuration(elapsed)
+                + "\nبرآورد اولیه: " + formatTripDistance(record.distanceMeters) + " و "
+                + formatTripDuration(record.durationSeconds)
+                + (record.waypointCount > 0 ? "\nتوقف میانی: " + record.waypointCount : "")
+                + (!record.routeProvider.isEmpty() ? "\nسرویس مسیر: " + record.routeProvider : "");
+    }
+
+    private void confirmClearTrips() {
+        new AlertDialog.Builder(this).setTitle("پاک کردن گزارش سفرها")
+                .setMessage("همه گزارش‌های سفر از گوشی و نسخه پشتیبان بعدی حذف می‌شوند.")
+                .setPositiveButton("پاک کردن", (dialog, which) -> {
+                    tripStore.clear();
+                    writeAutomaticBackup();
+                    setStatus("گزارش سفرها پاک شد.");
+                })
+                .setNegativeButton("انصراف", null).show();
+    }
+
     private void openHomeOrWork(String kind, String defaultName) {
         SavedPlace place = placeStore.findByKind(kind);
         if (place != null) { startNavigation(place); return; }
@@ -973,8 +1097,12 @@ public class MainActivity extends Activity {
 
     private void finishTrip(SavedPlace destination) {
         if (activeDestination == null) return;
+        TripRecord tripReport = buildTripRecord(destination, true);
+        saveTripRecord(tripReport);
         int minutes = tripStartedAt == 0L ? 0 : Math.max(1, (int) ((System.currentTimeMillis() - tripStartedAt) / 60_000L));
-        double kilometers = activeTripDistanceMeters / 1000.0;
+        int reportDistance = activeTripDistanceMeters > 0 ? activeTripDistanceMeters
+                : activeRoute == null ? 0 : activeRoute.distanceMeters;
+        double kilometers = reportDistance / 1000.0;
         String fallback = "به مقصد رسیدید. سفر حدود " + minutes + " دقیقه و "
                 + String.format(Locale.US, "%.1f", kilometers) + " کیلومتر بود.";
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
@@ -1003,6 +1131,9 @@ public class MainActivity extends Activity {
         announcedTrafficIncidentIds.clear();
         tripStartedAt = 0L;
         activeTripDistanceMeters = 0;
+        activeTripOriginLatitude = Double.NaN;
+        activeTripOriginLongitude = Double.NaN;
+        lastTripLocation = null;
         initialGuidanceHeldUntil = 0L;
         smartCompanion.stop();
         voiceHandler.removeCallbacks(trafficCheck);
@@ -1011,6 +1142,7 @@ public class MainActivity extends Activity {
         stopBackgroundNavigation();
         hideTripAnalysis();
         if (tripStatsPanel != null) tripStatsPanel.setVisibility(View.GONE);
+        showTripCompletionReport(tripReport);
     }
 
     private void searchAndNavigate(String term) {
@@ -1837,6 +1969,8 @@ public class MainActivity extends Activity {
     }
 
     private void stopNavigation(String message) {
+        TripRecord tripReport = buildTripRecord(activeDestination, false);
+        saveTripRecord(tripReport);
         ++routeRequestSequence;
         ++hazardFetchRequestId;
         ++speedLimitFetchRequestId;
@@ -1865,6 +1999,9 @@ public class MainActivity extends Activity {
         activeDestination = null;
         tripStartedAt = 0L;
         activeTripDistanceMeters = 0;
+        activeTripOriginLatitude = Double.NaN;
+        activeTripOriginLongitude = Double.NaN;
+        lastTripLocation = null;
         initialGuidanceHeldUntil = 0L;
         hideTripAnalysis();
         stopBackgroundNavigation();
@@ -1875,6 +2012,7 @@ public class MainActivity extends Activity {
         activeRoute = null;
         activeWaypoints = new ArrayList<>();
         if (tripStatsPanel != null) tripStatsPanel.setVisibility(View.GONE);
+        showTripCompletionReport(tripReport);
     }
 
     private void registerNavigationReceiver() {
