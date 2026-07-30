@@ -16,11 +16,14 @@ import android.provider.Settings;
 import android.view.View;
 import android.widget.TextView;
 import android.widget.EditText;
+import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Button;
 import android.widget.Toast;
 
 import androidx.core.content.FileProvider;
+
+import com.google.android.material.card.MaterialCardView;
 
 import java.io.File;
 import java.text.SimpleDateFormat;
@@ -74,6 +77,8 @@ public class MainActivity extends Activity {
     private static final int REQ_EXPORT_BACKUP = 11;
     private static final int REQ_IMPORT_BACKUP = 12;
     private static final int REQ_MAP = 13;
+    private static final int REQ_EXPORT_TRIP_REPORTS = 14;
+    private static final int MIN_RECORDED_TRIP_DISTANCE_METERS = 100;
     private static final long TRAFFIC_CHECK_INTERVAL_MS = 8 * 60_000L;
     private static final long WEATHER_CHECK_INTERVAL_MS = 20 * 60_000L;
     /** More frequent than the 8-minute aggregate reroute check: a live point incident (accident,
@@ -101,6 +106,8 @@ public class MainActivity extends Activity {
     private ScrollView dashboardPage;
     private ScrollView savedPlacesPage;
     private ScrollView profilePage;
+    private ScrollView tripHistoryPage;
+    private LinearLayout tripHistoryContent;
     private Button voiceButton;
     private Button notificationButton;
     private Button intelligenceButton;
@@ -223,6 +230,8 @@ public class MainActivity extends Activity {
         dashboardPage = findViewById(R.id.dashboardPage);
         savedPlacesPage = findViewById(R.id.savedPlacesPage);
         profilePage = findViewById(R.id.profilePage);
+        tripHistoryPage = findViewById(R.id.tripHistoryPage);
+        tripHistoryContent = findViewById(R.id.tripHistoryContent);
         voiceButton = findViewById(R.id.voiceButton);
         notificationButton = findViewById(R.id.notificationButton);
         intelligenceButton = findViewById(R.id.intelligenceButton);
@@ -304,6 +313,8 @@ public class MainActivity extends Activity {
         findViewById(R.id.profileBackupButton).setOnClickListener(v -> showBackupDialog());
         findViewById(R.id.profileTripsButton).setOnClickListener(v -> showTripHistory());
         findViewById(R.id.profileAboutButton).setOnClickListener(v -> showAboutDialog());
+        findViewById(R.id.closeTripHistoryButton).setOnClickListener(v -> selectMainTab(2));
+        findViewById(R.id.exportTripReportsButton).setOnClickListener(v -> exportTripReports());
         selectMainTab(0);
     }
 
@@ -369,6 +380,15 @@ public class MainActivity extends Activity {
                     runOnUiThread(() -> setStatus("پشتیبان در محل انتخاب‌شده ذخیره شد."));
                 } catch (Exception error) {
                     runOnUiThread(() -> setStatus("ذخیره پشتیبان انجام نشد."));
+                }
+            }).start();
+        } else if (requestCode == REQ_EXPORT_TRIP_REPORTS) {
+            new Thread(() -> {
+                try {
+                    writeTripReportCsv(uri);
+                    runOnUiThread(() -> setStatus("گزارش سفرها ذخیره شد."));
+                } catch (Exception error) {
+                    runOnUiThread(() -> setStatus("ذخیره گزارش سفرها انجام نشد."));
                 }
             }).start();
         } else if (requestCode == REQ_IMPORT_BACKUP) {
@@ -740,6 +760,12 @@ public class MainActivity extends Activity {
     }
 
     private void startNavigation(SavedPlace destination, List<RoutePoint> waypoints) {
+        startNavigation(destination, waypoints, false);
+    }
+
+    /** Re-routing keeps the original trip clock and GPS distance so the final report covers the
+     *  whole journey rather than only its last recalculated segment. */
+    private void startNavigation(SavedPlace destination, List<RoutePoint> waypoints, boolean preserveTripProgress) {
         intelligenceCoordinator.cancelAll();
         final long requestSequence = ++routeRequestSequence;
         final int preferredRouteIndex = pendingRouteOptionIndex;
@@ -773,10 +799,12 @@ public class MainActivity extends Activity {
                     activeDestination = destination;
                     activeRoute = route;
                     activeWaypoints = new ArrayList<>(requestedWaypoints);
-                    tripStartedAt = System.currentTimeMillis();
-                    activeTripDistanceMeters = 0;
-                    activeTripOriginLatitude = originLatitude;
-                    activeTripOriginLongitude = originLongitude;
+                    if (!preserveTripProgress || tripStartedAt == 0L) {
+                        tripStartedAt = System.currentTimeMillis();
+                        activeTripDistanceMeters = 0;
+                        activeTripOriginLatitude = originLatitude;
+                        activeTripOriginLongitude = originLongitude;
+                    }
                     lastTripLocation = new Location(origin);
                     smartCompanion.start();
                     fetchRouteHazards(route);
@@ -910,20 +938,22 @@ public class MainActivity extends Activity {
     /** Adds only plausible GPS movement samples, avoiding jumps caused by a weak location fix. */
     private void recordTripLocation(Location location) {
         if (location == null || !navigationEngine.isNavigating() || tripStartedAt == 0L) return;
-        if (location.hasAccuracy() && location.getAccuracy() > 75f) return;
+        if (location.hasAccuracy() && location.getAccuracy() > 45f) return;
         if (lastTripLocation == null) {
             lastTripLocation = new Location(location);
             return;
         }
         float delta = lastTripLocation.distanceTo(location);
-        if (delta >= 2f && delta <= 1_500f) activeTripDistanceMeters += Math.round(delta);
+        boolean hasMovingSpeed = location.hasSpeed() && location.getSpeed() >= 0.8f;
+        boolean movementIsPlausible = (hasMovingSpeed && delta >= 3f) || (!location.hasSpeed() && delta >= 12f);
+        if (movementIsPlausible && delta <= 1_500f) activeTripDistanceMeters += Math.round(delta);
         lastTripLocation = new Location(location);
     }
 
     private TripRecord buildTripRecord(SavedPlace destination, boolean completed) {
         if (destination == null || activeRoute == null || tripStartedAt == 0L) return null;
+        if (activeTripDistanceMeters < MIN_RECORDED_TRIP_DISTANCE_METERS) return null;
         long endedAt = System.currentTimeMillis();
-        int actualDuration = Math.max(0, (int) ((endedAt - tripStartedAt) / 1000L));
         return new TripRecord(destination.name, activeTripOriginLatitude, activeTripOriginLongitude,
                 destination.latitude, destination.longitude, activeRoute.distanceMeters, activeRoute.durationSeconds,
                 tripStartedAt, endedAt, activeTripDistanceMeters, activeRoute.providerName,
@@ -952,6 +982,10 @@ public class MainActivity extends Activity {
                 .format(new java.util.Date(time));
     }
 
+    private String tripCoordinateLabel(double latitude, double longitude) {
+        return String.format(Locale.US, "%.5f, %.5f", latitude, longitude);
+    }
+
     private void showTripCompletionReport(TripRecord record) {
         if (record == null || isFinishing()) return;
         new AlertDialog.Builder(this)
@@ -963,26 +997,62 @@ public class MainActivity extends Activity {
     }
 
     private void showTripHistory() {
+        dashboardPage.setVisibility(View.GONE);
+        savedPlacesPage.setVisibility(View.GONE);
+        profilePage.setVisibility(View.GONE);
+        tripHistoryPage.setVisibility(View.VISIBLE);
+        ((Button) findViewById(R.id.tabDashboardButton)).setAlpha(0.62f);
+        ((Button) findViewById(R.id.tabSavedButton)).setAlpha(0.62f);
+        ((Button) findViewById(R.id.tabProfileButton)).setAlpha(1f);
+        ((Button) findViewById(R.id.tabMapButton)).setAlpha(0.62f);
+        renderTripHistory();
+    }
+
+    private void renderTripHistory() {
+        tripHistoryContent.removeAllViews();
         List<TripRecord> records = tripStore.recent(60);
         if (records.isEmpty()) {
-            new AlertDialog.Builder(this).setTitle("گزارش سفرها")
-                    .setMessage("هنوز سفر تکمیل‌شده یا متوقف‌شده‌ای ثبت نشده است.")
-                    .setPositiveButton("بستن", null).show();
+            TextView empty = new TextView(this);
+            empty.setText("هنوز سفری با حرکت واقعی ثبت نشده است.");
+            empty.setTextColor(getColor(R.color.drivemate_muted));
+            empty.setTextSize(15f);
+            empty.setPadding(0, dp(16), 0, dp(8));
+            tripHistoryContent.addView(empty);
             return;
         }
-        String[] rows = new String[records.size()];
-        for (int i = 0; i < records.size(); i++) {
-            TripRecord record = records.get(i);
-            rows[i] = tripDateLabel(record.startedAt) + "\n" + record.destinationName + " | "
-                    + tripDistanceLabel(record) + " | "
-                    + formatTripDuration(record.endedAt > record.startedAt
-                    ? (int) ((record.endedAt - record.startedAt) / 1000L) : record.durationSeconds);
+        for (TripRecord record : records) {
+            MaterialCardView card = new MaterialCardView(this);
+            card.setRadius(dp(8));
+            card.setCardElevation(dp(2));
+            card.setUseCompatPadding(true);
+            card.setClickable(true);
+            card.setFocusable(true);
+            card.setOnClickListener(v -> showTripDetail(record, true));
+
+            LinearLayout body = new LinearLayout(this);
+            body.setOrientation(LinearLayout.VERTICAL);
+            body.setPadding(dp(16), dp(14), dp(16), dp(14));
+            TextView destination = new TextView(this);
+            destination.setText(record.destinationName);
+            destination.setTextColor(getColor(R.color.drivemate_text));
+            destination.setTextSize(17f);
+            destination.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            TextView metadata = new TextView(this);
+            int elapsed = record.endedAt > record.startedAt
+                    ? (int) ((record.endedAt - record.startedAt) / 1000L) : record.durationSeconds;
+            metadata.setText(tripDateLabel(record.startedAt) + "\n" + tripDistanceLabel(record)
+                    + " | " + formatTripDuration(elapsed));
+            metadata.setTextColor(getColor(R.color.drivemate_muted));
+            metadata.setTextSize(14f);
+            metadata.setPadding(0, dp(6), 0, 0);
+            body.addView(destination);
+            body.addView(metadata);
+            card.addView(body);
+            LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            cardParams.setMargins(0, 0, 0, dp(10));
+            tripHistoryContent.addView(card, cardParams);
         }
-        new AlertDialog.Builder(this).setTitle("گزارش سفرها")
-                .setItems(rows, (dialog, which) -> showTripDetail(records.get(which), true))
-                .setNeutralButton("پاک کردن همه", (dialog, which) -> confirmClearTrips())
-                .setPositiveButton("بستن", null)
-                .show();
     }
 
     private void showTripDetail(TripRecord record, boolean allowDelete) {
@@ -992,7 +1062,7 @@ public class MainActivity extends Activity {
             builder.setNegativeButton("حذف", (dialog, which) -> {
                 tripStore.remove(record.startedAt);
                 writeAutomaticBackup();
-                showTripHistory();
+                renderTripHistory();
             });
         }
         builder.show();
@@ -1004,6 +1074,8 @@ public class MainActivity extends Activity {
         String status = record.endedAt == 0L ? "ثبت قدیمی (برنامه‌ریزی‌شده)"
                 : record.completed ? "رسیدن به مقصد" : "مسیریابی متوقف شد";
         return "مسیر: موقعیت شروع GPS ← " + record.destinationName
+                + "\nمبدا: " + tripCoordinateLabel(record.originLatitude, record.originLongitude)
+                + "\nمقصد: " + tripCoordinateLabel(record.destinationLatitude, record.destinationLongitude)
                 + "\nتاریخ شروع: " + tripDateLabel(record.startedAt)
                 + (record.endedAt > 0 ? "\nپایان: " + tripDateLabel(record.endedAt) : "")
                 + "\nوضعیت: " + status
@@ -1022,8 +1094,50 @@ public class MainActivity extends Activity {
                     tripStore.clear();
                     writeAutomaticBackup();
                     setStatus("گزارش سفرها پاک شد.");
+                    renderTripHistory();
                 })
                 .setNegativeButton("انصراف", null).show();
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private void exportTripReports() {
+        if (tripStore.recent(1).isEmpty()) {
+            setStatus("گزارشی برای ذخیره وجود ندارد.");
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.setType("text/csv");
+        intent.putExtra(Intent.EXTRA_TITLE, "drivemate-trip-reports.csv");
+        startActivityForResult(intent, REQ_EXPORT_TRIP_REPORTS);
+    }
+
+    private void writeTripReportCsv(Uri uri) throws Exception {
+        StringBuilder csv = new StringBuilder("\uFEFF");
+        csv.append("destination,origin_latitude,origin_longitude,destination_latitude,destination_longitude,start,end,status,distance_meters,planned_distance_meters,duration_seconds,provider,waypoints\n");
+        for (TripRecord record : tripStore.recent(60)) {
+            int duration = record.endedAt > record.startedAt
+                    ? (int) ((record.endedAt - record.startedAt) / 1000L) : record.durationSeconds;
+            int distance = record.traveledDistanceMeters > 0 ? record.traveledDistanceMeters : record.distanceMeters;
+            csv.append(csvValue(record.destinationName)).append(',')
+                    .append(record.originLatitude).append(',').append(record.originLongitude).append(',')
+                    .append(record.destinationLatitude).append(',').append(record.destinationLongitude).append(',')
+                    .append(csvValue(tripDateLabel(record.startedAt))).append(',')
+                    .append(csvValue(record.endedAt > 0 ? tripDateLabel(record.endedAt) : "")).append(',')
+                    .append(csvValue(record.completed ? "completed" : "stopped_or_legacy")).append(',')
+                    .append(distance).append(',').append(record.distanceMeters).append(',').append(duration).append(',')
+                    .append(csvValue(record.routeProvider)).append(',').append(record.waypointCount).append('\n');
+        }
+        try (java.io.OutputStream output = getContentResolver().openOutputStream(uri, "wt")) {
+            if (output == null) throw new IllegalStateException("Cannot open report destination");
+            output.write(csv.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+
+    private String csvValue(String value) {
+        return "\"" + (value == null ? "" : value.replace("\"", "\"\"")) + "\"";
     }
 
     private void openHomeOrWork(String kind, String defaultName) {
@@ -1378,7 +1492,7 @@ public class MainActivity extends Activity {
     private void rerouteForTraffic() {
         if (activeDestination == null) return;
         setStatus("ترافیک پایدار؛ در حال بررسی مسیر جایگزین...");
-        startNavigation(activeDestination, activeWaypoints);
+        startNavigation(activeDestination, activeWaypoints, true);
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
                 "حرکت مسیر برای مدتی کند بوده است و مسیر جایگزین در حال بررسی است. یک پیام کوتاه و طبیعی بگو.",
                 "alternative_route", "در حال بررسی مسیر جایگزین هستم.", 15_000L);
@@ -1749,6 +1863,7 @@ public class MainActivity extends Activity {
         dashboardPage.setVisibility(tab == 0 ? View.VISIBLE : View.GONE);
         savedPlacesPage.setVisibility(tab == 1 ? View.VISIBLE : View.GONE);
         profilePage.setVisibility(tab == 2 ? View.VISIBLE : View.GONE);
+        tripHistoryPage.setVisibility(View.GONE);
         ((Button) findViewById(R.id.tabDashboardButton)).setAlpha(tab == 0 ? 1f : 0.62f);
         ((Button) findViewById(R.id.tabSavedButton)).setAlpha(tab == 1 ? 1f : 0.62f);
         ((Button) findViewById(R.id.tabProfileButton)).setAlpha(tab == 2 ? 1f : 0.62f);
@@ -1934,7 +2049,7 @@ public class MainActivity extends Activity {
     private void rerouteFromCurrentLocation() {
         if (activeDestination == null || locationTracker.getLastLocation() == null) return;
         setStatus("از مسیر خارج شدید؛ در حال محاسبه مسیر جدید...");
-        startNavigation(activeDestination, activeWaypoints);
+        startNavigation(activeDestination, activeWaypoints, true);
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
                 "کاربر از مسیر خارج شده است. یک هشدار خیلی کوتاه و آرام برای ادامه مسیر بگو.",
                 "route_recalculated", "از مسیر خارج شدید؛ در حال محاسبه مسیر جدید هستم.", 15_000L);

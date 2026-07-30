@@ -272,8 +272,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         if (map != null && isSpeedLimitLayerEnabled() && !navigationMode) loadNearbySpeedLimits();
         if (navigationMode) {
             navigationCameraEnabled = true;
-            findViewById(R.id.startMapNavigationButton).setEnabled(true);
-            ((Button) findViewById(R.id.startMapNavigationButton)).setText("بازگشت به داشبورد");
+            findViewById(R.id.startMapNavigationButton).setVisibility(View.GONE);
             SavedPlace active = new SavedPlace(getIntent().getStringExtra(EXTRA_DESTINATION_NAME), "active_navigation",
                     getIntent().getDoubleExtra(EXTRA_DESTINATION_LATITUDE, 0d),
                     getIntent().getDoubleExtra(EXTRA_DESTINATION_LONGITUDE, 0d),
@@ -304,9 +303,11 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         findViewById(R.id.savedPlacesButton).setOnClickListener(v -> chooseSavedPlace());
         findViewById(R.id.nearMeButton).setOnClickListener(v -> showNearMeCategories());
         findViewById(R.id.mapLayersButton).setOnClickListener(v -> showMapLayersDialog());
+        findViewById(R.id.speedLimitButton).setOnClickListener(v -> toggleSpeedLimitLayer());
         findViewById(R.id.saveMapPlaceButton).setOnClickListener(v -> saveSelectedPlace());
         findViewById(R.id.routeOptionsButton).setOnClickListener(v -> centerOnSelectedRoute());
         findViewById(R.id.routeWaypointsButton).setOnClickListener(v -> showWaypointManager());
+        findViewById(R.id.routeActionsButton).setOnClickListener(v -> showRouteActions());
         findViewById(R.id.drivingOverviewButton).setOnClickListener(v -> showRouteOverview());
         View navigationCameraButton = findViewById(R.id.navigationCameraButton);
         navigationCameraButton.setTooltipText("نمای رانندگی و دنبال کردن خودرو");
@@ -348,6 +349,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             }
             @Override public void afterTextChanged(Editable value) { }
         });
+        refreshSpeedLimitButton();
     }
 
     private void returnToMainTab(String tab) {
@@ -376,13 +378,14 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                     if (isFinishing() || isDestroyed()) return;
                     try {
                         SavedPlace tapped = new SavedPlace(
-                                "نقطه انتخاب‌شده روی نقشه", "map_pin", latitude, longitude,
+                                "مقصد", "map_pin", latitude, longitude,
                                 String.format(Locale.US, "%.6f, %.6f", latitude, longitude), System.currentTimeMillis(), false);
                         // A destination already picked: ask whether this new point is a stop along
                         // the way or a replacement destination, instead of always replacing it -
                         // this is the only behavior change versus before, and only once a
                         // destination exists (first pick on a fresh screen is unchanged).
-                        if (destination == null || navigationMode) selectDestinationWithOptions(tapped);
+                        if (destination == null) selectDestinationWithOptions(tapped);
+                        else if (navigationMode) offerNavigationWaypoint(tapped);
                         else offerMapPointChoice(tapped);
                     } catch (RuntimeException error) {
                         Log.e("DriveMateMap", "Could not select map point", error);
@@ -512,12 +515,35 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                         } else {
                             loadNearbySpeedLimits();
                         }
+                        refreshSpeedLimitButton();
                         Toast.makeText(this, enabled
                                 ? "نمایش و هشدار محدودیت‌های ثبت‌شدهٔ OSM فعال شد."
                                 : "نمایش و هشدار محدودیت‌های ثبت‌شدهٔ OSM غیرفعال شد.", Toast.LENGTH_LONG).show();
                     } else clearPoiLayers();
                 })
                 .show();
+    }
+
+    private void toggleSpeedLimitLayer() {
+        boolean enabled = !isSpeedLimitLayerEnabled();
+        getSharedPreferences("map_layers", MODE_PRIVATE).edit().putBoolean("speed_limit_osm", enabled).apply();
+        if (!enabled) {
+            routeSpeedLimits.clear();
+            clearSpeedLimitMarkers();
+            roadSpeedLimitText.setVisibility(View.GONE);
+        } else if (selectedRoute != null) {
+            loadRouteSpeedLimits(selectedRoute);
+        } else {
+            loadNearbySpeedLimits();
+        }
+        refreshSpeedLimitButton();
+        Toast.makeText(this, enabled ? "نمایش محدودیت سرعت فعال شد." : "نمایش محدودیت سرعت غیرفعال شد.",
+                Toast.LENGTH_SHORT).show();
+    }
+
+    private void refreshSpeedLimitButton() {
+        Button button = findViewById(R.id.speedLimitButton);
+        if (button != null) button.setText(isSpeedLimitLayerEnabled() ? "سرعت\nروشن" : "سرعت\nخاموش");
     }
 
     private boolean isSpeedLimitLayerEnabled() {
@@ -1170,6 +1196,50 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                 .show();
     }
 
+    /** In active navigation, send the new stop back to MainActivity so its real navigation engine
+     *  reroutes through it as well; changing only this map preview would leave spoken guidance stale. */
+    private void offerNavigationWaypoint(SavedPlace tapped) {
+        new AlertDialog.Builder(this)
+                .setTitle("افزودن توقف میانی")
+                .setMessage("مسیر از توقف انتخابی عبور کند و دوباره محاسبه شود؟")
+                .setPositiveButton("افزودن و محاسبه مسیر", (dialog, which) -> {
+                    routeWaypoints.add(tapped);
+                    Intent result = new Intent();
+                    result.putExtra(RESULT_LATITUDE, destination.latitude);
+                    result.putExtra(RESULT_LONGITUDE, destination.longitude);
+                    result.putExtra(RESULT_NAME, destination.name);
+                    result.putExtra(RESULT_ADDRESS, destination.address);
+                    result.putExtra(RESULT_OPEN_NAVIGATION_MAP, true);
+                    result.putExtra(RESULT_ROUTE_INDEX, 0);
+                    result.putStringArrayListExtra(RESULT_WAYPOINTS, encodeWaypoints());
+                    setResult(RESULT_OK, result);
+                    finish();
+                })
+                .setNegativeButton("انصراف", null)
+                .show();
+    }
+
+    private void showRouteActions() {
+        if (destination == null) return;
+        if (navigationMode) {
+            new AlertDialog.Builder(this)
+                    .setTitle(destination.name)
+                    .setItems(new String[]{"نمای کامل مسیر", "افزودن توقف با نگه داشتن روی نقشه", "مدیریت توقف‌های میانی"}, (dialog, which) -> {
+                        if (which == 0) showRouteOverview();
+                        else if (which == 1) Toast.makeText(this, "روی نقطهٔ دلخواه نقشه کمی نگه دارید، سپس افزودن توقف را انتخاب کنید.", Toast.LENGTH_LONG).show();
+                        else showWaypointManager();
+                    }).show();
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle(destination.name)
+                .setItems(new String[]{"نمای کامل مسیر", "ذخیره مکان", "مدیریت توقف‌های میانی"}, (dialog, which) -> {
+                    if (which == 0) centerOnSelectedRoute();
+                    else if (which == 1) saveSelectedPlace();
+                    else showWaypointManager();
+                }).show();
+    }
+
     private void addWaypoint(SavedPlace place) {
         routeWaypoints.add(place);
         drawWaypointMarkers();
@@ -1499,6 +1569,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         clearSpeedLimitMarkers();
         roadSpeedLimitText.setVisibility(View.GONE);
         if (!isSpeedLimitLayerEnabled() || route == null || route.geometry.size() < 2) return;
+        roadSpeedLimitText.setText("محدودیت سرعت: در حال بررسی OSM");
+        roadSpeedLimitText.setVisibility(View.VISIBLE);
         final int requestId = ++speedLimitRequestId;
         new Thread(() -> {
             try {
@@ -1533,6 +1605,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
      *  map": the layer previously only ever populated from an active route. */
     private void loadNearbySpeedLimits() {
         if (!isSpeedLimitLayerEnabled() || Double.isNaN(originLatitude) || Double.isNaN(originLongitude)) return;
+        roadSpeedLimitText.setText("محدودیت سرعت: در حال بررسی OSM");
+        roadSpeedLimitText.setVisibility(View.VISIBLE);
         final int requestId = ++speedLimitRequestId;
         final double latitude = originLatitude;
         final double longitude = originLongitude;
@@ -1551,6 +1625,11 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                 });
             } catch (Exception error) {
                 Log.w("DriveMateSpeed", "Nearby speed-limit lookup failed: " + error.getMessage());
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed() || requestId != speedLimitRequestId) return;
+                    roadSpeedLimitText.setText("محدودیت سرعت: نامشخص (دادهٔ OSM در دسترس نیست)");
+                    roadSpeedLimitText.setVisibility(View.VISIBLE);
+                });
             }
         }).start();
     }

@@ -307,6 +307,59 @@
         </LinearLayout>
     </ScrollView>
 
+    <ScrollView
+        android:id="@+id/tripHistoryPage"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:clipToPadding="false"
+        android:padding="20dp"
+        android:paddingBottom="84dp"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="گزارش سفرها"
+                android:textColor="@color/drivemate_text"
+                android:textSize="26sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="هر کارت مربوط به یک سفر است. برای دیدن جزئیات آن را انتخاب کنید."
+                android:textColor="@color/drivemate_muted"
+                android:textSize="14sp" />
+
+            <Button
+                android:id="@+id/exportTripReportsButton"
+                style="@style/HomeActionButton"
+                android:layout_width="match_parent"
+                android:layout_marginTop="14dp"
+                android:text="ذخیره گزارش‌ها (CSV)" />
+
+            <Button
+                android:id="@+id/closeTripHistoryButton"
+                style="@style/HomeActionButton"
+                android:layout_width="match_parent"
+                android:layout_marginTop="8dp"
+                android:text="بازگشت به پروفایل" />
+
+            <LinearLayout
+                android:id="@+id/tripHistoryContent"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:orientation="vertical" />
+        </LinearLayout>
+    </ScrollView>
+
     <LinearLayout
         android:id="@+id/mainBottomTabs"
         android:layout_width="match_parent"
