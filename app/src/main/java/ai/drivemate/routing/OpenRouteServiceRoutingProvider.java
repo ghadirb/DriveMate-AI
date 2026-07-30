@@ -4,6 +4,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
+import java.util.List;
 
 import ai.drivemate.model.RoutePoint;
 import ai.drivemate.model.RouteResult;
@@ -27,10 +28,21 @@ public class OpenRouteServiceRoutingProvider implements RoutingProvider {
 
     @Override public RouteResult route(double originLat, double originLng, double destinationLat, double destinationLng)
             throws Exception {
+        return routeWithWaypoints(originLat, originLng, null, destinationLat, destinationLng);
+    }
+
+    /** ORS accepts any number of coordinates in order; the response then has one "segment" per
+     *  consecutive pair (origin->wp1, wp1->wp2, ..., wpN->destination), mirroring Neshan's/map.ir's
+     *  per-leg structure. A null/empty waypoints list reduces this to exactly the previous request. */
+    @Override public RouteResult routeWithWaypoints(double originLat, double originLng, List<RoutePoint> waypoints,
+                                                    double destinationLat, double destinationLng) throws Exception {
         if (!isConfigured()) throw new IllegalStateException("OpenRouteService API key is not configured.");
         JSONObject request = new JSONObject();
         JSONArray coordinates = new JSONArray();
         coordinates.put(new JSONArray().put(originLng).put(originLat));
+        if (waypoints != null) for (RoutePoint stop : waypoints) {
+            coordinates.put(new JSONArray().put(stop.longitude).put(stop.latitude));
+        }
         coordinates.put(new JSONArray().put(destinationLng).put(destinationLat));
         request.put("coordinates", coordinates);
         request.put("instructions", true);
@@ -46,7 +58,7 @@ public class OpenRouteServiceRoutingProvider implements RoutingProvider {
         int distance = summary == null ? 0 : (int) Math.round(summary.optDouble("distance"));
         int duration = summary == null ? 0 : (int) Math.round(summary.optDouble("duration"));
         ArrayList<RoutePoint> geometry = parseGeometry(feature.optJSONObject("geometry"));
-        ArrayList<RouteStep> steps = parseSteps(properties, geometry, destinationLat, destinationLng);
+        ArrayList<RouteStep> steps = parseSteps(properties, geometry, waypoints, destinationLat, destinationLng);
         return new RouteResult(name(), distance, duration, "OpenRouteService fallback", steps, geometry);
     }
 
@@ -63,20 +75,30 @@ public class OpenRouteServiceRoutingProvider implements RoutingProvider {
         return points;
     }
 
-    private ArrayList<RouteStep> parseSteps(JSONObject properties, ArrayList<RoutePoint> geometry,
+    /** Parses every ORS segment (one per consecutive coordinate pair) in order into a single flat
+     *  step list. A synthetic zero-distance RouteStep (waypointOrdinal = segment index) marks
+     *  arrival at each intermediate stop, matching Neshan's/map.ir's per-leg parsing. */
+    private ArrayList<RouteStep> parseSteps(JSONObject properties, ArrayList<RoutePoint> geometry, List<RoutePoint> waypoints,
                                             double destinationLat, double destinationLng) {
         ArrayList<RouteStep> steps = new ArrayList<>();
         JSONArray segments = properties == null ? null : properties.optJSONArray("segments");
-        JSONObject segment = segments == null ? null : segments.optJSONObject(0);
-        JSONArray rawSteps = segment == null ? null : segment.optJSONArray("steps");
-        if (rawSteps != null) for (int index = 0; index < rawSteps.length(); index++) {
-            JSONObject step = rawSteps.optJSONObject(index);
-            JSONArray wayPoints = step == null ? null : step.optJSONArray("way_points");
-            int geometryIndex = wayPoints == null ? -1 : wayPoints.optInt(0, -1);
-            if (geometryIndex < 0 || geometryIndex >= geometry.size()) continue;
-            RoutePoint point = geometry.get(geometryIndex);
-            steps.add(new RouteStep(point.latitude, point.longitude, step.optString("instruction"),
-                    (int) Math.round(step.optDouble("distance"))));
+        if (segments != null) for (int segmentIndex = 0; segmentIndex < segments.length(); segmentIndex++) {
+            JSONObject segment = segments.optJSONObject(segmentIndex);
+            JSONArray rawSteps = segment == null ? null : segment.optJSONArray("steps");
+            if (rawSteps != null) for (int index = 0; index < rawSteps.length(); index++) {
+                JSONObject step = rawSteps.optJSONObject(index);
+                JSONArray wayPoints = step == null ? null : step.optJSONArray("way_points");
+                int geometryIndex = wayPoints == null ? -1 : wayPoints.optInt(0, -1);
+                if (geometryIndex < 0 || geometryIndex >= geometry.size()) continue;
+                RoutePoint point = geometry.get(geometryIndex);
+                steps.add(new RouteStep(point.latitude, point.longitude, step.optString("instruction"),
+                        (int) Math.round(step.optDouble("distance"))));
+            }
+            boolean isLastSegment = segmentIndex == segments.length() - 1;
+            if (!isLastSegment && waypoints != null && segmentIndex < waypoints.size()) {
+                RoutePoint stop = waypoints.get(segmentIndex);
+                steps.add(new RouteStep(stop.latitude, stop.longitude, "Arrive at stop", 0, null, segmentIndex));
+            }
         }
         steps.add(new RouteStep(destinationLat, destinationLng, "Arrive at destination", 0));
         return steps;

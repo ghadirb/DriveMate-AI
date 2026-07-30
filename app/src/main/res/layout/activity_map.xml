@@ -72,6 +72,18 @@
                 android:textSize="20sp" />
         </LinearLayout>
 
+        <LinearLayout
+            android:id="@+id/laneGuidanceRow"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="start"
+            android:layout_marginBottom="10dp"
+            android:background="@drawable/nav_banner"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="8dp"
+            android:visibility="gone" />
+
         <TextView
             android:id="@+id/roadSpeedLimitText"
             android:layout_width="wrap_content"
@@ -250,7 +262,8 @@
         android:layout_marginBottom="68dp"
         android:background="@drawable/status_panel"
         android:orientation="vertical"
-        android:padding="16dp">
+        android:padding="16dp"
+        android:visibility="gone">
 
         <LinearLayout
             android:id="@+id/mapDestinationInfo"
@@ -313,6 +326,15 @@
                 android:layout_marginStart="8dp"
                 android:layout_weight="1"
                 android:text="ذخیره مکان" />
+
+            <Button
+                android:id="@+id/routeWaypointsButton"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:text="توقف‌ها"
+                android:textSize="12sp" />
         </LinearLayout>
 
         <Button

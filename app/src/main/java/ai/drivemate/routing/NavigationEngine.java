@@ -12,6 +12,11 @@ public class NavigationEngine {
         void onInstruction(RouteStep step);
         void onOffRoute();
         void onArrived();
+        /** Fired once, when the driver reaches an intermediate stop (see RouteStep.waypointOrdinal)
+         *  rather than the final destination. Navigation continues on the same route afterward;
+         *  this never stops the engine. Default no-op so existing Listener implementations compile
+         *  and behave exactly as before unless they choose to override it. */
+        default void onWaypointReached(RouteStep step, int waypointOrdinal) { }
     }
 
     private RouteResult route;
@@ -85,10 +90,12 @@ public class NavigationEngine {
 
         float reachedDistance = Math.max(28f, Math.min(65f, target.distanceMeters * 0.15f));
         if (accuracyOk && meters <= reachedDistance) {
+            RouteStep justReached = target;
             nextStep = Math.min(nextStep + 1, route.steps.size() - 1);
             rerouteRequested = false;
             currentInstructionAnnounced = false;
             updateTargetReference(location);
+            if (justReached.waypointOrdinal >= 0) listener.onWaypointReached(justReached, justReached.waypointOrdinal);
             RouteStep next = route.steps.get(Math.min(nextStep, route.steps.size() - 1));
             float nextDistance = location.distanceTo(asLocation(next));
             float nextAnnounceDistance = Math.max(90f, Math.min(260f, Math.max(120f, next.distanceMeters * 0.65f)));
@@ -105,6 +112,7 @@ public class NavigationEngine {
     public boolean hasActionableCurrentInstruction() {
         if (route == null || route.steps.isEmpty()) return false;
         RouteStep step = route.steps.get(Math.min(nextStep, route.steps.size() - 1));
+        if (step.waypointOrdinal >= 0) return false;
         String instruction = step.instruction == null ? "" : step.instruction;
         String lower = instruction.toLowerCase(java.util.Locale.ROOT);
         return !(lower.contains("arriv")

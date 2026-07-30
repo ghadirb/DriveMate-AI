@@ -31,6 +31,7 @@ def mapIrApiKey = props.getProperty("MAPIR_API_KEY", System.getenv("MAPIR_API_KE
 def tomtomApiKey = props.getProperty("TOMTOM_API_KEY", System.getenv("TOMTOM_API_KEY") ?: "")
 def openRouteServiceApiKey = props.getProperty("OPENROUTESERVICE_API_KEY", System.getenv("OPENROUTESERVICE_API_KEY") ?: "")
 def aiApiKey = props.getProperty("AI_API_KEY", System.getenv("AI_API_KEY") ?: "")
+def openWeatherMapApiKey = props.getProperty("OPENWEATHERMAP_API_KEY", System.getenv("OPENWEATHERMAP_API_KEY") ?: "")
 // The existing encrypted payload was created with this password. Override it with a GitHub secret when re-encrypting keys.
 def keysDecryptSecret = props.getProperty("KEYS_DECRYPTION_SECRET", System.getenv("KEYS_DECRYPTION_SECRET") ?: "12345")
 def releaseStorePath = System.getenv("RELEASE_STORE_FILE") ?: ""
@@ -61,6 +62,7 @@ android {
         buildConfigField "String", "TOMTOM_API_KEY", "\"${tomtomApiKey}\""
         buildConfigField "String", "OPENROUTESERVICE_API_KEY", "\"${openRouteServiceApiKey}\""
         buildConfigField "String", "AI_API_KEY", "\"${aiApiKey}\""
+        buildConfigField "String", "OPENWEATHERMAP_API_KEY", "\"${openWeatherMapApiKey}\""
         buildConfigField "String", "KEYS_DECRYPTION_SECRET", "\"${keysDecryptSecret}\""
     }
 

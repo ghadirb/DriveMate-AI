@@ -3,6 +3,7 @@ package ai.drivemate;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.Manifest;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
@@ -66,17 +67,21 @@ import java.util.Set;
 
 import ai.drivemate.model.RouteResult;
 import ai.drivemate.model.RoutePoint;
+import ai.drivemate.model.LaneGuidance;
 import ai.drivemate.model.RouteStep;
+import ai.drivemate.model.TrafficIncident;
 import ai.drivemate.model.SavedPlace;
 import ai.drivemate.model.SpeedLimitPoint;
 import ai.drivemate.routing.MapIrRoutingProvider;
 import ai.drivemate.routing.NavigationEngine;
+import ai.drivemate.traffic.TrafficIncidentProvider;
 import ai.drivemate.routing.NeshanRoutingProvider;
 import ai.drivemate.routing.OpenRouteServiceRoutingProvider;
 import ai.drivemate.routing.OverpassPoiProvider;
 import ai.drivemate.routing.PlaceSearchRepository;
 import ai.drivemate.routing.PoiCategory;
 import ai.drivemate.routing.RouteRepository;
+import ai.drivemate.settings.NightModeManager;
 import ai.drivemate.storage.PlaceStore;
 
 /** Map UI is isolated from the driving activity; it returns a selected destination to the existing engine. */
@@ -95,12 +100,16 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     public static final String RESULT_OPEN_NAVIGATION_MAP = "open_navigation_map";
     public static final String RESULT_ROUTE_INDEX = "route_index";
     public static final String RESULT_STOP_NAVIGATION = "stop_navigation";
+    /** ArrayList<String> of "lat,lng,name" for every intermediate stop added on this screen, in
+     *  visit order, so MainActivity can request the same multi-stop route for real navigation. */
+    public static final String RESULT_WAYPOINTS = "destination_waypoints";
     public static final String RESULT_MAIN_TAB = "main_tab";
     public static final String EXTRA_NAVIGATION_MODE = "navigation_mode";
     public static final String EXTRA_DESTINATION_LATITUDE = "navigation_destination_latitude";
     public static final String EXTRA_DESTINATION_LONGITUDE = "navigation_destination_longitude";
     public static final String EXTRA_DESTINATION_NAME = "navigation_destination_name";
     public static final String EXTRA_DESTINATION_ADDRESS = "navigation_destination_address";
+    public static final String EXTRA_NAVIGATION_WAYPOINTS = "navigation_waypoints";
     public static final String EXTRA_NAVIGATION_ROUTE_INDEX = "navigation_route_index";
 
     private static final double DEFAULT_LATITUDE = 35.7219;
@@ -113,6 +122,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private List<RouteResult> routeOptions = new ArrayList<>();
     private RouteResult selectedRoute;
     private View destinationInfoContainer;
+    private View mapRoutePanel;
     private TextView destinationText;
     private TextView routeText;
     private EditText searchText;
@@ -124,6 +134,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private LinearLayout routeOptionsRow;
     private final List<Polyline> alternateRoutePolylines = new ArrayList<>();
     private SavedPlace destination;
+    /** Intermediate stops the driver added on this screen, in visit order, between origin and
+     *  the selected destination. Empty for a plain single-destination trip (the default). */
+    private final List<SavedPlace> routeWaypoints = new ArrayList<>();
+    private final List<Marker> waypointMarkers = new ArrayList<>();
     private double originLatitude;
     private double originLongitude;
     private PlaceSearchRepository placeSearchRepository;
@@ -176,13 +190,31 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private final OverpassPoiProvider layerExpansionProvider = new OverpassPoiProvider();
     private final List<SpeedLimitPoint> routeSpeedLimits = new ArrayList<>();
     private int speedLimitRequestId;
+    private final List<Marker> speedLimitMarkers = new ArrayList<>();
+    /** Live TomTom point incidents (accident/closure/roadworks/hazard) for the active route -
+     *  a separate, refreshable layer from the mostly-static OSM speed-limit markers above. */
+    private final List<Marker> trafficIncidentMarkers = new ArrayList<>();
+    private List<TrafficIncident> routeTrafficIncidents = new ArrayList<>();
+    private TrafficIncidentProvider trafficIncidentProvider;
+    private int trafficIncidentRequestId;
+    private final Handler trafficIncidentHandler = new Handler(Looper.getMainLooper());
+    private final Runnable trafficIncidentRefresh = () -> { if (selectedRoute != null) loadRouteTrafficIncidents(selectedRoute); };
+    private static final long TRAFFIC_INCIDENT_REFRESH_MS = 90_000L;
+    /** Row of per-lane tiles shown right under the turn banner; see renderLaneGuidance. */
+    private LinearLayout laneGuidanceRow;
     /** Backing list for the "نمایش روی نقشه" button on the search-results panel; holds
      *  whatever the last plain-text search returned so the button can plot it on demand. */
     private final List<SavedPlace> lastSearchResultsForMap = new ArrayList<>();
 
+    @Override
+    protected void attachBaseContext(Context newBase) {
+        super.attachBaseContext(NightModeManager.wrap(newBase));
+    }
+
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_map);
+        NightModeManager.applyWindowBrightness(this);
         placeStore = new PlaceStore(this);
         locationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
         originLatitude = getIntent().getDoubleExtra(EXTRA_ORIGIN_LATITUDE, Double.NaN);
@@ -199,6 +231,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         }
         navigationMode = getIntent().getBooleanExtra(EXTRA_NAVIGATION_MODE, false);
         navigationRouteIndex = Math.max(0, getIntent().getIntExtra(EXTRA_NAVIGATION_ROUTE_INDEX, 0));
+        restoreNavigationWaypoints();
         String neshanKey = getIntent().getStringExtra(EXTRA_NESHAN_KEY);
         String mapIrKey = getIntent().getStringExtra(EXTRA_MAPIR_KEY);
         String tomtomKey = getIntent().getStringExtra(EXTRA_TOMTOM_KEY);
@@ -206,10 +239,12 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         NeshanRoutingProvider neshan = new NeshanRoutingProvider(neshanKey);
         MapIrRoutingProvider mapIr = new MapIrRoutingProvider(mapIrKey);
         placeSearchRepository = new PlaceSearchRepository(neshan, mapIr, tomtomKey);
+        trafficIncidentProvider = new TrafficIncidentProvider(tomtomKey);
         routeRepository = new RouteRepository(neshan, mapIr,
                 new OpenRouteServiceRoutingProvider(openRouteServiceKey));
 
         destinationInfoContainer = findViewById(R.id.mapDestinationInfo);
+        mapRoutePanel = findViewById(R.id.mapRoutePanel);
         destinationText = findViewById(R.id.mapDestinationText);
         routeText = findViewById(R.id.mapRouteText);
         searchText = findViewById(R.id.mapSearchText);
@@ -224,14 +259,17 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         turnDistanceText = findViewById(R.id.turnDistanceText);
         turnInstructionText = findViewById(R.id.turnInstructionText);
         turnExpandIcon = findViewById(R.id.turnExpandIcon);
+        laneGuidanceRow = findViewById(R.id.laneGuidanceRow);
         roadSpeedLimitText = findViewById(R.id.roadSpeedLimitText);
         turnStepsScroll = findViewById(R.id.turnStepsScroll);
         turnStepsContent = findViewById(R.id.turnStepsContent);
         turnBannerContainer.setOnClickListener(v -> toggleTurnSteps());
+        destinationText.setOnClickListener(v -> showWaypointManager());
         wireControls();
         restorePoiLayerPreferences();
         initializeMap();
         if (map != null && !enabledPoiLayers.isEmpty()) refreshPoiLayers();
+        if (map != null && isSpeedLimitLayerEnabled() && !navigationMode) loadNearbySpeedLimits();
         if (navigationMode) {
             navigationCameraEnabled = true;
             findViewById(R.id.startMapNavigationButton).setEnabled(true);
@@ -245,6 +283,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             findViewById(R.id.drivingOverviewButton).setVisibility(View.VISIBLE);
             findViewById(R.id.navigationCameraButton).setVisibility(View.VISIBLE);
             findViewById(R.id.routeOptionsButton).setVisibility(View.GONE);
+            findViewById(R.id.routeWaypointsButton).setVisibility(View.GONE);
             findViewById(R.id.saveMapPlaceButton).setVisibility(View.GONE);
             findViewById(R.id.routeOptionsScroll).setVisibility(View.GONE);
             findViewById(R.id.mapSearchBarRow).setVisibility(View.GONE);
@@ -267,6 +306,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         findViewById(R.id.mapLayersButton).setOnClickListener(v -> showMapLayersDialog());
         findViewById(R.id.saveMapPlaceButton).setOnClickListener(v -> saveSelectedPlace());
         findViewById(R.id.routeOptionsButton).setOnClickListener(v -> centerOnSelectedRoute());
+        findViewById(R.id.routeWaypointsButton).setOnClickListener(v -> showWaypointManager());
         findViewById(R.id.drivingOverviewButton).setOnClickListener(v -> showRouteOverview());
         View navigationCameraButton = findViewById(R.id.navigationCameraButton);
         navigationCameraButton.setTooltipText("نمای رانندگی و دنبال کردن خودرو");
@@ -335,9 +375,15 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                 runOnUiThread(() -> {
                     if (isFinishing() || isDestroyed()) return;
                     try {
-                        selectDestinationWithOptions(new SavedPlace(
+                        SavedPlace tapped = new SavedPlace(
                                 "نقطه انتخاب‌شده روی نقشه", "map_pin", latitude, longitude,
-                                String.format(Locale.US, "%.6f, %.6f", latitude, longitude), System.currentTimeMillis(), false));
+                                String.format(Locale.US, "%.6f, %.6f", latitude, longitude), System.currentTimeMillis(), false);
+                        // A destination already picked: ask whether this new point is a stop along
+                        // the way or a replacement destination, instead of always replacing it -
+                        // this is the only behavior change versus before, and only once a
+                        // destination exists (first pick on a fresh screen is unchanged).
+                        if (destination == null || navigationMode) selectDestinationWithOptions(tapped);
+                        else offerMapPointChoice(tapped);
                     } catch (RuntimeException error) {
                         Log.e("DriveMateMap", "Could not select map point", error);
                         routeText.setText("انتخاب نقطه روی نقشه انجام نشد. دوباره تلاش کنید.");
@@ -459,9 +505,12 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                                 .putBoolean("speed_limit_osm", enabled).apply();
                         if (!enabled) {
                             routeSpeedLimits.clear();
+                            clearSpeedLimitMarkers();
                             roadSpeedLimitText.setVisibility(View.GONE);
                         } else if (selectedRoute != null) {
                             loadRouteSpeedLimits(selectedRoute);
+                        } else {
+                            loadNearbySpeedLimits();
                         }
                         Toast.makeText(this, enabled
                                 ? "نمایش و هشدار محدودیت‌های ثبت‌شدهٔ OSM فعال شد."
@@ -1086,14 +1135,157 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     private void selectDestinationWithOptions(SavedPlace place) {
         destination = place;
+        if (mapRoutePanel != null) mapRoutePanel.setVisibility(View.VISIBLE);
         if (destinationInfoContainer != null) destinationInfoContainer.setVisibility(View.VISIBLE);
-        destinationText.setText(place.name);
+        findViewById(R.id.routeOptionsButton).setVisibility(navigationMode ? View.GONE : View.VISIBLE);
+        findViewById(R.id.saveMapPlaceButton).setVisibility(navigationMode ? View.GONE : View.VISIBLE);
+        findViewById(R.id.routeWaypointsButton).setVisibility(!navigationMode && !routeWaypoints.isEmpty() ? View.VISIBLE : View.GONE);
+        destinationText.setText(waypointLabelSuffix(place.name));
         routeText.setText("در حال آماده‌سازی مسیرهای پیشنهادی...");
         if (routeOptionsScroll != null) routeOptionsScroll.setVisibility(View.GONE);
         showDestinationMarker(place);
-        routeRepository.getRoutes(originLatitude, originLongitude, place.latitude, place.longitude,
+        if (routeWaypoints.isEmpty()) {
+            routeRepository.getRoutes(originLatitude, originLongitude, place.latitude, place.longitude,
+                    routes -> runOnUiThread(() -> showRouteOptions(routes)),
+                    error -> runOnUiThread(() -> routeText.setText("دریافت مسیر انجام نشد: " + error)));
+        } else {
+            requestRouteWithWaypoints();
+        }
+    }
+
+    private String waypointLabelSuffix(String name) {
+        return routeWaypoints.isEmpty() ? name : name + " (" + routeWaypoints.size() + " توقف میانی)";
+    }
+
+    /** Long-press on the map with a destination already selected: ask whether the tapped point is
+     *  an intermediate stop along the current trip or a full replacement destination, instead of
+     *  always replacing the destination as before. */
+    private void offerMapPointChoice(SavedPlace tapped) {
+        new AlertDialog.Builder(this)
+                .setTitle("این نقطه چه نقشی داشته باشد؟")
+                .setItems(new String[]{"افزودن به‌عنوان توقف میانی", "تغییر مقصد به این نقطه"}, (dialog, which) -> {
+                    if (which == 0) addWaypoint(tapped); else selectDestinationWithOptions(tapped);
+                })
+                .setNegativeButton("انصراف", null)
+                .show();
+    }
+
+    private void addWaypoint(SavedPlace place) {
+        routeWaypoints.add(place);
+        drawWaypointMarkers();
+        findViewById(R.id.routeWaypointsButton).setVisibility(navigationMode ? View.GONE : View.VISIBLE);
+        Toast.makeText(this, "توقف اضافه شد: " + place.name, Toast.LENGTH_SHORT).show();
+        if (destination != null) {
+            destinationText.setText(waypointLabelSuffix(destination.name));
+            requestRouteWithWaypoints();
+        }
+    }
+
+    /** Same destination, now routed through every stop in routeWaypoints (visit order). */
+    private void requestRouteWithWaypoints() {
+        if (destination == null) return;
+        routeText.setText("در حال آماده‌سازی مسیر با توقف‌های میانی...");
+        if (routeOptionsScroll != null) routeOptionsScroll.setVisibility(View.GONE);
+        routeRepository.getRoutes(originLatitude, originLongitude, waypointCoordinates(), destination.latitude, destination.longitude,
+                routes -> runOnUiThread(() -> showRouteOptions(routes)),
+                error -> runOnUiThread(() -> routeText.setText("دریافت مسیر با توقف میانی انجام نشد: " + error)));
+    }
+
+    private void requestRouteWithoutWaypoints() {
+        if (destination == null) return;
+        routeRepository.getRoutes(originLatitude, originLongitude, destination.latitude, destination.longitude,
                 routes -> runOnUiThread(() -> showRouteOptions(routes)),
                 error -> runOnUiThread(() -> routeText.setText("دریافت مسیر انجام نشد: " + error)));
+    }
+
+    private List<RoutePoint> waypointCoordinates() {
+        List<RoutePoint> points = new ArrayList<>();
+        for (SavedPlace place : routeWaypoints) points.add(new RoutePoint(place.latitude, place.longitude));
+        return points;
+    }
+
+    private void restoreNavigationWaypoints() {
+        ArrayList<String> encoded = getIntent().getStringArrayListExtra(EXTRA_NAVIGATION_WAYPOINTS);
+        if (encoded == null) return;
+        for (String value : encoded) {
+            SavedPlace point = decodeWaypoint(value);
+            if (point != null) routeWaypoints.add(point);
+        }
+    }
+
+    private ArrayList<String> encodeWaypoints() {
+        ArrayList<String> encoded = new ArrayList<>();
+        for (SavedPlace point : routeWaypoints) {
+            encoded.add(point.latitude + "," + point.longitude + "," + point.name.replace(",", " "));
+        }
+        return encoded;
+    }
+
+    private SavedPlace decodeWaypoint(String value) {
+        if (value == null) return null;
+        String[] parts = value.split(",", 3);
+        if (parts.length < 2) return null;
+        try {
+            double latitude = Double.parseDouble(parts[0]);
+            double longitude = Double.parseDouble(parts[1]);
+            if (Double.isNaN(latitude) || Double.isNaN(longitude)) return null;
+            String name = parts.length == 3 && !parts[2].trim().isEmpty() ? parts[2].trim() : "توقف میانی";
+            return new SavedPlace(name, "waypoint", latitude, longitude, "", System.currentTimeMillis(), false);
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    private void drawWaypointMarkers() {
+        if (map == null) return;
+        for (Marker marker : waypointMarkers) map.removeMarker(marker);
+        waypointMarkers.clear();
+        for (int i = 0; i < routeWaypoints.size(); i++) {
+            SavedPlace stop = routeWaypoints.get(i);
+            Marker marker = new Marker(new LatLng(stop.latitude, stop.longitude), numberedMarkerStyle(i + 1));
+            map.addMarker(marker);
+            waypointMarkers.add(marker);
+        }
+    }
+
+    /** Entry point for managing stops: long-press the destination name at the top of the screen. */
+    private void showWaypointManager() {
+        if (destination == null) {
+            Toast.makeText(this, "ابتدا یک مقصد انتخاب کنید.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (routeWaypoints.isEmpty()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("توقف‌های میانی")
+                    .setMessage("هنوز توقفی اضافه نشده است. برای افزودن، روی نقطه دلخواه روی نقشه کمی فشار دهید و «افزودن به‌عنوان توقف میانی» را انتخاب کنید.")
+                    .setPositiveButton("متوجه شدم", null)
+                    .show();
+            return;
+        }
+        String[] names = new String[routeWaypoints.size()];
+        for (int i = 0; i < routeWaypoints.size(); i++) names[i] = (i + 1) + ". " + routeWaypoints.get(i).name;
+        new AlertDialog.Builder(this)
+                .setTitle("توقف‌های میانی (برای حذف انتخاب کنید)")
+                .setItems(names, (dialog, which) -> confirmRemoveWaypoint(which))
+                .setNegativeButton("بستن", null)
+                .show();
+    }
+
+    private void confirmRemoveWaypoint(int index) {
+        if (index < 0 || index >= routeWaypoints.size()) return;
+        SavedPlace stop = routeWaypoints.get(index);
+        new AlertDialog.Builder(this)
+                .setTitle(stop.name)
+                .setMessage("این توقف حذف شود؟")
+                .setPositiveButton("حذف", (dialog, which) -> {
+                    routeWaypoints.remove(index);
+                    drawWaypointMarkers();
+                    findViewById(R.id.routeWaypointsButton).setVisibility(!navigationMode && !routeWaypoints.isEmpty() ? View.VISIBLE : View.GONE);
+                    if (destination != null) destinationText.setText(waypointLabelSuffix(destination.name));
+                    if (routeWaypoints.isEmpty()) requestRouteWithoutWaypoints(); else requestRouteWithWaypoints();
+                })
+                .setNegativeButton("انصراف", null)
+                .show();
     }
 
     private void showDestinationMarker(SavedPlace place) {
@@ -1107,7 +1299,11 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     private void selectDestination(SavedPlace place) {
         destination = place;
+        if (mapRoutePanel != null) mapRoutePanel.setVisibility(View.VISIBLE);
         if (destinationInfoContainer != null) destinationInfoContainer.setVisibility(View.VISIBLE);
+        findViewById(R.id.routeOptionsButton).setVisibility(navigationMode ? View.GONE : View.VISIBLE);
+        findViewById(R.id.saveMapPlaceButton).setVisibility(navigationMode ? View.GONE : View.VISIBLE);
+        findViewById(R.id.routeWaypointsButton).setVisibility(!navigationMode && !routeWaypoints.isEmpty() ? View.VISIBLE : View.GONE);
         destinationText.setText(place.name);
         routeText.setText("در حال آماده‌سازی پیش‌نمایش مسیر...");
         if (map != null) {
@@ -1198,6 +1394,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         routeText.setText("مسیر پیشنهادی " + route.providerName + " | " + minutes + " دقیقه | "
                 + String.format(Locale.US, "%.1f", route.distanceMeters / 1000.0) + " کیلومتر");
         loadRouteSpeedLimits(route);
+        loadRouteTrafficIncidents(route);
         drawAllRoutes();
         if (map != null && !navigationMode) {
             map.moveCamera(new LatLng(originLatitude, originLongitude), 0.25f);
@@ -1255,7 +1452,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         if (!navigationEngine.announceCurrentInstruction()) {
             turnInstructionText.setText("به سمت مقصد حرکت کنید");
             turnArrowText.setText("↑");
+            renderLaneGuidance(null);
         }
+        scheduleTrafficIncidentRefresh();
         enableNavigationCamera();
     }
 
@@ -1297,6 +1496,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
      * official enforcement feed. */
     private void loadRouteSpeedLimits(RouteResult route) {
         routeSpeedLimits.clear();
+        clearSpeedLimitMarkers();
         roadSpeedLimitText.setVisibility(View.GONE);
         if (!isSpeedLimitLayerEnabled() || route == null || route.geometry.size() < 2) return;
         final int requestId = ++speedLimitRequestId;
@@ -1310,6 +1510,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                     if (routeSpeedLimits.isEmpty() && route.providerSpeedLimits != null) {
                         routeSpeedLimits.addAll(route.providerSpeedLimits);
                     }
+                    renderSpeedLimitMarkers();
                     updateRoadSpeedLimit(originLatitude, originLongitude);
                 });
             } catch (Exception error) {
@@ -1319,10 +1520,206 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                     routeSpeedLimits.clear();
                     if (route.providerSpeedLimits != null) routeSpeedLimits.addAll(route.providerSpeedLimits);
                     // Stage three: a visible unknown state, without enabling any speed alert.
+                    renderSpeedLimitMarkers();
                     updateRoadSpeedLimit(originLatitude, originLongitude);
                 });
             }
         }).start();
+    }
+
+    /** Lets the map-layers toggle show something immediately even before any destination/route is
+     *  picked - mirrors the POI-layer behaviour (search near current position) instead of staying
+     *  invisible until a route exists, which was the actual bug behind "nothing appears on the
+     *  map": the layer previously only ever populated from an active route. */
+    private void loadNearbySpeedLimits() {
+        if (!isSpeedLimitLayerEnabled() || Double.isNaN(originLatitude) || Double.isNaN(originLongitude)) return;
+        final int requestId = ++speedLimitRequestId;
+        final double latitude = originLatitude;
+        final double longitude = originLongitude;
+        List<RoutePoint> box = new ArrayList<>();
+        box.add(new RoutePoint(latitude - 0.02d, longitude - 0.02d));
+        box.add(new RoutePoint(latitude + 0.02d, longitude + 0.02d));
+        new Thread(() -> {
+            try {
+                List<SpeedLimitPoint> found = layerExpansionProvider.speedLimitsNear(box);
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed() || requestId != speedLimitRequestId) return;
+                    routeSpeedLimits.clear();
+                    if (found != null) routeSpeedLimits.addAll(found);
+                    renderSpeedLimitMarkers();
+                    updateRoadSpeedLimit(latitude, longitude);
+                });
+            } catch (Exception error) {
+                Log.w("DriveMateSpeed", "Nearby speed-limit lookup failed: " + error.getMessage());
+            }
+        }).start();
+    }
+
+    private void clearSpeedLimitMarkers() {
+        if (map != null) for (Marker marker : speedLimitMarkers) map.removeMarker(marker);
+        speedLimitMarkers.clear();
+    }
+
+    /** Draws every mapped OSM maxspeed point as an actual marker (not just the single nearest-value
+     *  text badge this layer used to be limited to) - a European-style speed-limit disc so it reads
+     *  instantly as "speed limit" rather than a generic pin. This is what was genuinely missing:
+     *  toggling the layer previously updated data but never rendered anything onto the map canvas. */
+    private void renderSpeedLimitMarkers() {
+        clearSpeedLimitMarkers();
+        if (map == null || !isSpeedLimitLayerEnabled() || routeSpeedLimits.isEmpty()) return;
+        for (SpeedLimitPoint point : routeSpeedLimits) {
+            Marker marker = new Marker(new LatLng(point.latitude, point.longitude), speedLimitMarkerStyle(point.kilometersPerHour));
+            map.addMarker(marker);
+            speedLimitMarkers.add(marker);
+        }
+    }
+
+    /** European-style speed-limit sign (red ring, white face, black number) so it reads instantly
+     *  as a speed limit rather than a generic colored pin. */
+    private MarkerStyle speedLimitMarkerStyle(int kilometersPerHour) {
+        Bitmap bitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
+        ring.setColor(0xffe53935);
+        canvas.drawCircle(32f, 32f, 30f, ring);
+        Paint face = new Paint(Paint.ANTI_ALIAS_FLAG);
+        face.setColor(0xffffffff);
+        canvas.drawCircle(32f, 32f, 24f, face);
+        Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
+        text.setColor(0xff000000);
+        text.setTextAlign(Paint.Align.CENTER);
+        text.setTypeface(Typeface.DEFAULT_BOLD);
+        text.setTextSize(kilometersPerHour >= 100 ? 20f : 24f);
+        Paint.FontMetrics metrics = text.getFontMetrics();
+        float y = 32f - (metrics.ascent + metrics.descent) / 2f;
+        canvas.drawText(String.valueOf(kilometersPerHour), 32f, y, text);
+        MarkerStyleBuilder builder = new MarkerStyleBuilder();
+        builder.setSize(30f);
+        builder.setBitmap(BitmapUtils.createBitmapFromAndroidBitmap(bitmap));
+        return builder.buildStyle();
+    }
+
+    /** Live, point-based traffic-incident markers (accident/closure/roadworks/hazard) for the
+     *  active route from TomTom's incident feed - the map-screen counterpart to MainActivity's
+     *  spoken announceTrafficIncident. Route-scoped fetch, refreshed periodically only while
+     *  turn-by-turn is running (see scheduleTrafficIncidentRefresh), exactly like
+     *  loadRouteSpeedLimits above. Silently produces nothing when no TomTom key is configured. */
+    private void loadRouteTrafficIncidents(RouteResult route) {
+        if (trafficIncidentProvider == null || !trafficIncidentProvider.hasKey() || route == null
+                || route.geometry.size() < 2) {
+            clearTrafficIncidentMarkers();
+            return;
+        }
+        final int requestId = ++trafficIncidentRequestId;
+        final List<RoutePoint> geometry = route.geometry;
+        new Thread(() -> {
+            try {
+                List<TrafficIncident> found = trafficIncidentProvider.incidentsNear(geometry);
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed() || requestId != trafficIncidentRequestId) return;
+                    routeTrafficIncidents = found == null ? new ArrayList<>() : found;
+                    renderTrafficIncidentMarkers();
+                });
+            } catch (Exception error) {
+                Log.w("DriveMateTraffic", "Map traffic-incident lookup failed: " + error.getMessage());
+            }
+        }).start();
+    }
+
+    /** Reschedules itself only while turn-by-turn is active, and stops on its own once navigation
+     *  ends (arrival, off-route dead-end, or leaving the screen) - same cadence approach as
+     *  MainActivity's scheduleTrafficIncidentCheck. */
+    private void scheduleTrafficIncidentRefresh() {
+        trafficIncidentHandler.removeCallbacks(trafficIncidentRefresh);
+        if (navigationEngine.isNavigating() && trafficIncidentProvider != null && trafficIncidentProvider.hasKey()) {
+            trafficIncidentHandler.postDelayed(trafficIncidentRefresh, TRAFFIC_INCIDENT_REFRESH_MS);
+        }
+    }
+
+    private void clearTrafficIncidentMarkers() {
+        if (map != null) for (Marker marker : trafficIncidentMarkers) map.removeMarker(marker);
+        trafficIncidentMarkers.clear();
+    }
+
+    /** Draws each live incident as a colored warning-triangle marker, visually distinct from the
+     *  round red speed-limit signs so the two layers are never confused at a glance. */
+    private void renderTrafficIncidentMarkers() {
+        clearTrafficIncidentMarkers();
+        if (map == null) return;
+        for (TrafficIncident incident : routeTrafficIncidents) {
+            Marker marker = new Marker(new LatLng(incident.latitude, incident.longitude), trafficIncidentMarkerStyle(incident.type));
+            map.addMarker(marker);
+            trafficIncidentMarkers.add(marker);
+        }
+        scheduleTrafficIncidentRefresh();
+    }
+
+    private MarkerStyle trafficIncidentMarkerStyle(TrafficIncident.Type type) {
+        Bitmap bitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        int color;
+        switch (type) {
+            case ACCIDENT: color = 0xffd32f2f; break;
+            case ROAD_CLOSED: color = 0xff424242; break;
+            case ROADWORK: color = 0xfffb8c00; break;
+            default: color = 0xfff9a825; break;
+        }
+        Paint triangleFill = new Paint(Paint.ANTI_ALIAS_FLAG);
+        triangleFill.setColor(color);
+        Path triangle = new Path();
+        triangle.moveTo(32f, 4f);
+        triangle.lineTo(60f, 58f);
+        triangle.lineTo(4f, 58f);
+        triangle.close();
+        canvas.drawPath(triangle, triangleFill);
+        Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
+        text.setColor(0xffffffff);
+        text.setTextAlign(Paint.Align.CENTER);
+        text.setTypeface(Typeface.DEFAULT_BOLD);
+        text.setTextSize(26f);
+        canvas.drawText("!", 32f, 50f, text);
+        MarkerStyleBuilder builder = new MarkerStyleBuilder();
+        builder.setSize(30f);
+        builder.setBitmap(BitmapUtils.createBitmapFromAndroidBitmap(bitmap));
+        return builder.buildStyle();
+    }
+
+    /** Renders explicit provider per-lane guidance (see LaneGuidance) as a row of small tiles
+     *  directly under the turn banner: bright tiles are the lanes the provider marked valid for
+     *  the current maneuver, dim tiles are not. Hidden whenever there is nothing genuinely
+     *  actionable to show (single lane, or every lane equally valid/invalid) - never a guess. */
+    private void renderLaneGuidance(LaneGuidance lanes) {
+        if (laneGuidanceRow == null) return;
+        laneGuidanceRow.removeAllViews();
+        if (lanes == null || !lanes.hasUsefulGuidance()) {
+            laneGuidanceRow.setVisibility(View.GONE);
+            return;
+        }
+        int size = dp(40);
+        for (int i = 0; i < lanes.indications.size(); i++) {
+            boolean valid = i < lanes.validForManeuver.size() && Boolean.TRUE.equals(lanes.validForManeuver.get(i));
+            TextView tile = new TextView(this);
+            tile.setText(laneGlyph(lanes.indications.get(i)));
+            tile.setTextSize(20f);
+            tile.setTextColor(valid ? getColor(R.color.drivemate_blue) : 0xffcfd8dc);
+            tile.setTypeface(Typeface.DEFAULT_BOLD);
+            tile.setGravity(android.view.Gravity.CENTER);
+            tile.setBackgroundResource(valid ? R.drawable.lane_tile_active : R.drawable.lane_tile_inactive);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(size, size);
+            params.setMargins(dp(4), 0, dp(4), 0);
+            tile.setLayoutParams(params);
+            laneGuidanceRow.addView(tile);
+        }
+        laneGuidanceRow.setVisibility(View.VISIBLE);
+    }
+
+    private String laneGlyph(String indication) {
+        if (indication == null) return "↑";
+        String value = indication.toLowerCase(Locale.ROOT);
+        if (value.contains("uturn")) return "↺";
+        if (value.contains("left")) return "↖";
+        if (value.contains("right")) return "↗";
+        return "↑";
     }
 
     private void updateRoadSpeedLimit(double latitude, double longitude) {
@@ -1397,6 +1794,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                     ? "ادامه در مسیر" : step.instruction;
             turnInstructionText.setText(instruction);
             turnArrowText.setText(arrowForInstruction(instruction));
+            renderLaneGuidance(step.lanes);
             if (turnStepsExpanded) renderTurnSteps();
         });
     }
@@ -1405,6 +1803,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         runOnUiThread(() -> {
             turnInstructionText.setText("در حال محاسبه مجدد مسیر...");
             turnArrowText.setText("↻");
+            renderLaneGuidance(null);
         });
         recalculateActiveRoute();
     }
@@ -1415,7 +1814,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             turnDistanceText.setText("");
             turnArrowText.setText("●");
             routeText.setText("سفر به پایان رسید.");
+            renderLaneGuidance(null);
         });
+        trafficIncidentHandler.removeCallbacks(trafficIncidentRefresh);
     }
 
     /** Best-effort synchronous device location: the last cached GPS fix, or the last cached
@@ -1677,6 +2078,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         result.putExtra(RESULT_ADDRESS, destination.address);
         result.putExtra(RESULT_OPEN_NAVIGATION_MAP, true);
         result.putExtra(RESULT_ROUTE_INDEX, Math.max(0, routeOptions.indexOf(selectedRoute)));
+        result.putStringArrayListExtra(RESULT_WAYPOINTS, encodeWaypoints());
         setResult(RESULT_OK, result);
         finish();
     }
@@ -1738,6 +2140,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     @Override protected void onResume() {
         super.onResume();
+        if (NightModeManager.refreshIfChanged(this)) return;
+        NightModeManager.applyWindowBrightness(this);
         // Some native map SDK builds tear down and rebuild their rendering surface across an
         // onPause/onResume cycle (e.g. leaving to another app and coming back) without telling the
         // app, silently dropping every previously-added marker even though this activity instance
@@ -1745,6 +2149,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         // here is cheap (no network call, just the same places already fetched) and fixes POI layers
         // appearing to vanish after leaving and reopening the map.
         redrawCachedPoiLayers();
+        if (!routeSpeedLimits.isEmpty()) renderSpeedLimitMarkers();
         if (locationManager == null || checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) return;
         if (isLocationEnabled()) {
             long minTimeMs = navigationMode ? 1000L : 2500L;
@@ -1769,6 +2174,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     @Override protected void onDestroy() {
         poiExpansionHandler.removeCallbacksAndMessages(null);
+        trafficIncidentHandler.removeCallbacksAndMessages(null);
         super.onDestroy();
     }
 

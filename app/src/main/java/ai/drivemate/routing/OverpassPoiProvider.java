@@ -8,6 +8,7 @@ import java.util.Collections;
 import java.util.List;
 
 import ai.drivemate.model.RoutePoint;
+import ai.drivemate.model.RouteSafetyAlert;
 import ai.drivemate.model.SavedPlace;
 import ai.drivemate.model.SpeedLimitPoint;
 
@@ -136,6 +137,156 @@ public final class OverpassPoiProvider {
             if (closestDistance <= 90d) limits.add(new SpeedLimitPoint(closestLat, closestLon, limit, "OSM"));
         }
         return limits;
+    }
+
+    /**
+     * Best-effort railway level crossings, school zones (the caller decides whether "now" is an
+     * active school hour - this method only returns proximity), and any node explicitly tagged
+     * with a generic OSM {@code hazard} key. That last one is the closest OpenStreetMap
+     * equivalent to an official accident black-spot register; Iran has no free public API for a
+     * real accident-density dataset, so this list is frequently empty on ordinary roads. It is a
+     * best-effort community tag lookup, never a substitute for official accident statistics, and
+     * the app must not imply otherwise in its warning text.
+     */
+    public List<RouteSafetyAlert> pointSafetyFeaturesNear(List<RoutePoint> geometry) throws Exception {
+        if (geometry == null || geometry.size() < 2) return Collections.emptyList();
+        double minLat = 90d, maxLat = -90d, minLon = 180d, maxLon = -180d;
+        for (RoutePoint point : geometry) {
+            minLat = Math.min(minLat, point.latitude);
+            maxLat = Math.max(maxLat, point.latitude);
+            minLon = Math.min(minLon, point.longitude);
+            maxLon = Math.max(maxLon, point.longitude);
+        }
+        double pad = 0.01d;
+        minLat -= pad; maxLat += pad; minLon -= pad; maxLon += pad;
+        if ((maxLat - minLat) > 3d || (maxLon - minLon) > 3d) return Collections.emptyList();
+        String bbox = minLat + "," + minLon + "," + maxLat + "," + maxLon;
+        String query = "[out:json][timeout:18];(node[\"railway\"=\"level_crossing\"](" + bbox + ");"
+                + "nwr[\"amenity\"=\"school\"](" + bbox + ");"
+                + "node[\"hazard\"](" + bbox + "););out center;";
+        JSONObject body = request(query);
+        JSONArray items = body.optJSONArray("elements");
+        ArrayList<RouteSafetyAlert> results = new ArrayList<>();
+        if (items == null) return results;
+        for (int index = 0; index < items.length(); index++) {
+            JSONObject item = items.optJSONObject(index);
+            if (item == null) continue;
+            JSONObject center = item.optJSONObject("center");
+            double lat = item.has("lat") ? item.optDouble("lat", Double.NaN)
+                    : center == null ? Double.NaN : center.optDouble("lat", Double.NaN);
+            double lon = item.has("lon") ? item.optDouble("lon", Double.NaN)
+                    : center == null ? Double.NaN : center.optDouble("lon", Double.NaN);
+            if (Double.isNaN(lat) || Double.isNaN(lon) || !isInIran(lat, lon)) continue;
+            JSONObject tags = item.optJSONObject("tags");
+            if (tags == null) continue;
+            RouteSafetyAlert.Type type;
+            double corridor;
+            if ("level_crossing".equals(tags.optString("railway", ""))) {
+                type = RouteSafetyAlert.Type.RAILWAY_CROSSING;
+                corridor = 80d;
+            } else if ("school".equals(tags.optString("amenity", ""))) {
+                type = RouteSafetyAlert.Type.SCHOOL_ZONE;
+                corridor = 150d; // schools are often set back from the road itself
+            } else if (tags.has("hazard")) {
+                type = RouteSafetyAlert.Type.ACCIDENT_PRONE;
+                corridor = 120d;
+            } else {
+                continue;
+            }
+            if (!nearRoute(geometry, lat, lon, corridor)) continue;
+            results.add(new RouteSafetyAlert(type, lat, lon, 0d));
+        }
+        return results;
+    }
+
+    /**
+     * Best-effort OpenStreetMap way tags for tunnels, narrow bridges and steep inclines close to
+     * the route. Only explicit numeric/qualifying tags are used - no country default, no guess
+     * from road class or shape - matching speedLimitsNear's own honesty rule: missing data means
+     * no warning, not an invented one.
+     */
+    public List<RouteSafetyAlert> roadWayFeaturesNear(List<RoutePoint> geometry) throws Exception {
+        if (geometry == null || geometry.size() < 2) return Collections.emptyList();
+        double minLat = 90d, maxLat = -90d, minLon = 180d, maxLon = -180d;
+        for (RoutePoint point : geometry) {
+            minLat = Math.min(minLat, point.latitude);
+            maxLat = Math.max(maxLat, point.latitude);
+            minLon = Math.min(minLon, point.longitude);
+            maxLon = Math.max(maxLon, point.longitude);
+        }
+        double pad = 0.004d;
+        minLat -= pad; maxLat += pad; minLon -= pad; maxLon += pad;
+        if ((maxLat - minLat) > 3d || (maxLon - minLon) > 3d) return Collections.emptyList();
+        String bbox = minLat + "," + minLon + "," + maxLat + "," + maxLon;
+        JSONObject body = request("[out:json][timeout:18];(way[\"highway\"][\"tunnel\"](" + bbox + ");"
+                + "way[\"highway\"][\"bridge\"](" + bbox + ");"
+                + "way[\"highway\"][\"incline\"](" + bbox + "););out tags geom 500;");
+        JSONArray items = body.optJSONArray("elements");
+        ArrayList<RouteSafetyAlert> results = new ArrayList<>();
+        if (items == null) return results;
+        for (int index = 0; index < items.length(); index++) {
+            JSONObject item = items.optJSONObject(index);
+            JSONObject tags = item == null ? null : item.optJSONObject("tags");
+            if (tags == null) continue;
+            RouteSafetyAlert.Type type;
+            double detail = 0d;
+            String tunnel = tags.optString("tunnel", "");
+            String bridge = tags.optString("bridge", "");
+            if (!tunnel.isEmpty() && !"no".equals(tunnel)) {
+                type = RouteSafetyAlert.Type.TUNNEL;
+            } else if (!bridge.isEmpty() && !"no".equals(bridge) && isNarrowBridge(tags)) {
+                type = RouteSafetyAlert.Type.NARROW_BRIDGE;
+            } else if (tags.has("incline")) {
+                double percent = parseInclinePercent(tags.optString("incline", ""));
+                if (Double.isNaN(percent) || Math.abs(percent) < 7d) continue;
+                type = RouteSafetyAlert.Type.STEEP_GRADE;
+                detail = percent;
+            } else {
+                continue;
+            }
+            JSONArray points = item.optJSONArray("geometry");
+            if (points == null) continue;
+            double closestLat = Double.NaN, closestLon = Double.NaN, closestDistance = Double.MAX_VALUE;
+            for (int pointIndex = 0; pointIndex < points.length(); pointIndex++) {
+                JSONObject point = points.optJSONObject(pointIndex);
+                if (point == null) continue;
+                double lat = point.optDouble("lat", Double.NaN);
+                double lon = point.optDouble("lon", Double.NaN);
+                if (Double.isNaN(lat) || Double.isNaN(lon) || !isInIran(lat, lon)) continue;
+                for (RoutePoint routePoint : geometry) {
+                    double distance = distanceMeters(routePoint.latitude, routePoint.longitude, lat, lon);
+                    if (distance < closestDistance) {
+                        closestDistance = distance;
+                        closestLat = lat;
+                        closestLon = lon;
+                    }
+                }
+            }
+            if (closestDistance <= 90d) results.add(new RouteSafetyAlert(type, closestLat, closestLon, detail));
+        }
+        return results;
+    }
+
+    private boolean isNarrowBridge(JSONObject tags) {
+        double maxwidth = parseMeters(tags.optString("maxwidth", ""));
+        double width = parseMeters(tags.optString("width", ""));
+        if (maxwidth > 0d && maxwidth < 3.5d) return true;
+        if (width > 0d && width < 3.5d) return true;
+        return "1".equals(tags.optString("lanes", "").trim());
+    }
+
+    private double parseMeters(String rawValue) {
+        if (rawValue == null) return -1d;
+        String value = rawValue.trim().toLowerCase().replace("m", "").trim();
+        if (!value.matches("\\d{1,2}(\\.\\d+)?")) return -1d;
+        try { return Double.parseDouble(value); } catch (NumberFormatException ignored) { return -1d; }
+    }
+
+    private double parseInclinePercent(String rawValue) {
+        if (rawValue == null) return Double.NaN;
+        String value = rawValue.trim().toLowerCase().replace("%", "").trim();
+        if (!value.matches("-?\\d{1,2}(\\.\\d+)?")) return Double.NaN;
+        try { return Double.parseDouble(value); } catch (NumberFormatException ignored) { return Double.NaN; }
     }
 
     private int parseKilometersPerHour(String rawValue) {

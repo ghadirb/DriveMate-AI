@@ -1,7 +1,7 @@
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:state_pressed="true">
         <shape>
-            <solid android:color="#E4F0F5" />
+            <solid android:color="@color/drivemate_tab_pressed" />
             <corners android:radius="22dp" />
             <stroke android:width="1dp" android:color="@color/drivemate_blue" />
         </shape>
@@ -10,7 +10,7 @@
         <shape>
             <solid android:color="@color/white" />
             <corners android:radius="22dp" />
-            <stroke android:width="1dp" android:color="#D6E7EE" />
+            <stroke android:width="1dp" android:color="@color/drivemate_border" />
         </shape>
     </item>
 </selector>

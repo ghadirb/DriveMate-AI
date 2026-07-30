@@ -10,12 +10,12 @@ import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 
-class RoutingHttp {
-    static JSONObject getJson(String url) throws Exception {
+public class RoutingHttp {
+    public static JSONObject getJson(String url) throws Exception {
         return getJson(url, null, null);
     }
 
-    static JSONObject getJson(String url, String headerName, String headerValue) throws Exception {
+    public static JSONObject getJson(String url, String headerName, String headerValue) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
         connection.setConnectTimeout(9000);
         connection.setReadTimeout(12000);

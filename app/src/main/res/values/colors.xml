@@ -5,4 +5,7 @@
     <color name="drivemate_text">#17324D</color>
     <color name="drivemate_muted">#6B7C8F</color>
     <color name="white">#FFFFFF</color>
+    <color name="drivemate_border">#D6E7EE</color>
+    <color name="drivemate_panel_bg">#EAF7F1</color>
+    <color name="drivemate_tab_pressed">#E4F0F5</color>
 </resources>

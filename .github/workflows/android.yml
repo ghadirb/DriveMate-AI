@@ -37,6 +37,7 @@ jobs:
           TOMTOM_API_KEY: ${{ secrets.TOMTOM_API_KEY }}
           OPENROUTESERVICE_API_KEY: ${{ secrets.OPENROUTESERVICE_API_KEY }}
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          OPENWEATHERMAP_API_KEY: ${{ secrets.OPENWEATHERMAP_API_KEY }}
           KEYS_DECRYPTION_SECRET: ${{ secrets.KEYS_DECRYPTION_SECRET }}
         run: gradle assembleDebug --stacktrace
 
@@ -84,6 +85,7 @@ jobs:
           TOMTOM_API_KEY: ${{ secrets.TOMTOM_API_KEY }}
           OPENROUTESERVICE_API_KEY: ${{ secrets.OPENROUTESERVICE_API_KEY }}
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          OPENWEATHERMAP_API_KEY: ${{ secrets.OPENWEATHERMAP_API_KEY }}
           KEYS_DECRYPTION_SECRET: ${{ secrets.KEYS_DECRYPTION_SECRET }}
           RELEASE_STORE_FILE: release.jks
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
