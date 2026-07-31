@@ -1392,6 +1392,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     private void showRouteOptions(List<RouteResult> routes) {
+        // Keep every provider alternative visible. The route service already decides whether
+        // alternatives are distinct; collapsing them here can hide a legitimate choice.
         routeOptions = routes == null ? new ArrayList<>() : new ArrayList<>(routes);
         if (routeOptions.isEmpty()) {
             routeText.setText("مسیر قابل استفاده‌ای پیدا نشد.");
@@ -1419,26 +1421,47 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             RouteResult route = routeOptions.get(i);
             boolean isSelected = route == selectedRoute;
             int minutes = Math.max(1, (int) Math.ceil(route.durationSeconds / 60.0));
-            Button chip = new Button(this);
-            chip.setAllCaps(false);
-            chip.setText("مسیر " + (i + 1) + " • " + minutes + " دقیقه");
-            chip.setTextSize(13f);
-            chip.setPadding(dp(16), dp(6), dp(16), dp(6));
-            chip.setMinWidth(0);
-            chip.setMinimumWidth(0);
-            chip.setMinHeight(0);
-            chip.setMinimumHeight(0);
-            chip.setBackgroundResource(isSelected ? R.drawable.primary_button : R.drawable.status_panel);
-            chip.setTextColor(isSelected ? 0xffffffff : 0xff17324d);
-            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            MaterialCardView card = new MaterialCardView(this);
+            card.setClickable(true);
+            card.setFocusable(true);
+            card.setUseCompatPadding(true);
+            card.setCardElevation(dp(isSelected ? 4 : 1));
+            card.setRadius(dp(10));
+            card.setStrokeWidth(dp(isSelected ? 2 : 1));
+            card.setStrokeColor(getColor(isSelected ? R.color.drivemate_green : R.color.drivemate_border));
+            card.setCardBackgroundColor(getColor(isSelected ? R.color.drivemate_panel_bg : R.color.white));
+            card.setContentDescription("مسیر " + (i + 1) + ", " + minutes + " دقیقه، "
+                    + String.format(Locale.US, "%.1f", route.distanceMeters / 1000.0) + " کیلومتر");
+
+            LinearLayout content = new LinearLayout(this);
+            content.setOrientation(LinearLayout.VERTICAL);
+            content.setPadding(dp(12), dp(8), dp(12), dp(8));
+
+            TextView title = new TextView(this);
+            title.setText(isSelected ? "مسیر " + (i + 1) + "  |  پیشنهادی" : "مسیر " + (i + 1));
+            title.setTextSize(14f);
+            title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+            title.setTextColor(getColor(R.color.drivemate_text));
+
+            TextView details = new TextView(this);
+            details.setText(minutes + " دقیقه  •  " + String.format(Locale.US, "%.1f", route.distanceMeters / 1000.0) + " کیلومتر");
+            details.setTextSize(12f);
+            details.setTextColor(getColor(R.color.drivemate_muted));
+            details.setPadding(0, dp(3), 0, 0);
+
+            content.addView(title);
+            content.addView(details);
+            card.addView(content);
+            // Two alternatives fit side-by-side on ordinary phones; a third remains reachable
+            // with a short horizontal swipe instead of being hidden behind a full-width card.
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(144), ViewGroup.LayoutParams.WRAP_CONTENT);
             params.setMarginEnd(dp(8));
-            chip.setOnClickListener(v -> {
+            card.setOnClickListener(v -> {
                 selectedRoute = route;
                 showRoutePreview(route);
                 renderRouteChips();
             });
-            routeOptionsRow.addView(chip, params);
+            routeOptionsRow.addView(card, params);
         }
         routeOptionsScroll.setVisibility(View.VISIBLE);
     }
