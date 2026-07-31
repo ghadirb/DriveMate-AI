@@ -542,8 +542,11 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     private void refreshSpeedLimitButton() {
-        Button button = findViewById(R.id.speedLimitButton);
-        if (button != null) button.setText(isSpeedLimitLayerEnabled() ? "سرعت\nروشن" : "سرعت\nخاموش");
+        View button = findViewById(R.id.speedLimitButton);
+        if (button == null) return;
+        boolean enabled = isSpeedLimitLayerEnabled();
+        button.setSelected(enabled);
+        button.setContentDescription(enabled ? "نمایش محدودیت سرعت: روشن" : "نمایش محدودیت سرعت: خاموش");
     }
 
     private boolean isSpeedLimitLayerEnabled() {

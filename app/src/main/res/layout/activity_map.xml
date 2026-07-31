@@ -201,65 +201,89 @@
         android:layout_marginEnd="14dp"
         android:orientation="vertical">
 
-        <Button
+        <ImageButton
             android:id="@+id/myLocationButton"
             android:layout_width="58dp"
             android:layout_height="58dp"
+            android:background="@drawable/map_control_button"
             android:contentDescription="مکان فعلی"
-            android:text="من" />
+            android:padding="16dp"
+            android:src="@drawable/ic_map_my_location"
+            android:tint="@color/drivemate_blue"
+            android:tooltipText="مکان فعلی" />
 
-        <Button
+        <ImageButton
             android:id="@+id/savedPlacesButton"
             android:layout_width="58dp"
             android:layout_height="58dp"
             android:layout_marginTop="8dp"
+            android:background="@drawable/map_control_button"
             android:contentDescription="مکان‌های ذخیره‌شده"
-            android:text="مکان" />
+            android:padding="16dp"
+            android:src="@drawable/ic_map_saved"
+            android:tint="@color/drivemate_blue"
+            android:tooltipText="مکان‌های ذخیره‌شده" />
 
-        <Button
+        <ImageButton
             android:id="@+id/nearMeButton"
             android:layout_width="58dp"
             android:layout_height="58dp"
             android:layout_marginTop="8dp"
+            android:background="@drawable/map_control_button"
             android:contentDescription="اطراف من"
-            android:textSize="11sp"
-            android:text="اطراف من" />
+            android:padding="16dp"
+            android:src="@drawable/ic_map_nearby"
+            android:tint="@color/drivemate_blue"
+            android:tooltipText="اطراف من" />
 
-        <Button
+        <ImageButton
             android:id="@+id/mapLayersButton"
             android:layout_width="58dp"
             android:layout_height="58dp"
             android:layout_marginTop="8dp"
+            android:background="@drawable/map_control_button"
             android:contentDescription="تنظیمات نقشه و لایه‌ها"
-            android:text="لایه‌ها"
-            android:textSize="10sp" />
+            android:padding="16dp"
+            android:src="@drawable/ic_map_layers"
+            android:tint="@color/drivemate_blue"
+            android:tooltipText="لایه‌ها" />
 
-        <Button
+        <ImageButton
             android:id="@+id/speedLimitButton"
             android:layout_width="58dp"
             android:layout_height="58dp"
             android:layout_marginTop="8dp"
+            android:background="@drawable/map_control_button"
             android:contentDescription="نمایش محدودیت سرعت"
-            android:text="سرعت"
-            android:textSize="11sp" />
+            android:padding="16dp"
+            android:src="@drawable/ic_map_speed"
+            android:tint="@color/drivemate_blue"
+            android:tooltipText="نمایش محدودیت سرعت" />
 
-        <Button
+        <ImageButton
             android:id="@+id/drivingOverviewButton"
             android:layout_width="58dp"
             android:layout_height="58dp"
             android:layout_marginTop="8dp"
+            android:background="@drawable/map_control_button"
             android:contentDescription="نمای کلی مسیر"
-            android:text="نما"
+            android:padding="16dp"
+            android:src="@drawable/ic_map_overview"
+            android:tint="@color/drivemate_blue"
+            android:tooltipText="نمای کلی مسیر"
             android:visibility="gone" />
 
-        <Button
+        <ImageButton
             android:id="@+id/navigationCameraButton"
             android:layout_width="58dp"
             android:layout_height="58dp"
             android:layout_marginTop="8dp"
+            android:background="@drawable/map_control_button"
             android:contentDescription="نمای رانندگی و دنبال کردن خودرو"
-            android:text="3D"
-            android:textSize="14sp"
+            android:padding="16dp"
+            android:src="@drawable/ic_map_navigation"
+            android:tint="@color/drivemate_blue"
+            android:tooltipText="نمای رانندگی"
             android:visibility="gone" />
     </LinearLayout>
 
@@ -268,8 +292,11 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
+        android:layout_marginStart="10dp"
         android:layout_marginBottom="68dp"
+        android:layout_marginEnd="10dp"
         android:background="@drawable/status_panel"
+        android:elevation="8dp"
         android:orientation="vertical"
         android:padding="10dp"
         android:visibility="gone">
@@ -297,13 +324,16 @@
                     android:textSize="16sp"
                     android:textStyle="bold" />
 
-                <Button
+                <ImageButton
                     android:id="@+id/routeActionsButton"
                     android:layout_width="40dp"
                     android:layout_height="40dp"
+                    android:background="@drawable/map_control_button"
                     android:contentDescription="گزینه‌های مقصد"
-                    android:text="⋮"
-                    android:textSize="24sp" />
+                    android:padding="9dp"
+                    android:src="@drawable/ic_more_vertical"
+                    android:tint="@color/drivemate_blue"
+                    android:tooltipText="گزینه‌های مقصد" />
             </LinearLayout>
 
             <TextView

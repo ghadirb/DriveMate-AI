@@ -1,0 +1,20 @@
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_selected="true">
+        <shape>
+            <solid android:color="@color/drivemate_panel_bg" />
+            <corners android:radius="28dp" />
+            <stroke android:width="2dp" android:color="@color/drivemate_green" />
+        </shape>
+    </item>
+    <item>
+        <ripple android:color="#26176B87">
+            <item>
+                <shape>
+                    <solid android:color="@color/white" />
+                    <corners android:radius="28dp" />
+                    <stroke android:width="1dp" android:color="@color/drivemate_border" />
+                </shape>
+            </item>
+        </ripple>
+    </item>
+</selector>
