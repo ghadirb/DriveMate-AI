@@ -361,7 +361,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     private void initializeMap() {
         if (getResources().getIdentifier("neshan", "raw", getPackageName()) == 0) {
-            routeText.setText("فایل neshan.license در res/raw برنامه وجود ندارد.");
+            routeText.setText("اجزای لازم برای نمایش نقشه در این نسخه آماده نیست.");
             return;
         }
         try {
@@ -397,7 +397,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             // A malformed or stale SDK artifact must not close the app or block destination search.
             Log.e("DriveMateMap", "Neshan MapView runtime could not be loaded", error);
             map = null;
-            routeText.setText("نقشه نشان آماده نشد؛ جست‌وجو و مکان‌های ذخیره‌شده همچنان در دسترس هستند.");
+            routeText.setText("نقشه آماده نشد؛ جست‌وجو و مکان‌های ذخیره‌شده همچنان در دسترس هستند.");
             Toast.makeText(this, "نمایش نقشه در این نسخه آماده نشد.", Toast.LENGTH_LONG).show();
         }
     }
@@ -1487,7 +1487,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     private void showRoutePreview(RouteResult route) {
         int minutes = Math.max(1, (int) Math.ceil(route.durationSeconds / 60.0));
-        routeText.setText("مسیر پیشنهادی " + route.providerName + " | " + minutes + " دقیقه | "
+        routeText.setText("مسیر پیشنهادی | " + minutes + " دقیقه | "
                 + String.format(Locale.US, "%.1f", route.distanceMeters / 1000.0) + " کیلومتر");
         loadRouteSpeedLimits(route);
         loadRouteTrafficIncidents(route);

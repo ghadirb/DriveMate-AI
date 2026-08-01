@@ -124,10 +124,8 @@ public class RouteRepository {
 
     private void reportFailure(Exception primaryError, Exception fallbackError, Exception finalFallbackError,
                                ErrorCallback errorCallback) {
-        String message = "Neshan: " + messageOf(primaryError) + " | map.ir: " + messageOf(fallbackError);
-        if (finalFallbackError != null) message += " | OpenRouteService: " + messageOf(finalFallbackError);
-        String result = message;
-        new Handler(Looper.getMainLooper()).post(() -> errorCallback.onError(result));
+        new Handler(Looper.getMainLooper()).post(() ->
+                errorCallback.onError("دریافت مسیر در حال حاضر انجام نشد. اتصال اینترنت را بررسی و دوباره تلاش کنید."));
     }
 
     private String messageOf(Exception error) {

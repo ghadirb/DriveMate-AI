@@ -571,7 +571,7 @@ public class MainActivity extends Activity {
         if (runtimeKeysLoading && !onlineSpeechClient.canUseOnlineSpeech()) {
             if (!startLocalVoiceRecognition()) {
                 voiceRequestedWhileKeysLoad = true;
-                setStatus("در حال آماده‌سازی سرویس گفتار GapGPT...");
+                setStatus("در حال آماده‌سازی سرویس گفتار...");
             }
             return;
         }
@@ -611,8 +611,8 @@ public class MainActivity extends Activity {
         recordingOnlineSpeech = false;
         voiceHandler.removeCallbacks(automaticStop);
         voiceButton.setEnabled(false);
-        voiceButton.setText("در حال ارسال به GapGPT...");
-        setStatus("صدا به GapGPT ارسال شد؛ در صورت خطا لیارا استفاده می‌شود.");
+        voiceButton.setText("در حال پردازش صدا...");
+        setStatus("صدا در حال پردازش است.");
         onlineSpeechClient.stopAndTranscribe(new OnlineSpeechClient.TextCallback() {
             @Override public void onResult(String text) { runOnUiThread(() -> {
                 restoreVoiceButton();
@@ -621,7 +621,7 @@ public class MainActivity extends Activity {
             }); }
             @Override public void onError(String message) { runOnUiThread(() -> {
                 restoreVoiceButton();
-                setStatus(message + " لطفاً اتصال و کلیدهای آنلاین را بررسی کنید.");
+                setStatus("پردازش صدا انجام نشد. لطفاً اتصال اینترنت را بررسی کنید.");
             }); }
         });
     }
@@ -773,7 +773,7 @@ public class MainActivity extends Activity {
         voiceHandler.removeCallbacks(tripAnalysisHide);
         hideTripAnalysis();
         if (!routeRepository.hasConfiguredProvider()) {
-            setStatus("کلید مسیریابی نشان، map.ir یا OpenRouteService در این APK موجود نیست. GitHub Secrets را بررسی کنید.");
+            setStatus("سرویس مسیریابی آماده نیست. اتصال اینترنت و تنظیمات برنامه را بررسی کنید.");
             return;
         }
         Location origin = locationTracker.getLastLocation();
@@ -833,7 +833,7 @@ public class MainActivity extends Activity {
                     initialGuidanceHeldUntil = System.currentTimeMillis() + 2_600L;
                     lastInstruction = "start_navigation";
                     lastInstructionText = "مسیر به " + destination.name + " آماده است.";
-                    setStatus("مسیر آماده است. سرویس: " + route.providerName + "، فاصله تقریبی: " + route.distanceMeters + " متر");
+                    setStatus("مسیر آماده است. فاصله تقریبی: " + route.distanceMeters + " متر");
                     showTripAnalysis(route, destination);
                     voiceHandler.postDelayed(() -> {
                         if (requestSequence != routeRequestSequence || activeDestination != destination
@@ -1083,8 +1083,7 @@ public class MainActivity extends Activity {
                 + "\nمدت: " + formatTripDuration(elapsed)
                 + "\nبرآورد اولیه: " + formatTripDistance(record.distanceMeters) + " و "
                 + formatTripDuration(record.durationSeconds)
-                + (record.waypointCount > 0 ? "\nتوقف میانی: " + record.waypointCount : "")
-                + (!record.routeProvider.isEmpty() ? "\nسرویس مسیر: " + record.routeProvider : "");
+                + (record.waypointCount > 0 ? "\nتوقف میانی: " + record.waypointCount : "");
     }
 
     private void confirmClearTrips() {
@@ -1116,7 +1115,7 @@ public class MainActivity extends Activity {
 
     private void writeTripReportCsv(Uri uri) throws Exception {
         StringBuilder csv = new StringBuilder("\uFEFF");
-        csv.append("destination,origin_latitude,origin_longitude,destination_latitude,destination_longitude,start,end,status,distance_meters,planned_distance_meters,duration_seconds,provider,waypoints\n");
+        csv.append("destination,origin_latitude,origin_longitude,destination_latitude,destination_longitude,start,end,status,distance_meters,planned_distance_meters,duration_seconds,waypoints\n");
         for (TripRecord record : tripStore.recent(60)) {
             int duration = record.endedAt > record.startedAt
                     ? (int) ((record.endedAt - record.startedAt) / 1000L) : record.durationSeconds;
@@ -1128,7 +1127,7 @@ public class MainActivity extends Activity {
                     .append(csvValue(record.endedAt > 0 ? tripDateLabel(record.endedAt) : "")).append(',')
                     .append(csvValue(record.completed ? "completed" : "stopped_or_legacy")).append(',')
                     .append(distance).append(',').append(record.distanceMeters).append(',').append(duration).append(',')
-                    .append(csvValue(record.routeProvider)).append(',').append(record.waypointCount).append('\n');
+                    .append(record.waypointCount).append('\n');
         }
         try (java.io.OutputStream output = getContentResolver().openOutputStream(uri, "wt")) {
             if (output == null) throw new IllegalStateException("Cannot open report destination");
@@ -1290,7 +1289,7 @@ public class MainActivity extends Activity {
                 runtimeKeysLoading = false;
                 boolean onlineReady = onlineSpeechClient.canUseOnlineSpeech();
                 refreshAiStatus();
-                setStatus(onlineReady ? "کلیدهای آنلاین فعال شدند." : "کلید آنلاین دریافت نشد؛ حالت تشخیص گفتار گوشی فعال است.");
+                setStatus(onlineReady ? "سرویس‌های آنلاین آماده شدند." : "سرویس آنلاین در دسترس نیست؛ تشخیص گفتار گوشی فعال است.");
                 if (voiceRequestedWhileKeysLoad) {
                     voiceRequestedWhileKeysLoad = false;
                     toggleVoiceInput();
@@ -1313,7 +1312,7 @@ public class MainActivity extends Activity {
         setStatus("در حال خواندن مکان اشتراک‌گذاری‌شده...");
         SharedLocationParser.resolve(this, text, new SharedLocationParser.Callback() {
             @Override public void onResolved(SavedPlace place) { runOnUiThread(() -> promptSaveSharedPlace(place)); }
-            @Override public void onFailure() { runOnUiThread(() -> setStatus("مختصات این مکان پیدا نشد. لینک کامل Google Maps یا نشان را اشتراک‌گذاری کنید.")); }
+            @Override public void onFailure() { runOnUiThread(() -> setStatus("مختصات این مکان پیدا نشد. لینک کامل مکان را اشتراک‌گذاری کنید.")); }
         });
     }
 
@@ -1420,12 +1419,11 @@ public class MainActivity extends Activity {
                     ? "صدای آنلاین در دسترس نبود؛ راهنمای محلی پخش شد."
                     : "صدای آنلاین در دسترس نبود؛ هشدار WAV پخش شد.");
         };
-        setStatus("\u0645\u062f\u0644 \u0628\u0647\u200c\u0645\u0648\u0642\u0639 \u0646\u0631\u0633\u06cc\u062f\u061b \u062f\u0631 \u062d\u0627\u0644 \u062f\u0631\u06cc\u0627\u0641\u062a \u0635\u062f\u0627\u06cc \u0622\u0646\u0644\u0627\u06cc\u0646...");
+        setStatus("پاسخ به‌موقع نرسید؛ در حال دریافت صدای آنلاین...");
         voiceHandler.postDelayed(localFallback, 2500L);
         onlineSpeechClient.speak(fallback, new OnlineSpeechClient.SpeechCallback() {
             @Override public void onPlayed() { runOnUiThread(() -> {
-                if (finished.compareAndSet(false, true)) setStatus("متن مسیر با "
-                        + onlineSpeechClient.getLastTtsProvider() + " پخش شد.");
+                if (finished.compareAndSet(false, true)) setStatus("راهنمای مسیر با صدای آنلاین پخش شد.");
             }); }
             @Override public void onError() { runOnUiThread(localFallback); }
         });
@@ -1678,8 +1676,7 @@ public class MainActivity extends Activity {
         voicePlayer.interrupt();
         onlineSpeechClient.stopPlayback();
         onlineSpeechClient.speak(finalAnswer, new OnlineSpeechClient.SpeechCallback() {
-            @Override public void onPlayed() { runOnUiThread(() -> setStatus("پاسخ هوشمند با "
-                    + onlineSpeechClient.getLastTtsProvider() + " پخش شد.")); }
+            @Override public void onPlayed() { runOnUiThread(() -> setStatus("پاسخ هوشمند با صدای آنلاین پخش شد.")); }
             @Override public void onError() { runOnUiThread(() -> {
                 if (fallbackClip != null) {
                     voicePlayer.announce(fallbackClip, fallbackText);
@@ -1687,7 +1684,7 @@ public class MainActivity extends Activity {
                     return;
                 }
                 voicePlayer.speak(finalAnswer);
-                setStatus("متن مدل با صدای محلی پخش شد.");
+                setStatus("پاسخ صوتی با صدای گوشی پخش شد.");
             }); }
         });
     }
@@ -2262,10 +2259,10 @@ public class MainActivity extends Activity {
             default: kind = "وضعیت غیرعادی مسیر"; break;
         }
         String detail = incident.description.trim().isEmpty() ? "" : " (" + incident.description.trim() + ")";
-        String fallback = "بر اساس گزارش زندهٔ ترافیک TomTom، " + kind + detail + " حدود " + metersAway
+        String fallback = "بر اساس گزارش زندهٔ ترافیک، " + kind + detail + " حدود " + metersAway
                 + " متر جلوتر گزارش شده است؛ با احتیاط پیش بروید.";
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
-                "گزارش زندهٔ ترافیک TomTom از " + kind + detail + " حدود " + metersAway
+                "گزارش زندهٔ ترافیک از " + kind + detail + " حدود " + metersAway
                         + " متر جلوتر روی مسیر فعلی خبر می‌دهد. یک هشدار فارسی بسیار کوتاه، طبیعی و آرام برای احتیاط بگو؛ ادعای قطعیت نکن.",
                 clip, fallback, 12_000L);
     }

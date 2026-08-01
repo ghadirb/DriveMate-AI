@@ -56,7 +56,7 @@ public class PlaceSearchRepository {
                 if (!results.isEmpty()) {
                     success.onSuccess(results.subList(0, Math.min(60, results.size())));
                 } else {
-                    error.onError("No nearby result. " + join(failures));
+                    error.onError("مکان نزدیکی پیدا نشد. دوباره تلاش کنید.");
                 }
                 return;
             }
@@ -97,7 +97,7 @@ public class PlaceSearchRepository {
             rank(results, term, latitude, longitude);
             results = keepBestMatchTier(results, term);
             if (!results.isEmpty()) success.onSuccess(results.subList(0, Math.min(12, results.size())));
-            else error.onError("Search failed. " + join(failures));
+            else error.onError("مکان موردنظر پیدا نشد. نام یا آدرس را دقیق‌تر وارد کنید.");
         }).start();
     }
 
