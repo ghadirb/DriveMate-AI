@@ -189,30 +189,63 @@
             android:textColor="@color/drivemate_muted"
             android:textSize="13sp" />
 
-        <GridLayout
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
-            android:columnCount="2"
-            android:useDefaultMargins="true">
+            android:orientation="vertical">
 
-            <Button android:id="@+id/saveButton" style="@style/HomeActionButton" android:text="ذخیره مکان جدید" />
-            <Button android:id="@+id/stopButton" style="@style/HomeActionButton" android:text="توقف مسیریابی" />
-            <Button android:id="@+id/notificationButton" style="@style/HomeActionButton" android:text="اعلان مسیریابی" />
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/saveButton"
+                    style="@style/HomeActionButton"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_marginEnd="8dp"
+                    android:text="ذخیره مکان جدید" />
+
+                <Button
+                    android:id="@+id/stopButton"
+                    style="@style/HomeActionButton"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:text="توقف مسیریابی" />
+            </LinearLayout>
+
+            <Button
+                android:id="@+id/notificationButton"
+                style="@style/HomeActionButton"
+                android:layout_width="match_parent"
+                android:layout_marginTop="8dp"
+                android:text="اعلان مسیریابی" />
 
             <TextView
                 android:id="@+id/intelligenceModeInfoText"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_columnSpan="2"
                 android:layout_marginTop="10dp"
                 android:text="همراه راننده برای مدیریت مصرف و کیفیت پاسخ‌ها دو حالت دارد.\nحالت اقتصادی مصرف کمتری دارد و برای استفاده روزمره مناسب است.\nحالت هوشمند کامل از توانایی‌های بیشتر هوش مصنوعی برای تحلیل دقیق‌تر استفاده می‌کند."
                 android:textColor="@color/drivemate_muted"
                 android:textSize="12sp" />
 
-            <Button android:id="@+id/intelligenceButton" style="@style/HomeActionButton" android:layout_columnSpan="2" android:text="هوشمندی رانندگی" />
-            <Button android:id="@+id/backupButton" style="@style/HomeActionButton" android:layout_columnSpan="2" android:text="پشتیبان‌گیری و بازیابی" />
-        </GridLayout>
+            <Button
+                android:id="@+id/intelligenceButton"
+                style="@style/HomeActionButton"
+                android:layout_width="match_parent"
+                android:layout_marginTop="8dp"
+                android:text="هوشمندی رانندگی" />
+
+            <Button
+                android:id="@+id/backupButton"
+                style="@style/HomeActionButton"
+                android:layout_width="match_parent"
+                android:layout_marginTop="8dp"
+                android:text="پشتیبان‌گیری و بازیابی" />
+        </LinearLayout>
 
         <TextView
             android:id="@+id/listText"
