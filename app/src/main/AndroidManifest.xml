@@ -38,6 +38,7 @@
         <service
             android:name=".NavigationForegroundService"
             android:exported="false"
+            android:stopWithTask="false"
             android:foregroundServiceType="location" />
         <provider
             android:name="androidx.core.content.FileProvider"

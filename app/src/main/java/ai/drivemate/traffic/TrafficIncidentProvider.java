@@ -50,7 +50,12 @@ public final class TrafficIncidentProvider {
                 + "?key=" + apiKey
                 + "&bbox=" + bbox
                 + "&fields=" + java.net.URLEncoder.encode(fields, "UTF-8")
-                + "&language=fa-IR&timeValidityFilter=present";
+                // TomTom's NGT language list does not include Persian (a request with
+                // language=fa-IR fails outright with HTTP 400 "Unsupported language parameter
+                // value", silently disabling this entire feature every time). en-GB is always
+                // supported and is only used for the short English incident description text,
+                // which MainActivity/MapActivity fold into their own Persian sentence anyway.
+                + "&language=en-GB&timeValidityFilter=present";
         JSONObject body = RoutingHttp.getJson(url);
         JSONArray incidents = body.optJSONArray("incidents");
         if (incidents == null) return results;

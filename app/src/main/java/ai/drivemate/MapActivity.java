@@ -80,6 +80,7 @@ import ai.drivemate.routing.OpenRouteServiceRoutingProvider;
 import ai.drivemate.routing.OverpassPoiProvider;
 import ai.drivemate.routing.PlaceSearchRepository;
 import ai.drivemate.routing.PoiCategory;
+import ai.drivemate.routing.RouteCache;
 import ai.drivemate.routing.RouteRepository;
 import ai.drivemate.settings.NightModeManager;
 import ai.drivemate.storage.PlaceStore;
@@ -166,6 +167,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private int activeSearchRequest;
     private boolean selectingSearchResult;
     private boolean orientationWarningLogged;
+    /** True while the GPS-unavailable banner/toast is showing, so GPS and network provider
+     *  callbacks (which can each fire independently) don't show it twice. Navigation itself is
+     *  never stopped for this - the engine keeps tracking against the last known fix. */
+    private boolean gpsWarningActive;
     private PoiCategory activeNearbyCategory;
     private final List<Marker> nearbyMarkers = new ArrayList<>();
     private final EnumSet<PoiCategory> enabledPoiLayers = EnumSet.noneOf(PoiCategory.class);
@@ -1176,10 +1181,31 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         if (routeWaypoints.isEmpty()) {
             routeRepository.getRoutes(originLatitude, originLongitude, place.latitude, place.longitude,
                     routes -> runOnUiThread(() -> showRouteOptions(routes)),
-                    error -> runOnUiThread(() -> routeText.setText("دریافت مسیر انجام نشد: " + error)));
+                    error -> runOnUiThread(() -> handleRouteFetchFailure(error)));
         } else {
             requestRouteWithWaypoints();
         }
+    }
+
+    /** Called whenever a live route request fails (almost always: no internet). During active
+     *  navigation this used to be exactly what left the screen blank/broken - most visibly when
+     *  MapActivity is destroyed and recreated (e.g. tapping the dashboard tab and back) while the
+     *  connection is down, since that always has to ask a routing provider for a route it already
+     *  had a moment ago. Falls back to RouteCache's last confirmed route for this destination when
+     *  one is available; otherwise behaves exactly as before (plain error text, no route drawn). */
+    private void handleRouteFetchFailure(String error) {
+        RouteResult cached = navigationMode && destination != null
+                ? RouteCache.get(destination.latitude, destination.longitude) : null;
+        if (cached == null) {
+            routeText.setText("دریافت مسیر انجام نشد: " + error);
+            return;
+        }
+        routeOptions = new ArrayList<>();
+        routeOptions.add(cached);
+        selectedRoute = cached;
+        showRoutePreview(cached);
+        startTurnByTurn(cached);
+        Toast.makeText(this, "اتصال اینترنت برقرار نیست؛ آخرین مسیر ذخیره‌شده نمایش داده شد.", Toast.LENGTH_LONG).show();
     }
 
     private String waypointLabelSuffix(String name) {
@@ -1261,7 +1287,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         if (routeOptionsScroll != null) routeOptionsScroll.setVisibility(View.GONE);
         routeRepository.getRoutes(originLatitude, originLongitude, waypointCoordinates(), destination.latitude, destination.longitude,
                 routes -> runOnUiThread(() -> showRouteOptions(routes)),
-                error -> runOnUiThread(() -> routeText.setText("دریافت مسیر با توقف میانی انجام نشد: " + error)));
+                error -> runOnUiThread(() -> handleRouteFetchFailure(error)));
     }
 
     private void requestRouteWithoutWaypoints() {
@@ -1402,6 +1428,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         }
         selectedRoute = routeOptions.get(navigationMode
                 ? Math.min(navigationRouteIndex, routeOptions.size() - 1) : 0);
+        if (navigationMode && destination != null) {
+            RouteCache.store(selectedRoute, destination.latitude, destination.longitude);
+        }
         showRoutePreview(selectedRoute);
         if (navigationMode) startTurnByTurn(selectedRoute);
         else renderRouteChips();
@@ -2256,10 +2285,22 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         redrawCachedPoiLayers();
         if (!routeSpeedLimits.isEmpty()) renderSpeedLimitMarkers();
         if (locationManager == null || checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) return;
-        if (isLocationEnabled()) {
-            long minTimeMs = navigationMode ? 1000L : 2500L;
-            float minDistanceM = navigationMode ? 4f : 8f;
+        // Requested regardless of isLocationEnabled(): if GPS/network is off right now, this call
+        // is a harmless no-op (no updates arrive), and it means updates resume automatically the
+        // moment the driver turns location back on - without waiting for another onResume.
+        long minTimeMs = navigationMode ? 1000L : 2500L;
+        float minDistanceM = navigationMode ? 4f : 8f;
+        try {
             locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, minTimeMs, minDistanceM, this);
+        } catch (SecurityException | IllegalArgumentException ignored) {
+        }
+        try {
+            locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, minTimeMs, minDistanceM, this);
+        } catch (SecurityException | IllegalArgumentException ignored) {
+        }
+        if (!isLocationEnabled() && !gpsWarningActive) {
+            gpsWarningActive = true;
+            Toast.makeText(this, "موقعیت مکانی در دسترس نیست، لطفاً GPS را روشن کنید.", Toast.LENGTH_LONG).show();
         }
     }
 
@@ -2273,8 +2314,30 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     @Override protected void onPause() {
-        if (locationManager != null) locationManager.removeUpdates(this);
+        if (locationManager != null) {
+            try {
+                locationManager.removeUpdates(this);
+            } catch (SecurityException ignored) {
+            }
+        }
         super.onPause();
+    }
+
+    /** Fired when GPS or network is toggled off (by the driver, or by the OS) while this screen
+     *  is open. The map, the drawn route, and turn-by-turn tracking all stay exactly as they are -
+     *  only a warning is shown, using the last known fix until updates resume. Never finish() or
+     *  stop the navigation engine here. */
+    @Override public void onProviderDisabled(String provider) {
+        if (isLocationEnabled() || gpsWarningActive) return;
+        gpsWarningActive = true;
+        Toast.makeText(this, "موقعیت مکانی در دسترس نیست، لطفاً GPS را روشن کنید.", Toast.LENGTH_LONG).show();
+        if (navigationMode) roadSpeedLimitText.setVisibility(View.GONE);
+    }
+
+    @Override public void onProviderEnabled(String provider) {
+        if (!gpsWarningActive) return;
+        gpsWarningActive = false;
+        Toast.makeText(this, "موقعیت مکانی دوباره در دسترس است.", Toast.LENGTH_SHORT).show();
     }
 
     @Override protected void onDestroy() {
@@ -2284,6 +2347,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     @Override public void onLocationChanged(Location location) {
+        gpsWarningActive = false;
         originLatitude = location.getLatitude();
         originLongitude = location.getLongitude();
         if (location.hasBearing()) {

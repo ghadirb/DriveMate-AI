@@ -58,6 +58,7 @@ import ai.drivemate.routing.NavigationEngine;
 import ai.drivemate.routing.OverpassPoiProvider;
 import ai.drivemate.routing.PlaceSearchRepository;
 import ai.drivemate.routing.PoiCategory;
+import ai.drivemate.routing.RouteCache;
 import ai.drivemate.routing.RouteCurveAnalyzer;
 import ai.drivemate.routing.RoutePatternAnalyzer;
 import ai.drivemate.routing.RouteRepository;
@@ -116,6 +117,9 @@ public class MainActivity extends Activity {
     private BackupManager backupManager;
     private VoiceGuidancePlayer voicePlayer;
     private DeviceLocationTracker locationTracker;
+    /** True while the "GPS unavailable" status is showing, so repeated onProviderDisabled calls
+     *  (GPS and network can each fire independently) don't spam setStatus. */
+    private boolean gpsWarningActive;
     private NeshanRoutingProvider neshanRoutingProvider;
     private MapIrRoutingProvider mapIrRoutingProvider;
     private OpenRouteServiceRoutingProvider openRouteServiceRoutingProvider;
@@ -201,8 +205,20 @@ public class MainActivity extends Activity {
     private final Runnable trafficIncidentCheck = () -> fetchRouteTrafficIncidents(activeRoute);
     private final Runnable tripAnalysisHide = this::hideTripAnalysis;
     private final BroadcastReceiver navigationStopReceiver = new BroadcastReceiver() {
-        @Override public void onReceive(Context context, Intent intent) { stopNavigation("مسیریابی از اعلان متوقف شد."); }
+        @Override public void onReceive(Context context, Intent intent) { onNavigationStopBroadcastReceived(); }
     };
+    /** Points at whichever MainActivity instance actually owns the live GPS listener, turn-by-turn
+     *  engine and voice guidance for the current trip - normally the same instance the whole time,
+     *  but after the app is closed and reopened while a background trip is still running (see
+     *  onDestroy), the *old* activity instance keeps driving navigation while a brand-new instance
+     *  is created for the UI. Static so every instance in this process shares one answer to "is a
+     *  trip already running, and if so, whose is it". Cleared once that owner's own stopNavigation
+     *  or finishTrip actually ends the trip. */
+    private static java.lang.ref.WeakReference<MainActivity> activeSessionOwner;
+    /** True on a freshly (re)created instance that found activeSessionOwner already driving a
+     *  trip in onCreate: this instance mirrors the destination/route for display and forwards the
+     *  map and stop actions to the real owner instead of running a second, duplicate trip. */
+    private boolean observingBackgroundSession;
 
     @Override
     protected void attachBaseContext(Context newBase) {
@@ -261,25 +277,61 @@ public class MainActivity extends Activity {
         voicePlayer.announce("welcome", "به همراه راننده خوش آمدید.");
         loadRuntimeKeys();
         promptEnableLocationIfNeeded();
-        locationTracker.setUpdateListener(location -> {
-            navigationEngine.onLocation(location);
-            smartCompanion.onLocation(location);
-            recordTripLocation(location);
-            updateTripStats(location);
-            maybeSuggestRecurringDestination(location);
-            checkRouteHazards(location);
-            checkRouteSafetyAlerts(location);
-            checkTrafficIncidentsProximity(location);
-            checkUpcomingSpeedZone(location);
-            checkRouteSpeedLimit(location);
+        locationTracker.setUpdateListener(new DeviceLocationTracker.UpdateListener() {
+            @Override public void onLocationUpdate(Location location) {
+                gpsWarningActive = false;
+                navigationEngine.onLocation(location);
+                smartCompanion.onLocation(location);
+                recordTripLocation(location);
+                updateTripStats(location);
+                maybeSuggestRecurringDestination(location);
+                checkRouteHazards(location);
+                checkRouteSafetyAlerts(location);
+                checkTrafficIncidentsProximity(location);
+                checkUpcomingSpeedZone(location);
+                checkRouteSpeedLimit(location);
+            }
+
+            @Override public void onLocationAvailabilityChanged(boolean available) {
+                runOnUiThread(() -> {
+                    // Never stop navigationEngine here: it should keep tracking against the last
+                    // known fix so a GPS blip mid-trip doesn't end the trip or drop guidance.
+                    if (!available && !gpsWarningActive) {
+                        gpsWarningActive = true;
+                        setStatus("موقعیت مکانی در دسترس نیست، لطفاً GPS را روشن کنید.");
+                    } else if (available && gpsWarningActive) {
+                        gpsWarningActive = false;
+                        setStatus("موقعیت مکانی دوباره در دسترس است.");
+                    }
+                });
+            }
         });
         handleSharedIntent(getIntent());
         registerNavigationReceiver();
         refreshNotificationButton();
         refreshIntelligenceButton();
         refreshAiStatus();
+        resumeBackgroundSessionIfAny();
         voiceHandler.postDelayed(this::maybeShowIntelligenceOnboarding, 500L);
         if (ACTION_VOICE_FROM_NOTIFICATION.equals(getIntent().getAction())) voiceHandler.postDelayed(this::toggleVoiceInput, 350L);
+    }
+
+    /** Runs once per onCreate. If the app was closed and reopened while a trip was still running
+     *  in the background (see onDestroy), the *previous* MainActivity instance is still alive and
+     *  still driving GPS/voice for that trip - it just has no visible UI anymore. Rather than this
+     *  new instance starting a second, duplicate navigation session (double voice guidance, double
+     *  GPS tracking), it mirrors the owner's destination/route for display and forwards "نقشه" and
+     *  "توقف" to the real owner. If no background trip is running, this is a no-op and the app
+     *  looks exactly as it always has. */
+    private void resumeBackgroundSessionIfAny() {
+        MainActivity owner = activeSessionOwner == null ? null : activeSessionOwner.get();
+        if (owner == null || owner == this || !owner.navigationEngine.isNavigating() || owner.activeDestination == null) return;
+        observingBackgroundSession = true;
+        activeDestination = owner.activeDestination;
+        activeRoute = owner.activeRoute;
+        activeWaypoints = new ArrayList<>(owner.activeWaypoints);
+        setStatus("مسیریابی به " + activeDestination.name + " همچنان در پس‌زمینه در حال اجراست.");
+        refreshList();
     }
 
     @Override
@@ -299,7 +351,7 @@ public class MainActivity extends Activity {
         findViewById(R.id.recentButton).setOnClickListener(v -> showRecent());
         findViewById(R.id.settingsButton).setOnClickListener(v -> showSettingsMenu());
         intelligenceButton.setOnClickListener(v -> showIntelligenceModeDialog());
-        findViewById(R.id.stopButton).setOnClickListener(v -> stopNavigation("مسیریابی متوقف شد."));
+        findViewById(R.id.stopButton).setOnClickListener(v -> requestStopNavigation("مسیریابی متوقف شد."));
         notificationButton.setOnClickListener(v -> toggleBackgroundNavigation());
         findViewById(R.id.backupButton).setOnClickListener(v -> showBackupDialog());
         findViewById(R.id.tabDashboardButton).setOnClickListener(v -> selectMainTab(0));
@@ -354,7 +406,7 @@ public class MainActivity extends Activity {
             } else if (data.getBooleanExtra(MapActivity.RESULT_START_VOICE, false)) {
                 toggleVoiceInput();
             } else if (data.getBooleanExtra(MapActivity.RESULT_STOP_NAVIGATION, false)) {
-                stopNavigation("مسیریابی متوقف شد.");
+                requestStopNavigation("مسیریابی متوقف شد.");
             } else if (data.hasExtra(MapActivity.RESULT_LATITUDE) && data.hasExtra(MapActivity.RESULT_LONGITUDE)) {
                 SavedPlace destination = new SavedPlace(
                         data.getStringExtra(MapActivity.RESULT_NAME), "map_" + System.currentTimeMillis(),
@@ -397,7 +449,7 @@ public class MainActivity extends Activity {
     }
 
     private void openMap() {
-        if (navigationEngine.isNavigating() && activeDestination != null) {
+        if ((navigationEngine.isNavigating() || observingBackgroundSession) && activeDestination != null) {
             openNavigationMap(activeDestination);
             return;
         }
@@ -763,9 +815,24 @@ public class MainActivity extends Activity {
         startNavigation(destination, waypoints, false);
     }
 
+    /** Guards against ever running two live navigation sessions (and so two overlapping streams of
+     *  spoken guidance) at once. This only matters in the narrow window where a background trip is
+     *  still owned by an older, no-longer-visible MainActivity instance (see onDestroy /
+     *  resumeBackgroundSessionIfAny) and the driver starts a *new* trip from the current, visible
+     *  instance - e.g. picking a different destination while "observing" a background session.
+     *  Ends the old instance's trip cleanly first so this instance can become the sole owner. */
+    private void stopAnyOtherActiveSessionBeforeStartingHere() {
+        MainActivity owner = activeSessionOwner == null ? null : activeSessionOwner.get();
+        if (owner != null && owner != this && owner.navigationEngine.isNavigating()) {
+            owner.stopNavigation("مسیر جدیدی انتخاب شد؛ مسیریابی پیشین متوقف شد.");
+        }
+        observingBackgroundSession = false;
+    }
+
     /** Re-routing keeps the original trip clock and GPS distance so the final report covers the
      *  whole journey rather than only its last recalculated segment. */
     private void startNavigation(SavedPlace destination, List<RoutePoint> waypoints, boolean preserveTripProgress) {
+        stopAnyOtherActiveSessionBeforeStartingHere();
         intelligenceCoordinator.cancelAll();
         final long requestSequence = ++routeRequestSequence;
         final int preferredRouteIndex = pendingRouteOptionIndex;
@@ -796,8 +863,11 @@ public class MainActivity extends Activity {
                     RouteResult route = routes.get(Math.min(preferredRouteIndex, routes.size() - 1));
                     if (requestSequence != routeRequestSequence) return;
                     placeStore.addRecent(destination);
+                    observingBackgroundSession = false;
+                    activeSessionOwner = new java.lang.ref.WeakReference<>(MainActivity.this);
                     activeDestination = destination;
                     activeRoute = route;
+                    RouteCache.store(route, destination.latitude, destination.longitude);
                     activeWaypoints = new ArrayList<>(requestedWaypoints);
                     if (!preserveTripProgress || tripStartedAt == 0L) {
                         tripStartedAt = System.currentTimeMillis();
@@ -2021,6 +2091,7 @@ public class MainActivity extends Activity {
 
     private void replaceRouteForTraffic(RouteResult route, SavedPlace destination, int gainSeconds) {
         activeRoute = route;
+        RouteCache.store(route, destination.latitude, destination.longitude);
         fetchRouteHazards(route);
         fetchRouteSafetyAlerts(route);
         fetchRouteTrafficIncidents(route);
@@ -2078,6 +2149,49 @@ public class MainActivity extends Activity {
 
     private void stopBackgroundNavigation() {
         stopService(new Intent(this, NavigationForegroundService.class));
+    }
+
+    /** The service broadcasts ACTION_STOP_BROADCAST once, but every live MainActivity instance
+     *  registers its own navigationStopReceiver (see registerNavigationReceiver, called from every
+     *  onCreate), so each instance receives that single broadcast independently. Only the instance
+     *  actually driving the trip (observingBackgroundSession == false) should run the real teardown
+     *  in stopNavigation() below - the real owner's own receiver already does that. A mirroring
+     *  instance just clears its own display state instead; calling stopNavigation() on a mirror too
+     *  would build a bogus trip report from stats it never tracked and save a second, garbage trip
+     *  record on top of the owner's real one. */
+    private void onNavigationStopBroadcastReceived() {
+        String message = "مسیریابی از اعلان متوقف شد.";
+        if (observingBackgroundSession) {
+            observingBackgroundSession = false;
+            activeDestination = null;
+            activeRoute = null;
+            activeWaypoints = new ArrayList<>();
+            setStatus(message);
+            refreshList();
+        } else {
+            stopNavigation(message);
+        }
+    }
+
+    /** Stop requests that originate from this instance's own UI (stop button, the map screen's stop
+     *  action) must reach wherever the trip is actually running. If this instance is only mirroring
+     *  a background trip owned by another, older MainActivity instance (see
+     *  resumeBackgroundSessionIfAny), calling stopNavigation() here directly would build a bogus
+     *  trip report from stats this instance never tracked while leaving the real GPS/voice session
+     *  in the owner instance running untouched - so the stop is forwarded to the real owner first. */
+    private void requestStopNavigation(String message) {
+        MainActivity owner = activeSessionOwner == null ? null : activeSessionOwner.get();
+        if (observingBackgroundSession && owner != null && owner != this) {
+            owner.stopNavigation(message);
+            observingBackgroundSession = false;
+            activeDestination = null;
+            activeRoute = null;
+            activeWaypoints = new ArrayList<>();
+            setStatus(message);
+            refreshList();
+        } else {
+            stopNavigation(message);
+        }
     }
 
     private void stopNavigation(String message) {
@@ -2716,19 +2830,35 @@ public class MainActivity extends Activity {
         setStatus(fallback);
     }
 
+    /** Swiping the app away from Recents (or otherwise finishing this activity) used to always
+     *  tear down navigation, the GPS listener and the background service - even while a trip was
+     *  actively running with "اعلان مسیریابی" (background navigation) turned on. That defeated the
+     *  whole point of NavigationForegroundService's persistent notification: the app looked like
+     *  it "closed navigation" the instant this activity was destroyed, no matter what the driver
+     *  actually wanted. Now, while a trip is active and background navigation is enabled, none of
+     *  that runs here - GPS updates, the turn-by-turn engine, voice guidance and the AI coordinator
+     *  keep running against this activity's own fields. They stay alive because the system
+     *  LocationManager still holds a live reference to locationTracker's listener and voiceHandler
+     *  is bound to the main-looper (not this activity), and the process itself is kept alive by the
+     *  still-running foreground service (see android:stopWithTask="false" on the service in the
+     *  manifest). The driver's own "توقف" tap in the notification - or the in-app stop button -
+     *  is what actually calls stopNavigation() and performs the full teardown below. */
     @Override protected void onDestroy() {
+        boolean keepRunningInBackground = navigationEngine.isNavigating() && backgroundNavigationEnabled();
         voiceHandler.removeCallbacks(automaticStop);
-        voiceHandler.removeCallbacks(trafficCheck);
-        voiceHandler.removeCallbacks(weatherCheck);
         onlineSpeechClient.cancelRecording();
         localSpeechRecognizer.destroy();
-        intelligenceCoordinator.shutdown();
-        smartCompanion.stop();
-        voicePlayer.shutdown();
-        unregisterReceiver(navigationStopReceiver);
-        navigationEngine.stop();
-        stopBackgroundNavigation();
-        locationTracker.stop();
+        if (!keepRunningInBackground) {
+            voiceHandler.removeCallbacks(trafficCheck);
+            voiceHandler.removeCallbacks(weatherCheck);
+            intelligenceCoordinator.shutdown();
+            smartCompanion.stop();
+            voicePlayer.shutdown();
+            unregisterReceiver(navigationStopReceiver);
+            navigationEngine.stop();
+            stopBackgroundNavigation();
+            locationTracker.stop();
+        }
         super.onDestroy();
     }
 }
