@@ -21,6 +21,8 @@ public class DrivingIntelligenceCoordinator {
     private enum State { PENDING, RUNNING, FALLBACK, CANCELLED, READY }
     private static final long FULL_MODE_SAFETY_WAIT_MS = 1500L;
     private static final long FULL_MODE_STANDARD_WAIT_MS = 3000L;
+    private static final long ECONOMY_ONLINE_COOLDOWN_MS = 45_000L; // 45-60s suggested
+    private static final long ECONOMY_ONLINE_WAIT_MS = 2_500L;
 
     private final AiAssistant assistant;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
@@ -30,6 +32,7 @@ public class DrivingIntelligenceCoordinator {
     private final Map<String, Prepared> prepared = new HashMap<>();
     private Mode mode = Mode.ECONOMY;
     private boolean draining;
+    private long lastEconomyOnlineCallAt;
 
     public DrivingIntelligenceCoordinator(AiAssistant assistant) { this.assistant = assistant; }
 
@@ -40,16 +43,25 @@ public class DrivingIntelligenceCoordinator {
                           long expiresInMs, Listener listener) {
         final Request request = new Request(priority, prompt, context, fallback, expiresInMs, listener);
         synchronized (this) {
-            if (mode == Mode.ECONOMY && !onlineInEconomy) {
-                request.state = State.FALLBACK;
-                dispatch(request, fallback, false);
-                return request.id;
+            boolean economyOnlineAllowed = false;
+            if (mode == Mode.ECONOMY) {
+                boolean allowOnline = onlineInEconomy
+                        && (System.currentTimeMillis() - lastEconomyOnlineCallAt) >= ECONOMY_ONLINE_COOLDOWN_MS;
+                if (!allowOnline) {
+                    request.state = State.FALLBACK;
+                    dispatch(request, fallback, false);
+                    return request.id;
+                }
+                lastEconomyOnlineCallAt = System.currentTimeMillis();
+                economyOnlineAllowed = true;
             }
             requests.put(request.id, request);
             queue.add(request);
             startDrainLocked();
             if (mode == Mode.FULL && fallback != null && !fallback.trim().isEmpty()) {
                 timer.schedule(() -> fallbackAfterBudget(request.id), waitBudget(request.priority), TimeUnit.MILLISECONDS);
+            } else if (economyOnlineAllowed && fallback != null && !fallback.trim().isEmpty()) {
+                timer.schedule(() -> fallbackAfterBudget(request.id), ECONOMY_ONLINE_WAIT_MS, TimeUnit.MILLISECONDS);
             }
         }
         return request.id;

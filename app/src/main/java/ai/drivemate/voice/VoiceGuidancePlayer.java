@@ -38,6 +38,12 @@ public class VoiceGuidancePlayer {
     private TextToSpeech textToSpeech;
     private boolean ttsReady;
     private boolean ttsAvailable = true;
+    /** Latest speak() call made before the async TextToSpeech engine finished initialising (see
+     *  constructor). Economy mode never calls the online voice service and relies solely on this
+     *  local engine for every dynamic warning, so if a hazard/turn instruction fired in that short
+     *  init window it used to be dropped with only a log line and no audio at all; now it is kept
+     *  and flushed once the engine reports SUCCESS (see the constructor callback). */
+    private String pendingSpeechText;
 
     public VoiceGuidancePlayer(Context context) {
         this.context = context.getApplicationContext();
@@ -55,6 +61,11 @@ public class VoiceGuidancePlayer {
             }
             textToSpeech.setSpeechRate(1.0f);
             ttsReady = true;
+            if (pendingSpeechText != null) {
+                String queued = pendingSpeechText;
+                pendingSpeechText = null;
+                speakNow(queued);
+            }
         });
     }
 
@@ -87,10 +98,21 @@ public class VoiceGuidancePlayer {
     /** Speaks arbitrary, dynamic Persian text (AI answers, live status, warnings) via local TTS. */
     public void speak(String text) {
         if (text == null || text.trim().isEmpty()) return;
-        if (!ttsAvailable || !ttsReady || textToSpeech == null) {
-            Log.w(TAG, "TTS not ready yet; dropped: " + text);
+        if (!ttsAvailable) {
+            Log.w(TAG, "TTS engine unavailable on this device; dropped: " + text);
             return;
         }
+        if (!ttsReady || textToSpeech == null) {
+            // Still initialising asynchronously (see constructor) - queue instead of dropping so
+            // the driver still hears this once init finishes, rather than getting silence.
+            pendingSpeechText = text;
+            Log.w(TAG, "TTS not ready yet; queued: " + text);
+            return;
+        }
+        speakNow(text);
+    }
+
+    private void speakNow(String text) {
         stopCurrent();
         textToSpeech.setOnUtteranceProgressListener(new UtteranceProgressListener() {
             @Override public void onStart(String utteranceId) { }

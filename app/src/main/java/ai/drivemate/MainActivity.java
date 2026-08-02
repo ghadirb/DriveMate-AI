@@ -296,6 +296,14 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     // Never stop navigationEngine here: it should keep tracking against the last
                     // known fix so a GPS blip mid-trip doesn't end the trip or drop guidance.
+                    // While this instance is only mirroring a background trip driven by another,
+                    // older MainActivity instance (see resumeBackgroundSessionIfAny), that owner
+                    // instance has its own, separate DeviceLocationTracker and already reports GPS
+                    // loss/recovery for the real trip - reporting it again here from this mirror's
+                    // own, redundant location listener would just duplicate the toast/status for
+                    // the exact same physical GPS event (seen twice, ~16ms apart, in the 2026-08-02
+                    // reopen-during-background-trip test log).
+                    if (observingBackgroundSession) return;
                     if (!available && !gpsWarningActive) {
                         gpsWarningActive = true;
                         setStatus("موقعیت مکانی در دسترس نیست، لطفاً GPS را روشن کنید.");
@@ -1500,10 +1508,10 @@ public class MainActivity extends Activity {
     }
 
     private void playPreparedOrRequest(String key, DrivingIntelligenceCoordinator.Priority priority, String prompt,
-                                       String fallback, long expiresInMs) {
+                                       String fallback, boolean onlineInEconomy, long expiresInMs) {
         String prepared = intelligenceCoordinator.consumePrepared(key);
         if (prepared != null) speakShort(prepared);
-        else requestIntelligence(priority, prompt, fallback, false, expiresInMs);
+        else requestIntelligence(priority, prompt, fallback, onlineInEconomy, expiresInMs);
     }
 
     private void handleSmartEvent(String event, String facts) {
@@ -1529,7 +1537,7 @@ public class MainActivity extends Activity {
         if ("rest".equals(event)) {
             playPreparedOrRequest("rest-reminder", DrivingIntelligenceCoordinator.Priority.DRIVING,
                     "یادآوری ایمنی: بیش از دو ساعت رانندگی پیوسته بدون توقف ده دقیقه‌ای ثبت شده است. یک هشدار فارسی کوتاه و عملی برای استراحت بگو.",
-                    "حدود دو ساعت رانندگی کرده‌اید؛ در اولین محل امن کمی استراحت کنید.", 25_000L);
+                    "حدود دو ساعت رانندگی کرده‌اید؛ در اولین محل امن کمی استراحت کنید.", false, 25_000L);
             return;
         }
         if ("fatigue".equals(event)) {
@@ -1676,7 +1684,7 @@ public class MainActivity extends Activity {
         if (location == null) {
             playPreparedOrRequest("rest-reminder", DrivingIntelligenceCoordinator.Priority.DRIVING,
                     "یادآوری ایمنی: بیش از دو ساعت رانندگی پیوسته بدون توقف ده دقیقه‌ای ثبت شده است. یک هشدار فارسی کوتاه و عملی برای استراحت بگو.",
-                    baseFallback, 25_000L);
+                    baseFallback, true, 25_000L);
             return;
         }
         placeSearchRepository.searchAll(PoiCategory.RESTAURANT.searchTerm, location.getLatitude(), location.getLongitude(),
@@ -1685,10 +1693,10 @@ public class MainActivity extends Activity {
                     requestIntelligence(DrivingIntelligenceCoordinator.Priority.DRIVING,
                             "یادآوری ایمنی: بیش از دو ساعت رانندگی پیوسته ثبت شده است." + clause
                                     + " یک هشدار فارسی کوتاه و عملی برای استراحت بگو و همین مکان پیشنهادی را هم در جمله بیاور.",
-                            baseFallback + clause, false, 25_000L);
+                            baseFallback + clause, true, 25_000L);
                 }),
                 error -> runOnUiThread(() -> playPreparedOrRequest("rest-reminder", DrivingIntelligenceCoordinator.Priority.DRIVING,
-                        "یادآوری ایمنی: بیش از دو ساعت رانندگی پیوسته ثبت شده. یک هشدار کوتاه بگو.", baseFallback, 25_000L)));
+                        "یادآوری ایمنی: بیش از دو ساعت رانندگی پیوسته ثبت شده. یک هشدار کوتاه بگو.", baseFallback, true, 25_000L)));
     }
 
     /** Proactive version of the "fatigue" smart-event: same 3-hour safety warning as before, now
@@ -1699,7 +1707,7 @@ public class MainActivity extends Activity {
         if (location == null) {
             requestIntelligence(DrivingIntelligenceCoordinator.Priority.SAFETY,
                     "هشدار ایمنی غیرپزشکی: بیش از سه ساعت رانندگی پیوسته ثبت شده است. در یک جمله کوتاه و آرام پیشنهاد توقف در محل امن بده؛ ادعای تشخیص پزشکی نکن.",
-                    baseFallback, false, 25_000L);
+                    baseFallback, true, 25_000L);
             return;
         }
         placeSearchRepository.searchAll(PoiCategory.COFFEE_SHOP.searchTerm, location.getLatitude(), location.getLongitude(),
@@ -1708,11 +1716,11 @@ public class MainActivity extends Activity {
                     requestIntelligence(DrivingIntelligenceCoordinator.Priority.SAFETY,
                             "هشدار ایمنی غیرپزشکی: بیش از سه ساعت رانندگی پیوسته ثبت شده است." + clause
                                     + " در یک جمله کوتاه و آرام پیشنهاد توقف بده و همین مکان را بگو؛ ادعای تشخیص پزشکی نکن.",
-                            baseFallback + clause, false, 25_000L);
+                            baseFallback + clause, true, 25_000L);
                 }),
                 error -> runOnUiThread(() -> requestIntelligence(DrivingIntelligenceCoordinator.Priority.SAFETY,
                         "هشدار ایمنی غیرپزشکی: بیش از سه ساعت رانندگی پیوسته ثبت شده است. در یک جمله کوتاه پیشنهاد توقف بده.",
-                        baseFallback, false, 25_000L)));
+                        baseFallback, true, 25_000L)));
     }
 
     /** Handles the SmartDriveCompanion "fuel_low_guess" event: an approximate distance-based
@@ -1728,7 +1736,7 @@ public class MainActivity extends Activity {
                     requestIntelligence(DrivingIntelligenceCoordinator.Priority.DRIVING,
                             "یادآوری تقریبی: مسافت زیادی از آخرین سوخت‌گیری تأییدشده رانندگی شده است؛ این تشخیص واقعی سطح سوخت نیست."
                                     + clause + " یک یادآوری فارسی کوتاه و آرام بگو.",
-                            baseFallback + clause, false, 25_000L);
+                            baseFallback + clause, true, 25_000L);
                 }),
                 error -> runOnUiThread(() -> voicePlayer.speak(baseFallback)));
     }
@@ -2845,6 +2853,17 @@ public class MainActivity extends Activity {
      *  is what actually calls stopNavigation() and performs the full teardown below. */
     @Override protected void onDestroy() {
         boolean keepRunningInBackground = navigationEngine.isNavigating() && backgroundNavigationEnabled();
+        // A mirroring instance (observingBackgroundSession) never calls navigationEngine.start()
+        // itself, so its own navigationEngine.isNavigating() above is always false - even while a
+        // DIFFERENT, still-alive MainActivity instance (activeSessionOwner) is genuinely driving a
+        // background trip and owns the shared NavigationForegroundService/notification. Without
+        // this check, closing this mirror (e.g. the app's second close while a background trip is
+        // running - see 2026-08-02 report) fell into the teardown branch below and called
+        // stopBackgroundNavigation(), silently killing the real owner's notification even though
+        // navigation itself kept running fine under the owner instance.
+        MainActivity owner = activeSessionOwner == null ? null : activeSessionOwner.get();
+        boolean anotherInstanceOwnsBackgroundSession = observingBackgroundSession
+                && owner != null && owner != this && owner.navigationEngine.isNavigating();
         voiceHandler.removeCallbacks(automaticStop);
         onlineSpeechClient.cancelRecording();
         localSpeechRecognizer.destroy();
@@ -2856,7 +2875,7 @@ public class MainActivity extends Activity {
             voicePlayer.shutdown();
             unregisterReceiver(navigationStopReceiver);
             navigationEngine.stop();
-            stopBackgroundNavigation();
+            if (!anotherInstanceOwnsBackgroundSession) stopBackgroundNavigation();
             locationTracker.stop();
         }
         super.onDestroy();
