@@ -69,15 +69,16 @@ public class VoiceGuidancePlayer {
         });
     }
 
-    /** Plays a fixed clip if it exists; otherwise speaks fallbackText through local TTS. */
-    public void announce(String clipName, String fallbackText) {
+    /** Plays a fixed clip if it exists; otherwise speaks fallbackText through local TTS.
+     *  @return true if a clip actually started playing or the TTS fallback was accepted (spoken
+     *  now or queued); false only if TTS was needed but is unavailable on this device. */
+    public boolean announce(String clipName, String fallbackText) {
         String resolvedName = resolveClipName(clipName);
         int resId = context.getResources().getIdentifier(resolvedName, "raw", context.getPackageName());
         if (REAL_CLIPS.contains(resolvedName) && resId != 0) {
-            playClip(resId);
-            return;
+            return playClip(resId);
         }
-        speak(fallbackText);
+        return speak(fallbackText);
     }
 
     /** Kept for call sites that only have a clip name and no dynamic text to fall back on. */
@@ -95,21 +96,25 @@ public class VoiceGuidancePlayer {
         return name;
     }
 
-    /** Speaks arbitrary, dynamic Persian text (AI answers, live status, warnings) via local TTS. */
-    public void speak(String text) {
-        if (text == null || text.trim().isEmpty()) return;
+    /** Speaks arbitrary, dynamic Persian text (AI answers, live status, warnings) via local TTS.
+     *  @return true if the engine accepted the text (spoken now or queued for once init finishes);
+     *  false if it was dropped because TTS is unavailable on this device, so callers can avoid
+     *  reporting a "played" status when nothing will actually be heard. */
+    public boolean speak(String text) {
+        if (text == null || text.trim().isEmpty()) return false;
         if (!ttsAvailable) {
             Log.w(TAG, "TTS engine unavailable on this device; dropped: " + text);
-            return;
+            return false;
         }
         if (!ttsReady || textToSpeech == null) {
             // Still initialising asynchronously (see constructor) - queue instead of dropping so
             // the driver still hears this once init finishes, rather than getting silence.
             pendingSpeechText = text;
             Log.w(TAG, "TTS not ready yet; queued: " + text);
-            return;
+            return true;
         }
         speakNow(text);
+        return true;
     }
 
     private void speakNow(String text) {
@@ -130,14 +135,15 @@ public class VoiceGuidancePlayer {
         volume = Math.max(0.2f, volume - 0.15f);
     }
 
-    private void playClip(int resId) {
+    private boolean playClip(int resId) {
         stopCurrent();
         if (textToSpeech != null) textToSpeech.stop();
         player = MediaPlayer.create(context, resId);
-        if (player == null) return;
+        if (player == null) return false;
         player.setVolume(volume, volume);
         player.setOnCompletionListener(MediaPlayer::release);
         player.start();
+        return true;
     }
 
     private void stopCurrent() {

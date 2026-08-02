@@ -1274,8 +1274,9 @@ public class MainActivity extends Activity {
         if (isFullIntelligenceMode()) {
             speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING, prompt, null, fallback, 20_000L);
         } else {
-            voicePlayer.speak(fallback);
-            setStatus("خلاصه مسیر با راهنمای محلی پخش شد.");
+            boolean spoken = voicePlayer.speak(fallback);
+            setStatus(spoken ? "خلاصه مسیر با راهنمای محلی پخش شد."
+                    : "خلاصه مسیر آماده شد، ولی صدای راهنما در دسترس نیست (TTS دستگاه فعال نیست).");
         }
     }
 
@@ -1440,8 +1441,9 @@ public class MainActivity extends Activity {
                     if (online) {
                         speakShort(text);
                     } else {
-                        voicePlayer.speak(text);
-                        setStatus("پاسخ آفلاین پخش شد.");
+                        boolean spoken = voicePlayer.speak(text);
+                        setStatus(spoken ? "پاسخ آفلاین پخش شد."
+                                : "پاسخ آفلاین آماده شد، ولی صدای محلی در دسترس نیست (TTS دستگاه فعال نیست).");
                     }
                 }));
     }
@@ -1480,11 +1482,10 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void playDrivingFallback(String clipName, String fallback) {
+    private boolean playDrivingFallback(String clipName, String fallback) {
         onlineSpeechClient.stopPlayback();
         voicePlayer.interrupt();
-        if (clipName != null) voicePlayer.announce(clipName, fallback);
-        else voicePlayer.speak(fallback);
+        return clipName != null ? voicePlayer.announce(clipName, fallback) : voicePlayer.speak(fallback);
     }
 
     /** Uses online TTS for a deterministic fallback sentence before resorting to a packaged WAV. */
@@ -1492,8 +1493,9 @@ public class MainActivity extends Activity {
         final AtomicBoolean finished = new AtomicBoolean(false);
         Runnable localFallback = () -> {
             if (!finished.compareAndSet(false, true)) return;
-            playDrivingFallback(clipName, fallback);
-            setStatus(clipName == null
+            boolean played = playDrivingFallback(clipName, fallback);
+            setStatus(!played ? "صدای آنلاین در دسترس نبود و صدای محلی هم فعال نیست (TTS دستگاه فعال نیست)."
+                    : clipName == null
                     ? "صدای آنلاین در دسترس نبود؛ راهنمای محلی پخش شد."
                     : "صدای آنلاین در دسترس نبود؛ هشدار WAV پخش شد.");
         };
@@ -1875,9 +1877,14 @@ public class MainActivity extends Activity {
                 .getBoolean(KEY_INTELLIGENCE_ONBOARDING_SHOWN, false)) return;
         new AlertDialog.Builder(this)
                 .setTitle("هوشمندی رانندگی")
-                .setMessage("حالت اقتصادی\nمصرف اینترنت کم و راهنمایی فوری محلی.\n\n"
-                        + "حالت هوشمند کامل\nخلاصه طبیعی مسیر، تحلیل آنلاین و پاسخ صوتی هوشمند؛ "
-                        + "در صورت تأخیر اینترنت، راهنمای محلی ادامه پیدا می‌کند.")
+                .setMessage("همراه راننده برای پاسخ‌گویی و تحلیل از دو حالت استفاده می‌کند:\n\n"
+                        + "🟢 حالت اقتصادی:\n"
+                        + "مصرف کمتر اینترنت و اعتبار هوش مصنوعی\n"
+                        + "مناسب برای استفاده روزمره و طولانی\n\n"
+                        + "🔵 حالت هوشمند کامل:\n"
+                        + "تحلیل‌های دقیق‌تر، پاسخ‌های طبیعی‌تر و استفاده بیشتر از هوش مصنوعی\n"
+                        + "مناسب برای تجربه کامل همراه راننده\n\n"
+                        + "شما هر زمان می‌توانید این حالت را از داشبورد تغییر دهید.")
                 .setPositiveButton("هوشمند کامل", (dialog, which) -> {
                     selectIntelligenceMode(DrivingIntelligenceCoordinator.Mode.FULL);
                     markOnboardingShown();
