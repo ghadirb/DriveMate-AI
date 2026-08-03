@@ -43,12 +43,17 @@ public class DeviceLocationTracker implements LocationListener {
         // Each provider is requested independently and defensively: some OEM builds throw when a
         // provider is fully switched off (rather than just "disabled"), and losing GPS must never
         // take network updates down with it, or vice versa.
+        // minDistance is intentionally 0 for both providers: a non-zero minDistance makes Android
+        // withhold updates once the driver stops moving (e.g. parking within the arrival radius),
+        // which silently starves onLocation()-based checks (arrival, off-route, hazards) of any
+        // fresh fix to re-evaluate - navigation would then never detect arrival at all. Time-based
+        // cadence alone (minTime) is what should govern update frequency here.
         try {
-            locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 3f, this);
+            locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this);
         } catch (SecurityException | IllegalArgumentException ignored) {
         }
         try {
-            locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 3000L, 8f, this);
+            locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 3000L, 0f, this);
         } catch (SecurityException | IllegalArgumentException ignored) {
         }
     }
