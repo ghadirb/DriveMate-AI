@@ -290,8 +290,9 @@ public class MainActivity extends Activity {
                 recordTripLocation(location);
                 updateTripStats(location);
                 maybeSuggestRecurringDestination(location);
-                checkRouteHazards(location);
-                checkRouteSafetyAlerts(location);
+                boolean movingNow = isCurrentlyMoving(location);
+                checkRouteHazards(location, movingNow);
+                checkRouteSafetyAlerts(location, movingNow);
                 checkTrafficIncidentsProximity(location);
                 checkUpcomingSpeedZone(location);
                 checkRouteSpeedLimit(location);
@@ -1463,6 +1464,14 @@ public class MainActivity extends Activity {
         // The route engine immediately speaks the first real maneuver; avoid a second generic
         // "start moving" prompt that would delay the actionable instruction.
         if ("start_navigation".equals(clipName) && navigationEngine.hasActionableCurrentInstruction()) return;
+        // Always clear whatever is currently playing - local WAV/TTS or an online clip - before
+        // starting a new announcement. Individual playback paths already did this pairwise
+        // (speakShort, playDrivingFallback), but the economy-mode direct path and the full-mode
+        // online-TTS-fallback path each only stopped their own kind, not the other's. Switching
+        // intelligence mode mid-trip could then leave a leftover clip from the old mode overlapping
+        // a fresh one from the new mode, playing simultaneously.
+        voicePlayer.interrupt();
+        onlineSpeechClient.stopPlayback();
         if (isFullIntelligenceMode()) {
             setStatus("\u062f\u0631 \u062d\u0627\u0644 \u0622\u0645\u0627\u062f\u0647 \u06a9\u0631\u062f\u0646 \u067e\u0627\u0633\u062e \u0635\u0648\u062a\u06cc \u0647\u0648\u0634\u0645\u0646\u062f...");
             final AtomicBoolean delivered = new AtomicBoolean(false);
@@ -2134,8 +2143,20 @@ public class MainActivity extends Activity {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
     }
 
+    private long lastRerouteAt = 0L;
+    /** Minimum gap between actual reroute attempts. Without this, off-route detection re-firing
+     *  quickly (dense/narrow streets, GPS noise, or simply the reroute network fetch itself taking
+     *  a few seconds while the driver keeps moving) can trigger another full reroute - and another
+     *  "you left the route" announcement - before the previous one has even finished, producing a
+     *  runaway loop of overlapping route recalculations and repeated announcements instead of
+     *  actually settling onto a new route. */
+    private static final long MIN_MS_BETWEEN_REROUTES = 10_000L;
+
     private void rerouteFromCurrentLocation() {
         if (activeDestination == null || locationTracker.getLastLocation() == null) return;
+        long now = System.currentTimeMillis();
+        if (now - lastRerouteAt < MIN_MS_BETWEEN_REROUTES) return;
+        lastRerouteAt = now;
         setStatus("از مسیر خارج شدید؛ در حال محاسبه مسیر جدید...");
         startNavigation(activeDestination, activeWaypoints, true);
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
@@ -2577,12 +2598,34 @@ public class MainActivity extends Activity {
      * only (no route-projection/order check) to keep this simple and robust to GPS noise; each
      * point announces at most once per route thanks to activeRouteHazardAnnounced.
      */
-    private void checkRouteHazards(Location location) {
+    /** Tracks the last fix used to judge movement for hazard/safety-alert gating (separate from
+     *  lastTripLocation, which is trip-distance bookkeeping and gets reset on start/finish). */
+    private Location lastAlertMovementLocation;
+
+    /** Location.hasSpeed() is frequently false on real devices (weak fix, just starting to move,
+     *  some OEM GPS chips), and relying on it alone silently disables every hazard/curve alert -
+     *  exactly the "no speed camera or any warning was announced" regression. Falls back to actual
+     *  distance covered since the last fix, mirroring the same fallback recordTripLocation already
+     *  uses for trip-distance accumulation. Computed once per location update and shared by every
+     *  alert check in that round, not per-alert, so it reflects one consistent movement judgement. */
+    private boolean isCurrentlyMoving(Location location) {
+        boolean result;
+        if (location.hasSpeed()) {
+            result = location.getSpeed() >= ALERT_MIN_MOVING_SPEED_MPS;
+        } else {
+            result = lastAlertMovementLocation != null
+                    && lastAlertMovementLocation.distanceTo(location) >= 12f;
+        }
+        lastAlertMovementLocation = new Location(location);
+        return result;
+    }
+
+    private void checkRouteHazards(Location location, boolean movingNow) {
         if (location == null || activeRouteHazards.isEmpty() || !navigationEngine.isNavigating()) return;
         for (int index = 0; index < activeRouteHazards.size(); index++) {
             if (index >= activeRouteHazardAnnounced.length || activeRouteHazardAnnounced[index]) continue;
             double[] hazard = activeRouteHazards.get(index);
-            if (!isAlertAheadAndRelevant(location, hazard[0], hazard[1])) continue;
+            if (!isAlertAheadAndRelevant(location, movingNow, hazard[0], hazard[1])) continue;
             activeRouteHazardAnnounced[index] = true;
             announceRouteHazard(hazard[2]);
         }
@@ -2621,13 +2664,13 @@ public class MainActivity extends Activity {
      * SCHOOL_ZONE is special: it is skipped (not consumed) outside its approximate active hours so
      * it can still fire later in the same trip once school hours begin.
      */
-    private void checkRouteSafetyAlerts(Location location) {
+    private void checkRouteSafetyAlerts(Location location, boolean movingNow) {
         if (location == null || activeRouteSafetyAlerts.isEmpty() || !navigationEngine.isNavigating()) return;
         for (int index = 0; index < activeRouteSafetyAlerts.size(); index++) {
             if (index >= activeRouteSafetyAlertAnnounced.length || activeRouteSafetyAlertAnnounced[index]) continue;
             RouteSafetyAlert alert = activeRouteSafetyAlerts.get(index);
             if (alert.type == RouteSafetyAlert.Type.SCHOOL_ZONE && !isSchoolActiveHour()) continue;
-            if (!isAlertAheadAndRelevant(location, alert.latitude, alert.longitude)) continue;
+            if (!isAlertAheadAndRelevant(location, movingNow, alert.latitude, alert.longitude)) continue;
             activeRouteSafetyAlertAnnounced[index] = true;
             announceRouteSafetyAlert(alert);
         }
@@ -2643,12 +2686,13 @@ public class MainActivity extends Activity {
     private static final float ALERT_AHEAD_TOLERANCE_DEGREES = 80f;
 
     /** Shared proximity gate for both checkRouteHazards and checkRouteSafetyAlerts: requires the
-     *  vehicle to actually be moving (not parked/stopped) and, when a heading is available,
-     *  requires the alert point to be roughly in front of the direction of travel rather than
-     *  behind or to the side - a plain straight-line distance check alone can't tell "ahead" from
-     *  "nearby in any direction", which was firing curve/hazard warnings while stationary. */
-    private boolean isAlertAheadAndRelevant(Location location, double alertLatitude, double alertLongitude) {
-        if (!location.hasSpeed() || location.getSpeed() < ALERT_MIN_MOVING_SPEED_MPS) return false;
+     *  vehicle to actually be moving (not parked/stopped, via the shared isCurrentlyMoving result)
+     *  and, when a heading is available, requires the alert point to be roughly in front of the
+     *  direction of travel rather than behind or to the side - a plain straight-line distance check
+     *  alone can't tell "ahead" from "nearby in any direction", which was firing curve/hazard
+     *  warnings while stationary. */
+    private boolean isAlertAheadAndRelevant(Location location, boolean movingNow, double alertLatitude, double alertLongitude) {
+        if (!movingNow) return false;
         Location alertLocation = new Location("route_alert_check");
         alertLocation.setLatitude(alertLatitude);
         alertLocation.setLongitude(alertLongitude);
