@@ -2900,6 +2900,9 @@ public class MainActivity extends Activity {
     }
 
     private void announceWaypointReached(int ordinal) {
+        // Drop the just-reached stop so a later reroute (rerouteFromCurrentLocation /
+        // replaceRouteForTraffic) never re-requests a route back through a place already visited.
+        if (ordinal >= 0 && ordinal < activeWaypoints.size()) activeWaypoints.remove(ordinal);
         int humanNumber = ordinal + 1;
         String fallback = "به توقف میانی " + humanNumber + " رسیدید. مسیر به مقصد ادامه دارد.";
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,

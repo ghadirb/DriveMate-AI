@@ -1908,10 +1908,13 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     /** Re-fetches a route from the current position after an off-route detection and restarts
      *  turn-by-turn on it, instead of silently continuing to track a maneuver the driver has
-     *  already left behind. */
+     *  already left behind. Must include routeWaypoints - a plain origin-to-destination fetch here
+     *  would silently drop every remaining intermediate stop from the recomputed route, so a
+     *  waypoint reached after any reroute would never be detected or announced again. */
     private void recalculateActiveRoute() {
         if (destination == null) return;
-        routeRepository.getRoute(originLatitude, originLongitude, destination.latitude, destination.longitude,
+        routeRepository.getRoute(originLatitude, originLongitude, waypointCoordinates(),
+                destination.latitude, destination.longitude,
                 route -> runOnUiThread(() -> {
                     routeOptions = new ArrayList<>();
                     routeOptions.add(route);
@@ -1940,6 +1943,18 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             renderLaneGuidance(null);
         });
         recalculateActiveRoute();
+    }
+
+    @Override public void onWaypointReached(RouteStep step, int ordinal) {
+        runOnUiThread(() -> {
+            // Drop the just-reached stop so a later reroute (recalculateActiveRoute) never tries
+            // to route back through a place already visited.
+            if (ordinal >= 0 && ordinal < routeWaypoints.size()) routeWaypoints.remove(ordinal);
+            turnInstructionText.setText("به توقف میانی رسیدید؛ مسیر ادامه دارد.");
+            turnArrowText.setText("●");
+            renderLaneGuidance(null);
+            findViewById(R.id.routeWaypointsButton).setVisibility(!navigationMode && !routeWaypoints.isEmpty() ? View.VISIBLE : View.GONE);
+        });
     }
 
     @Override public void onArrived() {
