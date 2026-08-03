@@ -2,8 +2,11 @@
 <data-extraction-rules>
     <cloud-backup>
         <include domain="sharedpref" path="." />
+        <!-- See backup_rules.xml: this is a device-local "first run" marker, never restored. -->
+        <exclude domain="sharedpref" path="drivemate_device_local.xml" />
     </cloud-backup>
     <device-transfer>
         <include domain="sharedpref" path="." />
+        <exclude domain="sharedpref" path="drivemate_device_local.xml" />
     </device-transfer>
 </data-extraction-rules>

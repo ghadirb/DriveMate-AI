@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
     <include domain="sharedpref" path="." />
+    <!-- Purely a "first run on this device" marker (see PREFS_DEVICE_LOCAL in MainActivity);
+         must never be restored from a backup, or the onboarding dialog would be wrongly
+         skipped on a genuinely fresh install. -->
+    <exclude domain="sharedpref" path="drivemate_device_local.xml" />
 </full-backup-content>

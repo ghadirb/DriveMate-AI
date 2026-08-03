@@ -87,6 +87,11 @@ public class MainActivity extends Activity {
     private static final long TRAFFIC_INCIDENT_CHECK_INTERVAL_MS = 4 * 60_000L;
     private static final int TRAFFIC_REROUTE_MIN_GAIN_SECONDS = 180;
     private static final String PREFS_SETTINGS = "drivemate_settings";
+    /** Deliberately a separate file from PREFS_SETTINGS and excluded from cloud backup/device
+     *  transfer (see backup_rules.xml / data_extraction_rules.xml) - this flag exists purely to
+     *  detect "first run on this device", so restoring it from a backup would wrongly skip the
+     *  onboarding dialog on a fresh install just because an old install once dismissed it. */
+    private static final String PREFS_DEVICE_LOCAL = "drivemate_device_local";
     private static final String KEY_INTELLIGENCE_MODE = "driving_intelligence_mode";
     private static final String KEY_INTELLIGENCE_ONBOARDING_SHOWN = "intelligence_onboarding_shown_v2";
     public static final String ACTION_VOICE_FROM_NOTIFICATION = "ai.drivemate.action.VOICE_FROM_NOTIFICATION";
@@ -1873,7 +1878,7 @@ public class MainActivity extends Activity {
     }
 
     private void maybeShowIntelligenceOnboarding() {
-        if (isFinishing() || getSharedPreferences(PREFS_SETTINGS, MODE_PRIVATE)
+        if (isFinishing() || getSharedPreferences(PREFS_DEVICE_LOCAL, MODE_PRIVATE)
                 .getBoolean(KEY_INTELLIGENCE_ONBOARDING_SHOWN, false)) return;
         new AlertDialog.Builder(this)
                 .setTitle("هوشمندی رانندگی")
@@ -1898,7 +1903,7 @@ public class MainActivity extends Activity {
     }
 
     private void markOnboardingShown() {
-        getSharedPreferences(PREFS_SETTINGS, MODE_PRIVATE).edit()
+        getSharedPreferences(PREFS_DEVICE_LOCAL, MODE_PRIVATE).edit()
                 .putBoolean(KEY_INTELLIGENCE_ONBOARDING_SHOWN, true).apply();
     }
 
