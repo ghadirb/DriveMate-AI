@@ -2577,11 +2577,7 @@ public class MainActivity extends Activity {
         for (int index = 0; index < activeRouteHazards.size(); index++) {
             if (index >= activeRouteHazardAnnounced.length || activeRouteHazardAnnounced[index]) continue;
             double[] hazard = activeRouteHazards.get(index);
-            Location hazardLocation = new Location("osm_hazard");
-            hazardLocation.setLatitude(hazard[0]);
-            hazardLocation.setLongitude(hazard[1]);
-            float meters = location.distanceTo(hazardLocation);
-            if (meters > 350f) continue;
+            if (!isAlertAheadAndRelevant(location, hazard[0], hazard[1])) continue;
             activeRouteHazardAnnounced[index] = true;
             announceRouteHazard(hazard[2]);
         }
@@ -2626,14 +2622,45 @@ public class MainActivity extends Activity {
             if (index >= activeRouteSafetyAlertAnnounced.length || activeRouteSafetyAlertAnnounced[index]) continue;
             RouteSafetyAlert alert = activeRouteSafetyAlerts.get(index);
             if (alert.type == RouteSafetyAlert.Type.SCHOOL_ZONE && !isSchoolActiveHour()) continue;
-            Location alertLocation = new Location("route_safety_alert");
-            alertLocation.setLatitude(alert.latitude);
-            alertLocation.setLongitude(alert.longitude);
-            float meters = location.distanceTo(alertLocation);
-            if (meters > 350f) continue;
+            if (!isAlertAheadAndRelevant(location, alert.latitude, alert.longitude)) continue;
             activeRouteSafetyAlertAnnounced[index] = true;
             announceRouteSafetyAlert(alert);
         }
+    }
+
+    /** Minimum speed (~2.9 km/h) below which the vehicle is considered parked/stationary, so
+     *  proximity-based alerts never fire while standing still - matches the "hasMovingSpeed"
+     *  threshold already used elsewhere for the same purpose. */
+    private static final float ALERT_MIN_MOVING_SPEED_MPS = 0.8f;
+    private static final float ALERT_TRIGGER_RADIUS_METERS = 350f;
+    /** How far off the current heading a point can be and still count as "ahead", so alerts
+     *  behind or off to the side of the direction of travel are not announced as upcoming. */
+    private static final float ALERT_AHEAD_TOLERANCE_DEGREES = 80f;
+
+    /** Shared proximity gate for both checkRouteHazards and checkRouteSafetyAlerts: requires the
+     *  vehicle to actually be moving (not parked/stopped) and, when a heading is available,
+     *  requires the alert point to be roughly in front of the direction of travel rather than
+     *  behind or to the side - a plain straight-line distance check alone can't tell "ahead" from
+     *  "nearby in any direction", which was firing curve/hazard warnings while stationary. */
+    private boolean isAlertAheadAndRelevant(Location location, double alertLatitude, double alertLongitude) {
+        if (!location.hasSpeed() || location.getSpeed() < ALERT_MIN_MOVING_SPEED_MPS) return false;
+        Location alertLocation = new Location("route_alert_check");
+        alertLocation.setLatitude(alertLatitude);
+        alertLocation.setLongitude(alertLongitude);
+        if (location.distanceTo(alertLocation) > ALERT_TRIGGER_RADIUS_METERS) return false;
+        if (location.hasBearing()) {
+            float bearingToAlert = location.bearingTo(alertLocation);
+            double headingDiff = Math.abs(angleDifferenceDegrees(location.getBearing(), bearingToAlert));
+            if (headingDiff > ALERT_AHEAD_TOLERANCE_DEGREES) return false;
+        }
+        return true;
+    }
+
+    private static double angleDifferenceDegrees(float from, float to) {
+        double diff = to - from;
+        while (diff > 180d) diff -= 360d;
+        while (diff < -180d) diff += 360d;
+        return diff;
     }
 
     /** Rough Iranian school-day approximation (Saturday-Wednesday mornings, Thursday until noon).
