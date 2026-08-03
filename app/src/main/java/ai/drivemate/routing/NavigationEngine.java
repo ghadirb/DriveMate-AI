@@ -21,7 +21,7 @@ public class NavigationEngine {
 
     private RouteResult route;
     private int nextStep;
-    private boolean rerouteRequested;
+    private long lastOffRouteCallbackAt;
     private Listener listener;
     private Location targetReference;
     private float targetDistanceAtReference;
@@ -30,6 +30,11 @@ public class NavigationEngine {
     private boolean currentInstructionAnnounced;
     private static final long MIN_MS_BETWEEN_INSTRUCTIONS = 1800L;
     private static final float MAX_ACCURACY_FOR_ADVANCE_METERS = 60f;
+    /** Minimum gap between onOffRoute() callbacks. Time-based rather than a one-shot latch that
+     *  only clears on the next maneuver or a fresh start(): a one-shot latch can permanently lock
+     *  up if the caller ever declines to act on a callback (e.g. its own reroute throttle), since
+     *  nothing would ever clear it again for the rest of the trip. A cooldown always re-arms. */
+    private static final long MIN_MS_BETWEEN_OFFROUTE_CALLBACKS = 10_000L;
 
     public void start(RouteResult route, Listener listener) {
         start(route, listener, null);
@@ -43,7 +48,7 @@ public class NavigationEngine {
         this.route = route;
         this.listener = listener;
         this.nextStep = 0;
-        this.rerouteRequested = false;
+        this.lastOffRouteCallbackAt = 0L;
         this.offRouteSamples = 0;
         this.lastInstructionAt = 0L;
         this.currentInstructionAnnounced = false;
@@ -92,7 +97,6 @@ public class NavigationEngine {
         if (accuracyOk && meters <= reachedDistance) {
             RouteStep justReached = target;
             nextStep = Math.min(nextStep + 1, route.steps.size() - 1);
-            rerouteRequested = false;
             currentInstructionAnnounced = false;
             updateTargetReference(location);
             if (justReached.waypointOrdinal >= 0) listener.onWaypointReached(justReached, justReached.waypointOrdinal);
@@ -102,8 +106,9 @@ public class NavigationEngine {
             if (nextDistance <= nextAnnounceDistance) announceCurrentInstruction();
             return;
         }
-        if (isReliablyOffRoute(location, meters) && !rerouteRequested) {
-            rerouteRequested = true;
+        long now = System.currentTimeMillis();
+        if (isReliablyOffRoute(location, meters) && now - lastOffRouteCallbackAt >= MIN_MS_BETWEEN_OFFROUTE_CALLBACKS) {
+            lastOffRouteCallbackAt = now;
             listener.onOffRoute();
         }
     }

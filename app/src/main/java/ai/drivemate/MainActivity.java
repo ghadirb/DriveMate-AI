@@ -2143,20 +2143,8 @@ public class MainActivity extends Activity {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
     }
 
-    private long lastRerouteAt = 0L;
-    /** Minimum gap between actual reroute attempts. Without this, off-route detection re-firing
-     *  quickly (dense/narrow streets, GPS noise, or simply the reroute network fetch itself taking
-     *  a few seconds while the driver keeps moving) can trigger another full reroute - and another
-     *  "you left the route" announcement - before the previous one has even finished, producing a
-     *  runaway loop of overlapping route recalculations and repeated announcements instead of
-     *  actually settling onto a new route. */
-    private static final long MIN_MS_BETWEEN_REROUTES = 10_000L;
-
     private void rerouteFromCurrentLocation() {
         if (activeDestination == null || locationTracker.getLastLocation() == null) return;
-        long now = System.currentTimeMillis();
-        if (now - lastRerouteAt < MIN_MS_BETWEEN_REROUTES) return;
-        lastRerouteAt = now;
         setStatus("از مسیر خارج شدید؛ در حال محاسبه مسیر جدید...");
         startNavigation(activeDestination, activeWaypoints, true);
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,

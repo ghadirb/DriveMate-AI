@@ -20,7 +20,24 @@ public class DeviceLocationTracker implements LocationListener {
     private final Context context;
     private final LocationManager locationManager;
     private Location lastLocation;
+    /** The last fix actually accepted by isUsableFix(), used as the jump-plausibility reference.
+     *  Deliberately separate from lastLocation, which callers may read via getLastLocation(). */
+    private Location lastAcceptedLocation;
+    private int consecutiveJumpRejections;
     private UpdateListener updateListener;
+
+    /** Fixes worse than this are essentially useless for street-level navigation and are dropped
+     *  outright rather than acted on. */
+    private static final float MAX_USABLE_ACCURACY_METERS = 100f;
+    /** Generous upper bound (~200 km/h) on how fast a car could plausibly move between two fixes;
+     *  anything beyond this, scaled by the elapsed time, is a GPS jump (multipath/urban-canyon
+     *  reflection) rather than real movement - this is the "location jumped" behavior reported on
+     *  two different test phones. */
+    private static final float MAX_PLAUSIBLE_SPEED_MPS = 55f;
+    /** After this many consecutive rejections, accept the next fix anyway - guards against the
+     *  reference point itself having been a bad fix, which would otherwise lock the filter out for
+     *  the rest of the trip. */
+    private static final int MAX_CONSECUTIVE_JUMP_REJECTIONS = 3;
 
     public DeviceLocationTracker(Context context) {
         this.context = context;
@@ -78,8 +95,30 @@ public class DeviceLocationTracker implements LocationListener {
 
     @Override
     public void onLocationChanged(Location location) {
+        if (!isUsableFix(location)) return;
         lastLocation = location;
+        lastAcceptedLocation = location;
         if (updateListener != null) updateListener.onLocationUpdate(location);
+    }
+
+    /** Rejects fixes too imprecise to act on, and implausible instantaneous jumps from the last
+     *  accepted fix. Recovers automatically after a few consecutive rejections (see
+     *  MAX_CONSECUTIVE_JUMP_REJECTIONS) so a genuinely bad reference point can't lock this out. */
+    private boolean isUsableFix(Location location) {
+        if (location.hasAccuracy() && location.getAccuracy() > MAX_USABLE_ACCURACY_METERS) return false;
+        if (lastAcceptedLocation == null) return true;
+        long elapsedMs = location.getTime() - lastAcceptedLocation.getTime();
+        if (elapsedMs <= 0) elapsedMs = 1000L; // some OEM providers do not set a reliable timestamp delta
+        float distance = lastAcceptedLocation.distanceTo(location);
+        float accuracyMargin = (lastAcceptedLocation.hasAccuracy() ? lastAcceptedLocation.getAccuracy() : 0f)
+                + (location.hasAccuracy() ? location.getAccuracy() : 0f);
+        float maxPlausibleDistance = (elapsedMs / 1000f) * MAX_PLAUSIBLE_SPEED_MPS + accuracyMargin + 30f;
+        if (distance <= maxPlausibleDistance) {
+            consecutiveJumpRejections = 0;
+            return true;
+        }
+        consecutiveJumpRejections++;
+        return consecutiveJumpRejections > MAX_CONSECUTIVE_JUMP_REJECTIONS;
     }
 
     @Override
