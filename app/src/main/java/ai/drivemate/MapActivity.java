@@ -1949,6 +1949,22 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             turnArrowText.setText("●");
             routeText.setText("سفر به پایان رسید.");
             renderLaneGuidance(null);
+            // The engine has already stopped itself (see NavigationEngine.onLocation), but this
+            // activity was still in navigationMode: the follow camera, the tighter GPS update
+            // cadence, and the hidden route/save buttons all key off that flag, so without
+            // clearing it here the screen stays stuck looking like navigation is still running.
+            navigationMode = false;
+            followVehicle = false;
+            navigationCameraEnabled = false;
+            applyMapOrientation(0f, 0f, 0.3f);
+            if (map != null) {
+                map.moveCamera(new LatLng(originLatitude, originLongitude), 0.3f);
+                map.setZoom(16f, 0.3f);
+            }
+            findViewById(R.id.routeOptionsButton).setVisibility(View.VISIBLE);
+            findViewById(R.id.saveMapPlaceButton).setVisibility(View.VISIBLE);
+            findViewById(R.id.routeWaypointsButton).setVisibility(!routeWaypoints.isEmpty() ? View.VISIBLE : View.GONE);
+            turnBannerContainer.postDelayed(() -> turnBannerContainer.setVisibility(View.GONE), 4000L);
         });
         trafficIncidentHandler.removeCallbacks(trafficIncidentRefresh);
     }
