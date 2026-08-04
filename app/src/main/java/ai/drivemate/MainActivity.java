@@ -911,7 +911,7 @@ public class MainActivity extends Activity {
                             runOnUiThread(() -> finishTrip(destination));
                         }
                         @Override public void onWaypointReached(RouteStep step, int ordinal) {
-                            runOnUiThread(() -> announceWaypointReached(ordinal));
+                            runOnUiThread(() -> announceWaypointReached(step, ordinal));
                         }
                     }, origin);
                     initialGuidanceHeldUntil = System.currentTimeMillis() + 2_600L;
@@ -2128,7 +2128,7 @@ public class MainActivity extends Activity {
             @Override public void onInstruction(RouteStep step) { runOnUiThread(() -> announceRouteStep(step)); }
             @Override public void onOffRoute() { runOnUiThread(() -> rerouteFromCurrentLocation()); }
             @Override public void onArrived() { runOnUiThread(() -> finishTrip(destination)); }
-            @Override public void onWaypointReached(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointReached(ordinal)); }
+            @Override public void onWaypointReached(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointReached(step, ordinal)); }
         });
         setStatus("مسیر با ترافیک به‌روزرسانی شد؛ حدود " + Math.max(1, gainSeconds / 60) + " دقیقه سریع‌تر است.");
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
@@ -2899,10 +2899,13 @@ public class MainActivity extends Activity {
         setStatus(text);
     }
 
-    private void announceWaypointReached(int ordinal) {
-        // Drop the just-reached stop so a later reroute (rerouteFromCurrentLocation /
-        // replaceRouteForTraffic) never re-requests a route back through a place already visited.
-        if (ordinal >= 0 && ordinal < activeWaypoints.size()) activeWaypoints.remove(ordinal);
+    private void announceWaypointReached(RouteStep step, int ordinal) {
+        // Match by coordinates, not ordinal: waypointOrdinal is fixed to the waypoints list as it
+        // was at the time THIS route was computed, but activeWaypoints shrinks with every stop
+        // reached - after the first removal, a later stop's original ordinal no longer lines up
+        // with the live list's indices. Coordinate matching stays correct regardless of how many
+        // stops have already been removed or how many reroutes have happened since.
+        removeReachedWaypoint(activeWaypoints, step);
         int humanNumber = ordinal + 1;
         String fallback = "به توقف میانی " + humanNumber + " رسیدید. مسیر به مقصد ادامه دارد.";
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
@@ -2910,6 +2913,26 @@ public class MainActivity extends Activity {
                         + " رسیده است. یک پیام فارسی کوتاه و طبیعی بگو که مسیر تا مقصد نهایی ادامه دارد.",
                 "continue_route", fallback, 12_000L);
         setStatus(fallback);
+    }
+
+    /** Removes the waypoint nearest the reached step's coordinates (within a generous tolerance
+     *  for provider snapping) rather than trusting a route-specific ordinal against a list that
+     *  may have already shrunk. Shared by both onWaypointReached listener registrations. */
+    private static void removeReachedWaypoint(List<RoutePoint> waypoints, RouteStep step) {
+        Location reached = new Location("reached_waypoint");
+        reached.setLatitude(step.latitude);
+        reached.setLongitude(step.longitude);
+        int closestIndex = -1;
+        float closestDistance = Float.MAX_VALUE;
+        for (int i = 0; i < waypoints.size(); i++) {
+            RoutePoint point = waypoints.get(i);
+            Location candidate = new Location("waypoint");
+            candidate.setLatitude(point.latitude);
+            candidate.setLongitude(point.longitude);
+            float distance = reached.distanceTo(candidate);
+            if (distance < closestDistance) { closestDistance = distance; closestIndex = i; }
+        }
+        if (closestIndex >= 0 && closestDistance <= 120f) waypoints.remove(closestIndex);
     }
 
     /** Swiping the app away from Recents (or otherwise finishing this activity) used to always

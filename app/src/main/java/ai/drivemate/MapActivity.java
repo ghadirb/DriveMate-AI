@@ -1947,14 +1947,31 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     @Override public void onWaypointReached(RouteStep step, int ordinal) {
         runOnUiThread(() -> {
-            // Drop the just-reached stop so a later reroute (recalculateActiveRoute) never tries
-            // to route back through a place already visited.
-            if (ordinal >= 0 && ordinal < routeWaypoints.size()) routeWaypoints.remove(ordinal);
+            // Match by coordinates, not ordinal: see removeReachedWaypoint in MainActivity for why
+            // a route-specific ordinal desyncs from routeWaypoints once any stop has been removed.
+            removeReachedWaypoint(step);
             turnInstructionText.setText("به توقف میانی رسیدید؛ مسیر ادامه دارد.");
             turnArrowText.setText("●");
             renderLaneGuidance(null);
             findViewById(R.id.routeWaypointsButton).setVisibility(!navigationMode && !routeWaypoints.isEmpty() ? View.VISIBLE : View.GONE);
         });
+    }
+
+    private void removeReachedWaypoint(RouteStep step) {
+        Location reached = new Location("reached_waypoint");
+        reached.setLatitude(step.latitude);
+        reached.setLongitude(step.longitude);
+        int closestIndex = -1;
+        float closestDistance = Float.MAX_VALUE;
+        for (int i = 0; i < routeWaypoints.size(); i++) {
+            SavedPlace place = routeWaypoints.get(i);
+            Location candidate = new Location("waypoint");
+            candidate.setLatitude(place.latitude);
+            candidate.setLongitude(place.longitude);
+            float distance = reached.distanceTo(candidate);
+            if (distance < closestDistance) { closestDistance = distance; closestIndex = i; }
+        }
+        if (closestIndex >= 0 && closestDistance <= 120f) routeWaypoints.remove(closestIndex);
     }
 
     @Override public void onArrived() {

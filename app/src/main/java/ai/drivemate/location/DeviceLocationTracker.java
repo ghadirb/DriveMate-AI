@@ -118,7 +118,13 @@ public class DeviceLocationTracker implements LocationListener {
             return true;
         }
         consecutiveJumpRejections++;
-        return consecutiveJumpRejections > MAX_CONSECUTIVE_JUMP_REJECTIONS;
+        boolean recover = consecutiveJumpRejections > MAX_CONSECUTIVE_JUMP_REJECTIONS;
+        // Reset on recovery too, not just on a plausible fix - otherwise the counter only ever
+        // grows past the threshold and every fix afterward is accepted unconditionally for the
+        // rest of the trip, silently disabling jump detection instead of recovering from one bad
+        // reference point.
+        if (recover) consecutiveJumpRejections = 0;
+        return recover;
     }
 
     @Override
