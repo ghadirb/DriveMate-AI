@@ -196,6 +196,10 @@ public class MainActivity extends Activity {
     private double activeTripOriginLongitude = Double.NaN;
     private Location lastTripLocation;
     private long initialGuidanceHeldUntil;
+    /** Monotonic token for navigation voice work. Any delayed response from an older route or
+     * intelligence mode is ignored instead of speaking over the current guidance. */
+    private long guidanceEpoch;
+    private boolean rerouteInFlight;
     private SavedPlace pendingSuggestionPlace;
     private PoiCategory pendingSuggestionCategory;
     private final RoutePatternAnalyzer routePatternAnalyzer = new RoutePatternAnalyzer();
@@ -204,6 +208,7 @@ public class MainActivity extends Activity {
     private String dismissedPatternSuggestionKey;
     private long dismissedPatternSuggestionUntil;
     private final android.os.Handler voiceHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final android.os.Handler guidanceHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private final Runnable automaticStop = this::finishOnlineRecording;
     private final Runnable trafficCheck = this::checkTrafficAndMaybeReroute;
     private final Runnable weatherCheck = this::checkWeatherAlong;
@@ -847,7 +852,7 @@ public class MainActivity extends Activity {
      *  whole journey rather than only its last recalculated segment. */
     private void startNavigation(SavedPlace destination, List<RoutePoint> waypoints, boolean preserveTripProgress) {
         stopAnyOtherActiveSessionBeforeStartingHere();
-        intelligenceCoordinator.cancelAll();
+        resetGuidance(true);
         final long requestSequence = ++routeRequestSequence;
         final int preferredRouteIndex = pendingRouteOptionIndex;
         pendingRouteOptionIndex = 0;
@@ -914,16 +919,22 @@ public class MainActivity extends Activity {
                             runOnUiThread(() -> announceWaypointReached(step, ordinal));
                         }
                     }, origin);
-                    initialGuidanceHeldUntil = System.currentTimeMillis() + 2_600L;
+                    rerouteInFlight = false;
+                    navigationEngine.setInstructionAnnouncementsEnabled(false);
+                    // A recalculation must resume the next maneuver quickly; otherwise a turn in
+                    // a dense street network can be missed while an outdated voice response expires.
+                    final long initialGuidanceDelayMs = preserveTripProgress ? 500L : 900L;
+                    initialGuidanceHeldUntil = System.currentTimeMillis() + initialGuidanceDelayMs;
                     lastInstruction = "start_navigation";
                     lastInstructionText = "مسیر به " + destination.name + " آماده است.";
                     setStatus("مسیر آماده است. فاصله تقریبی: " + route.distanceMeters + " متر");
                     showTripAnalysis(route, destination);
-                    voiceHandler.postDelayed(() -> {
+                    guidanceHandler.postDelayed(() -> {
                         if (requestSequence != routeRequestSequence || activeDestination != destination
                                 || !navigationEngine.isNavigating()) return;
-                        announceTripStart(route, destination);
-                    }, 2_600L);
+                        navigationEngine.setInstructionAnnouncementsEnabled(true);
+                        if (!navigationEngine.announceCurrentInstruction()) announceTripStart(route, destination);
+                    }, initialGuidanceDelayMs);
                     scheduleTrafficCheck();
                     checkWeatherAlong();
                     scheduleTrafficIncidentCheck();
@@ -931,6 +942,7 @@ public class MainActivity extends Activity {
                 }),
                 error -> runOnUiThread(() -> {
                     if (requestSequence != routeRequestSequence) return;
+                    rerouteInFlight = false;
                     hideTripAnalysis();
                     voicePlayer.announce("api_error", "در دریافت مسیر خطایی رخ داد.");
                     setStatus("خطا در دریافت مسیر: " + error);
@@ -1269,6 +1281,7 @@ public class MainActivity extends Activity {
     }
 
     private void announceTripStart(RouteResult route, SavedPlace destination) {
+        if (navigationEngine.hasActionableCurrentInstruction()) return;
         int minutes = Math.max(1, (int) Math.ceil(route.durationSeconds / 60.0));
         String firstInstruction = firstRouteInstruction(route);
         String fallback = "مسیر " + destination.name + " آماده است. حدود " + minutes + " دقیقه زمان دارد. "
@@ -1295,6 +1308,7 @@ public class MainActivity extends Activity {
 
     private void finishTrip(SavedPlace destination) {
         if (activeDestination == null) return;
+        resetGuidance(true);
         TripRecord tripReport = buildTripRecord(destination, true);
         saveTripRecord(tripReport);
         int minutes = tripStartedAt == 0L ? 0 : Math.max(1, (int) ((System.currentTimeMillis() - tripStartedAt) / 60_000L));
@@ -1458,9 +1472,25 @@ public class MainActivity extends Activity {
         return readIntelligenceMode() == DrivingIntelligenceCoordinator.Mode.FULL;
     }
 
+    /** Cancels delayed voice/AI work tied to the previous route or intelligence mode. */
+    private void resetGuidance(boolean interruptPlayback) {
+        guidanceEpoch++;
+        guidanceHandler.removeCallbacksAndMessages(null);
+        intelligenceCoordinator.cancelAll();
+        if (interruptPlayback) {
+            onlineSpeechClient.stopPlayback();
+            voicePlayer.interrupt();
+        }
+    }
+
+    private boolean isCurrentGuidance(long epoch) {
+        return epoch == guidanceEpoch;
+    }
+
     /** Uses the local clip immediately in economy mode; full mode gives online AI/TTS first refusal. */
     private void speakDrivingEvent(DrivingIntelligenceCoordinator.Priority priority, String prompt, String clipName,
                                    String fallback, long expiresInMs) {
+        final long epoch = guidanceEpoch;
         // The route engine immediately speaks the first real maneuver; avoid a second generic
         // "start moving" prompt that would delay the actionable instruction.
         if ("start_navigation".equals(clipName) && navigationEngine.hasActionableCurrentInstruction()) return;
@@ -1476,17 +1506,17 @@ public class MainActivity extends Activity {
             setStatus("\u062f\u0631 \u062d\u0627\u0644 \u0622\u0645\u0627\u062f\u0647 \u06a9\u0631\u062f\u0646 \u067e\u0627\u0633\u062e \u0635\u0648\u062a\u06cc \u0647\u0648\u0634\u0645\u0646\u062f...");
             final AtomicBoolean delivered = new AtomicBoolean(false);
             final long watchdogDelay = priority == DrivingIntelligenceCoordinator.Priority.SAFETY ? 2_000L : 3_750L;
-            voiceHandler.postDelayed(() -> {
-                if (!delivered.compareAndSet(false, true)) return;
-                playOnlineTtsFallback(clipName, fallback);
+            guidanceHandler.postDelayed(() -> {
+                if (!isCurrentGuidance(epoch) || !delivered.compareAndSet(false, true)) return;
+                playOnlineTtsFallback(clipName, fallback, epoch);
             }, watchdogDelay);
             intelligenceCoordinator.request(priority, prompt, drivingContext(), fallback, false, expiresInMs,
                     (id, text, online) -> runOnUiThread(() -> {
-                        if (!delivered.compareAndSet(false, true)) return;
+                        if (!isCurrentGuidance(epoch) || !delivered.compareAndSet(false, true)) return;
                         if (online) {
-                            speakShort(text, clipName, fallback);
+                            speakShort(text, clipName, fallback, epoch);
                         } else {
-                            playOnlineTtsFallback(clipName, fallback);
+                            playOnlineTtsFallback(clipName, fallback, epoch);
                         }
                     }));
         } else if (clipName != null) {
@@ -1504,9 +1534,14 @@ public class MainActivity extends Activity {
 
     /** Uses online TTS for a deterministic fallback sentence before resorting to a packaged WAV. */
     private void playOnlineTtsFallback(String clipName, String fallback) {
+        playOnlineTtsFallback(clipName, fallback, guidanceEpoch);
+    }
+
+    private void playOnlineTtsFallback(String clipName, String fallback, long epoch) {
+        if (!isCurrentGuidance(epoch)) return;
         final AtomicBoolean finished = new AtomicBoolean(false);
         Runnable localFallback = () -> {
-            if (!finished.compareAndSet(false, true)) return;
+            if (!isCurrentGuidance(epoch) || !finished.compareAndSet(false, true)) return;
             boolean played = playDrivingFallback(clipName, fallback);
             setStatus(!played ? "صدای آنلاین در دسترس نبود و صدای محلی هم فعال نیست (TTS دستگاه فعال نیست)."
                     : clipName == null
@@ -1514,10 +1549,10 @@ public class MainActivity extends Activity {
                     : "صدای آنلاین در دسترس نبود؛ هشدار WAV پخش شد.");
         };
         setStatus("پاسخ به‌موقع نرسید؛ در حال دریافت صدای آنلاین...");
-        voiceHandler.postDelayed(localFallback, 2500L);
+        guidanceHandler.postDelayed(localFallback, 2500L);
         onlineSpeechClient.speak(fallback, new OnlineSpeechClient.SpeechCallback() {
             @Override public void onPlayed() { runOnUiThread(() -> {
-                if (finished.compareAndSet(false, true)) setStatus("راهنمای مسیر با صدای آنلاین پخش شد.");
+                if (isCurrentGuidance(epoch) && finished.compareAndSet(false, true)) setStatus("راهنمای مسیر با صدای آنلاین پخش شد.");
             }); }
             @Override public void onError() { runOnUiThread(localFallback); }
         });
@@ -1763,6 +1798,11 @@ public class MainActivity extends Activity {
 
     /** Plays a generated response, with a known navigation clip as the reliable final fallback. */
     private void speakShort(String answer, String fallbackClip, String fallbackText) {
+        speakShort(answer, fallbackClip, fallbackText, guidanceEpoch);
+    }
+
+    private void speakShort(String answer, String fallbackClip, String fallbackText, long epoch) {
+        if (!isCurrentGuidance(epoch)) return;
         String shortAnswer = answer == null ? "" : answer.trim();
         if (shortAnswer.length() > 190) shortAnswer = shortAnswer.substring(0, 190);
         setStatus("در حال دریافت صدای آنلاین...");
@@ -1770,8 +1810,11 @@ public class MainActivity extends Activity {
         voicePlayer.interrupt();
         onlineSpeechClient.stopPlayback();
         onlineSpeechClient.speak(finalAnswer, new OnlineSpeechClient.SpeechCallback() {
-            @Override public void onPlayed() { runOnUiThread(() -> setStatus("پاسخ هوشمند با صدای آنلاین پخش شد.")); }
+            @Override public void onPlayed() { runOnUiThread(() -> {
+                if (isCurrentGuidance(epoch)) setStatus("پاسخ هوشمند با صدای آنلاین پخش شد.");
+            }); }
             @Override public void onError() { runOnUiThread(() -> {
+                if (!isCurrentGuidance(epoch)) return;
                 if (fallbackClip != null) {
                     voicePlayer.announce(fallbackClip, fallbackText);
                     setStatus("\u0635\u062f\u0627\u06cc \u0622\u0646\u0644\u0627\u06cc\u0646 \u062f\u0631 \u062f\u0633\u062a\u0631\u0633 \u0646\u06cc\u0633\u062a\u061b \u0647\u0634\u062f\u0627\u0631 WAV \u067e\u062e\u0634 \u0634\u062f.");
@@ -1920,7 +1963,7 @@ public class MainActivity extends Activity {
         getSharedPreferences(PREFS_SETTINGS, MODE_PRIVATE).edit()
                 .putString(KEY_INTELLIGENCE_MODE, selected.name()).apply();
         intelligenceCoordinator.setMode(selected);
-        intelligenceCoordinator.cancelAll();
+        resetGuidance(true);
         writeAutomaticBackup();
         refreshIntelligenceButton();
         refreshAiStatus();
@@ -2119,6 +2162,7 @@ public class MainActivity extends Activity {
     }
 
     private void replaceRouteForTraffic(RouteResult route, SavedPlace destination, int gainSeconds) {
+        resetGuidance(true);
         activeRoute = route;
         RouteCache.store(route, destination.latitude, destination.longitude);
         fetchRouteHazards(route);
@@ -2129,7 +2173,7 @@ public class MainActivity extends Activity {
             @Override public void onOffRoute() { runOnUiThread(() -> rerouteFromCurrentLocation()); }
             @Override public void onArrived() { runOnUiThread(() -> finishTrip(destination)); }
             @Override public void onWaypointReached(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointReached(step, ordinal)); }
-        });
+        }, locationTracker.getLastLocation());
         setStatus("مسیر با ترافیک به‌روزرسانی شد؛ حدود " + Math.max(1, gainSeconds / 60) + " دقیقه سریع‌تر است.");
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
                 "مسیر ترافیک‌محور به " + destination.name + " حدود " + Math.max(1, gainSeconds / 60) + " دقیقه زمان بهتری دارد. یک هشدار صوتی بسیار کوتاه و آرام بگو.",
@@ -2144,7 +2188,8 @@ public class MainActivity extends Activity {
     }
 
     private void rerouteFromCurrentLocation() {
-        if (activeDestination == null || locationTracker.getLastLocation() == null) return;
+        if (rerouteInFlight || activeDestination == null || locationTracker.getLastLocation() == null) return;
+        rerouteInFlight = true;
         setStatus("از مسیر خارج شدید؛ در حال محاسبه مسیر جدید...");
         startNavigation(activeDestination, activeWaypoints, true);
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
@@ -2226,6 +2271,8 @@ public class MainActivity extends Activity {
     private void stopNavigation(String message) {
         TripRecord tripReport = buildTripRecord(activeDestination, false);
         saveTripRecord(tripReport);
+        resetGuidance(true);
+        rerouteInFlight = false;
         ++routeRequestSequence;
         ++hazardFetchRequestId;
         ++speedLimitFetchRequestId;
@@ -2851,11 +2898,6 @@ public class MainActivity extends Activity {
     }
 
     private void announceRouteStep(RouteStep step) {
-        if (System.currentTimeMillis() < initialGuidanceHeldUntil) {
-            lastInstruction = "continue_route";
-            lastInstructionText = step.instruction == null ? "" : step.instruction;
-            return;
-        }
         onlineSpeechClient.stopPlayback();
         String text = step.instruction == null || step.instruction.trim().isEmpty() ? "ادامه مسیر" : step.instruction;
         String lower = text.toLowerCase(Locale.ROOT);

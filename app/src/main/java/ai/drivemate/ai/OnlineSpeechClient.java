@@ -31,6 +31,14 @@ public class OnlineSpeechClient {
     private File recording;
     private MediaPlayer player;
     private volatile String lastTtsProvider = "";
+    /** Bumped by stopPlayback() so a speak() request still synthesizing on its background thread
+     *  (the network round-trip can take a couple of seconds) can tell, once it returns, that it
+     *  was superseded by a stop/mode-switch/newer announcement in the meantime and must not play
+     *  its now-stale audio. Callers already call stopPlayback() before/after switching modes or
+     *  stopping navigation, but that only stops audio that is *already playing* - a request whose
+     *  network call hadn't finished yet at that moment previously had no way to know it should
+     *  discard its result, so it kept playing anyway once the download completed. */
+    private volatile int playGeneration;
 
     public OnlineSpeechClient(Context context, String buildKey) {
         this.context = context.getApplicationContext();
@@ -88,6 +96,7 @@ public class OnlineSpeechClient {
             if (callback != null) callback.onError();
             return;
         }
+        final int requestGeneration = playGeneration;
         new Thread(() -> {
             try {
                 File output;
@@ -116,6 +125,13 @@ public class OnlineSpeechClient {
                 }
                 final File playableOutput = output;
                 new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                    if (requestGeneration != playGeneration) {
+                        // stopPlayback() ran while this was synthesizing (stop pressed, mode
+                        // switched, or a newer announcement took over) - discard, don't play it.
+                        Log.i(TAG, "Discarding online TTS result superseded by a stop/newer request");
+                        if (callback != null) callback.onError();
+                        return;
+                    }
                     if (play(playableOutput)) {
                         if (callback != null) callback.onPlayed();
                     } else {
@@ -353,8 +369,11 @@ public class OnlineSpeechClient {
         catch (Exception ignored) { player.release(); player = null; return false; }
     }
 
-    /** Must be called before a more important local alert so online speech cannot overlap it. */
+    /** Must be called before a more important local alert so online speech cannot overlap it.
+     *  Also invalidates any speak() request still synthesizing in the background so it won't
+     *  start playing once it comes back (see playGeneration). */
     public void stopPlayback() {
+        playGeneration++;
         if (player != null) {
             try { player.stop(); } catch (IllegalStateException ignored) { }
             player.release();
