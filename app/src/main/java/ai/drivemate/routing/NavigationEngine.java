@@ -35,6 +35,14 @@ public class NavigationEngine {
      *  up if the caller ever declines to act on a callback (e.g. its own reroute throttle), since
      *  nothing would ever clear it again for the rest of the trip. A cooldown always re-arms. */
     private static final long MIN_MS_BETWEEN_OFFROUTE_CALLBACKS = 10_000L;
+    /** Consecutive confirming fixes required before trusting a maneuver has actually been reached
+     *  (see onLocation). */
+    private static final int STEP_ADVANCE_CONFIRM_SAMPLES = 2;
+    private int advanceConfirmSamples;
+    /** Modestly wider than the maneuver-advance radius: this is a one-shot check (no multi-sample
+     *  confirmation, since a parked/stopped driver may only ever produce one fix inside it), so it
+     *  needs its own buffer against GPS noise rather than sharing the tighter per-maneuver radius. */
+    private static final float FINAL_ARRIVAL_RADIUS_METERS = 55f;
 
     public void start(RouteResult route, Listener listener) {
         start(route, listener, null);
@@ -50,6 +58,7 @@ public class NavigationEngine {
         this.nextStep = 0;
         this.lastOffRouteCallbackAt = 0L;
         this.offRouteSamples = 0;
+        this.advanceConfirmSamples = 0;
         this.lastInstructionAt = 0L;
         this.currentInstructionAnnounced = false;
         updateTargetReference(currentLocation);
@@ -78,7 +87,7 @@ public class NavigationEngine {
         if (route.steps.isEmpty()) return;
         RouteStep target = route.steps.get(Math.min(nextStep, route.steps.size() - 1));
         float meters = location.distanceTo(asLocation(target));
-        if (nextStep == route.steps.size() - 1 && meters < 45f) {
+        if (nextStep == route.steps.size() - 1 && meters < FINAL_ARRIVAL_RADIUS_METERS) {
             Listener callback = listener;
             stop();
             callback.onArrived();
@@ -95,6 +104,14 @@ public class NavigationEngine {
 
         float reachedDistance = Math.max(28f, Math.min(65f, target.distanceMeters * 0.15f));
         if (accuracyOk && meters <= reachedDistance) {
+            // A single close fix is not enough to trust: GPS multipath in narrow alleys can put a
+            // momentarily-jumped reading within range of a maneuver the driver has not actually
+            // reached, advancing past the true next step and announcing its (wrong) direction
+            // instead. Two consecutive confirming fixes (roughly a second apart) are required
+            // before the advance is trusted.
+            advanceConfirmSamples++;
+            if (advanceConfirmSamples < STEP_ADVANCE_CONFIRM_SAMPLES) return;
+            advanceConfirmSamples = 0;
             RouteStep justReached = target;
             nextStep = Math.min(nextStep + 1, route.steps.size() - 1);
             currentInstructionAnnounced = false;
@@ -106,6 +123,7 @@ public class NavigationEngine {
             if (nextDistance <= nextAnnounceDistance) announceCurrentInstruction();
             return;
         }
+        advanceConfirmSamples = 0;
         long now = System.currentTimeMillis();
         if (isReliablyOffRoute(location, meters) && now - lastOffRouteCallbackAt >= MIN_MS_BETWEEN_OFFROUTE_CALLBACKS) {
             lastOffRouteCallbackAt = now;

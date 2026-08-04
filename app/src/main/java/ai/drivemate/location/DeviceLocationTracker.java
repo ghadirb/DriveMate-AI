@@ -110,9 +110,14 @@ public class DeviceLocationTracker implements LocationListener {
         long elapsedMs = location.getTime() - lastAcceptedLocation.getTime();
         if (elapsedMs <= 0) elapsedMs = 1000L; // some OEM providers do not set a reliable timestamp delta
         float distance = lastAcceptedLocation.distanceTo(location);
-        float accuracyMargin = (lastAcceptedLocation.hasAccuracy() ? lastAcceptedLocation.getAccuracy() : 0f)
-                + (location.hasAccuracy() ? location.getAccuracy() : 0f);
-        float maxPlausibleDistance = (elapsedMs / 1000f) * MAX_PLAUSIBLE_SPEED_MPS + accuracyMargin + 30f;
+        // Summing both fixes' raw accuracy (as before) let the tolerance balloon past 200m whenever
+        // both readings happened to be near the 100m cap - exactly the poor-signal, narrow-alley
+        // conditions this filter is meant to catch, making it nearly toothless there. One fix's
+        // worth of uncertainty, capped, is a more honest margin than compounding both.
+        float accuracyMargin = Math.min(60f, Math.max(
+                lastAcceptedLocation.hasAccuracy() ? lastAcceptedLocation.getAccuracy() : 0f,
+                location.hasAccuracy() ? location.getAccuracy() : 0f));
+        float maxPlausibleDistance = (elapsedMs / 1000f) * MAX_PLAUSIBLE_SPEED_MPS + accuracyMargin + 20f;
         if (distance <= maxPlausibleDistance) {
             consecutiveJumpRejections = 0;
             return true;
