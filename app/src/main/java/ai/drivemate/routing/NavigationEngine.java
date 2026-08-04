@@ -28,6 +28,7 @@ public class NavigationEngine {
     private int offRouteSamples;
     private long lastInstructionAt;
     private boolean currentInstructionAnnounced;
+    private boolean instructionAnnouncementsEnabled = true;
     private static final long MIN_MS_BETWEEN_INSTRUCTIONS = 1800L;
     private static final float MAX_ACCURACY_FOR_ADVANCE_METERS = 60f;
     /** Minimum gap between onOffRoute() callbacks. Time-based rather than a one-shot latch that
@@ -52,6 +53,7 @@ public class NavigationEngine {
         this.offRouteSamples = 0;
         this.lastInstructionAt = 0L;
         this.currentInstructionAnnounced = false;
+        this.instructionAnnouncementsEnabled = true;
         updateTargetReference(currentLocation);
     }
 
@@ -61,6 +63,7 @@ public class NavigationEngine {
         targetReference = null;
         offRouteSamples = 0;
         currentInstructionAnnounced = false;
+        instructionAnnouncementsEnabled = true;
     }
     public boolean isNavigating() { return route != null; }
 
@@ -89,7 +92,7 @@ public class NavigationEngine {
         boolean accuracyOk = !location.hasAccuracy() || location.getAccuracy() <= MAX_ACCURACY_FOR_ADVANCE_METERS;
         boolean cooldownOk = System.currentTimeMillis() - lastInstructionAt >= MIN_MS_BETWEEN_INSTRUCTIONS;
         float announceDistance = Math.max(70f, Math.min(250f, Math.max(100f, target.distanceMeters * 0.55f)));
-        if (accuracyOk && cooldownOk && !currentInstructionAnnounced && meters <= announceDistance) {
+        if (instructionAnnouncementsEnabled && accuracyOk && cooldownOk && !currentInstructionAnnounced && meters <= announceDistance) {
             announceCurrentInstruction();
         }
 
@@ -103,7 +106,7 @@ public class NavigationEngine {
             RouteStep next = route.steps.get(Math.min(nextStep, route.steps.size() - 1));
             float nextDistance = location.distanceTo(asLocation(next));
             float nextAnnounceDistance = Math.max(90f, Math.min(260f, Math.max(120f, next.distanceMeters * 0.65f)));
-            if (nextDistance <= nextAnnounceDistance) announceCurrentInstruction();
+            if (instructionAnnouncementsEnabled && nextDistance <= nextAnnounceDistance) announceCurrentInstruction();
             return;
         }
         long now = System.currentTimeMillis();
@@ -127,7 +130,7 @@ public class NavigationEngine {
 
     /** Announces the first actionable provider instruction as soon as a route is ready. */
     public boolean announceCurrentInstruction() {
-        if (route == null || listener == null || route.steps.isEmpty() || currentInstructionAnnounced
+        if (!instructionAnnouncementsEnabled || route == null || listener == null || route.steps.isEmpty() || currentInstructionAnnounced
                 || !hasActionableCurrentInstruction()) return false;
         currentInstructionAnnounced = true;
         lastInstructionAt = System.currentTimeMillis();
@@ -135,21 +138,26 @@ public class NavigationEngine {
         return true;
     }
 
+    /** Prevents the first maneuver from being consumed while the trip-start summary is playing. */
+    public void setInstructionAnnouncementsEnabled(boolean enabled) {
+        instructionAnnouncementsEnabled = enabled;
+    }
+
     private boolean isReliablyOffRoute(Location location, float targetDistance) {
         if (nextStep >= route.steps.size() - 1 || targetReference == null) return false;
         if (!location.hasAccuracy() || location.getAccuracy() > 50f) return false;
 
         // Route geometry is much more reliable than distance to a maneuver endpoint on city streets.
-        // Three consecutive samples beyond the corridor are required before rerouting, so a single
-        // noisy/jumpy fix (common on narrow streets between tall buildings) cannot trigger a reroute
-        // by itself - only a sustained deviation does.
+        // The corridor scales with the reported GPS accuracy and requires three fixes, preventing
+        // one bad network-location sample from repeatedly re-routing a driver on narrow streets.
         float routeDistance = distanceToRoute(location);
         float movedFromReference = location.distanceTo(targetReference);
-        if (routeDistance > 70f && movedFromReference >= 20f) {
+        float corridorMeters = Math.max(80f, location.getAccuracy() * 2.5f);
+        if (routeDistance > corridorMeters && movedFromReference >= 25f) {
             offRouteSamples++;
             return offRouteSamples >= 3;
         }
-        if (routeDistance <= 40f) offRouteSamples = 0;
+        if (routeDistance <= corridorMeters * 0.65f) offRouteSamples = 0;
 
         // Without a route polyline, a far maneuver end point cannot be used for off-route detection.
         if (targetDistanceAtReference > 160f) return false;
@@ -161,14 +169,34 @@ public class NavigationEngine {
 
     private float distanceToRoute(Location location) {
         if (route == null || route.geometry == null || route.geometry.isEmpty()) return Float.MAX_VALUE;
-        float nearest = Float.MAX_VALUE;
-        for (RoutePoint point : route.geometry) {
-            Location routePoint = new Location("route");
-            routePoint.setLatitude(point.latitude);
-            routePoint.setLongitude(point.longitude);
-            nearest = Math.min(nearest, location.distanceTo(routePoint));
+        if (route.geometry.size() == 1) return location.distanceTo(asLocation(route.geometry.get(0)));
+        double latitudeRadians = Math.toRadians(location.getLatitude());
+        double metersPerLatitude = 111_320d;
+        double metersPerLongitude = Math.max(1d, metersPerLatitude * Math.cos(latitudeRadians));
+        double nearestSquared = Double.MAX_VALUE;
+        for (int i = 1; i < route.geometry.size(); i++) {
+            RoutePoint first = route.geometry.get(i - 1);
+            RoutePoint second = route.geometry.get(i);
+            double ax = (first.longitude - location.getLongitude()) * metersPerLongitude;
+            double ay = (first.latitude - location.getLatitude()) * metersPerLatitude;
+            double bx = (second.longitude - location.getLongitude()) * metersPerLongitude;
+            double by = (second.latitude - location.getLatitude()) * metersPerLatitude;
+            double dx = bx - ax;
+            double dy = by - ay;
+            double lengthSquared = dx * dx + dy * dy;
+            double fraction = lengthSquared == 0d ? 0d : Math.max(0d, Math.min(1d, -(ax * dx + ay * dy) / lengthSquared));
+            double px = ax + fraction * dx;
+            double py = ay + fraction * dy;
+            nearestSquared = Math.min(nearestSquared, px * px + py * py);
         }
-        return nearest;
+        return (float) Math.sqrt(nearestSquared);
+    }
+
+    private Location asLocation(RoutePoint point) {
+        Location location = new Location("route");
+        location.setLatitude(point.latitude);
+        location.setLongitude(point.longitude);
+        return location;
     }
 
     private void updateTargetReference(Location location) {

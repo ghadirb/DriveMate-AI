@@ -95,10 +95,25 @@ public class DeviceLocationTracker implements LocationListener {
 
     @Override
     public void onLocationChanged(Location location) {
-        if (!isUsableFix(location)) return;
+        if (location == null || !shouldAccept(location) || !isUsableFix(location)) return;
         lastLocation = location;
         lastAcceptedLocation = location;
         if (updateListener != null) updateListener.onLocationUpdate(location);
+    }
+
+    /** Prefer a fresh, accurate fix and ignore implausible low-quality jumps from a secondary
+     * provider. This keeps a network fix from replacing a stable GPS fix during navigation. */
+    private boolean shouldAccept(Location candidate) {
+        if (lastLocation == null) return true;
+        long rawAgeMs = candidate.getTime() - lastLocation.getTime();
+        if (candidate.getTime() > 0L && lastLocation.getTime() > 0L && rawAgeMs < -2_000L) return false;
+        long ageMs = Math.max(0L, rawAgeMs);
+        float candidateAccuracy = candidate.hasAccuracy() ? candidate.getAccuracy() : Float.MAX_VALUE;
+        float previousAccuracy = lastLocation.hasAccuracy() ? lastLocation.getAccuracy() : Float.MAX_VALUE;
+        if (ageMs < 12_000L && candidateAccuracy > previousAccuracy + 35f) return false;
+        float jumpMeters = lastLocation.distanceTo(candidate);
+        float plausibleMeters = Math.max(140f, (ageMs / 1000f) * 55f);
+        return jumpMeters <= plausibleMeters || candidateAccuracy + 15f < previousAccuracy;
     }
 
     /** Rejects fixes too imprecise to act on, and implausible instantaneous jumps from the last
