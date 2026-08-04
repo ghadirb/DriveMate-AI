@@ -140,12 +140,14 @@ public class NavigationEngine {
         if (!location.hasAccuracy() || location.getAccuracy() > 50f) return false;
 
         // Route geometry is much more reliable than distance to a maneuver endpoint on city streets.
-        // Two consecutive samples beyond the corridor are enough to reroute without reacting to a GPS jump.
+        // Three consecutive samples beyond the corridor are required before rerouting, so a single
+        // noisy/jumpy fix (common on narrow streets between tall buildings) cannot trigger a reroute
+        // by itself - only a sustained deviation does.
         float routeDistance = distanceToRoute(location);
         float movedFromReference = location.distanceTo(targetReference);
         if (routeDistance > 70f && movedFromReference >= 20f) {
             offRouteSamples++;
-            return offRouteSamples >= 2;
+            return offRouteSamples >= 3;
         }
         if (routeDistance <= 40f) offRouteSamples = 0;
 

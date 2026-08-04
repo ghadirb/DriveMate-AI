@@ -2671,7 +2671,7 @@ public class MainActivity extends Activity {
     private static final float ALERT_TRIGGER_RADIUS_METERS = 350f;
     /** How far off the current heading a point can be and still count as "ahead", so alerts
      *  behind or off to the side of the direction of travel are not announced as upcoming. */
-    private static final float ALERT_AHEAD_TOLERANCE_DEGREES = 80f;
+    private static final float ALERT_AHEAD_TOLERANCE_DEGREES = 60f;
 
     /** Shared proximity gate for both checkRouteHazards and checkRouteSafetyAlerts: requires the
      *  vehicle to actually be moving (not parked/stopped, via the shared isCurrentlyMoving result)

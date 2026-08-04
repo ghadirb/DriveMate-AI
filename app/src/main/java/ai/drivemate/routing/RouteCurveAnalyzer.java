@@ -19,8 +19,12 @@ import ai.drivemate.model.RouteSafetyAlert;
 public final class RouteCurveAnalyzer {
     private RouteCurveAnalyzer() { }
 
-    private static final double MIN_SEGMENT_METERS = 20d;
-    private static final double SHARP_TURN_DEGREES = 55d;
+    private static final double MIN_SEGMENT_METERS = 25d;
+    /** A plain city-street corner or T-junction routinely bends 60-90 degrees and is already
+     *  announced as a normal turn instruction by the route step itself; this analyzer exists to
+     *  flag something extra - a genuinely sharp, sustained curve worth a separate safety alert -
+     *  not every ordinary intersection. */
+    private static final double SHARP_TURN_DEGREES = 70d;
 
     public static List<RouteSafetyAlert> sharpCurves(List<RoutePoint> geometry) {
         ArrayList<RouteSafetyAlert> curves = new ArrayList<>();
@@ -34,7 +38,8 @@ public final class RouteCurveAnalyzer {
             Location b = toLocation(current);
             Location c = toLocation(next);
             float segmentMeters = a.distanceTo(b);
-            if (segmentMeters < MIN_SEGMENT_METERS) continue;
+            float outgoingMeters = b.distanceTo(c);
+            if (segmentMeters < MIN_SEGMENT_METERS || outgoingMeters < MIN_SEGMENT_METERS) continue;
             float bearingIn = a.bearingTo(b);
             float bearingOut = b.bearingTo(c);
             double delta = Math.abs(angleDifference(bearingIn, bearingOut));
