@@ -305,10 +305,4 @@ public class NavigationEngine {
         return location;
     }
 
-    private Location asLocation(RoutePoint point) {
-        Location location = new Location("destination");
-        location.setLatitude(point.latitude);
-        location.setLongitude(point.longitude);
-        return location;
-    }
 }
