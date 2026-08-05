@@ -55,6 +55,7 @@ import ai.drivemate.routing.MapIrRoutingProvider;
 import ai.drivemate.routing.NeshanRoutingProvider;
 import ai.drivemate.routing.OpenRouteServiceRoutingProvider;
 import ai.drivemate.routing.NavigationEngine;
+import ai.drivemate.routing.OfflineRoadSafetyProvider;
 import ai.drivemate.routing.OverpassPoiProvider;
 import ai.drivemate.routing.PlaceSearchRepository;
 import ai.drivemate.routing.PoiCategory;
@@ -140,10 +141,10 @@ public class MainActivity extends Activity {
     private RouteResult activeRoute;
     /** Ordered intermediate stops for the active trip. Kept through reroutes and map reopening. */
     private List<RoutePoint> activeWaypoints = new ArrayList<>();
-    /** Community-mapped OpenStreetMap speed camera / speed bump / police-checkpoint points along
-     *  the active route. Neshan and map.ir do not expose this through any public developer API,
-     *  so it is the only source available; see OverpassPoiProvider for coverage caveats. */
+    /** Community-mapped OpenStreetMap police/checkpoint points along the active route. Camera,
+     * speed-bump and stop-sign records now come from the bundled offline safety database first. */
     private final OverpassPoiProvider hazardProvider = new OverpassPoiProvider();
+    private OfflineRoadSafetyProvider offlineRoadSafetyProvider;
     private List<double[]> activeRouteHazards = new ArrayList<>();
     private boolean[] activeRouteHazardAnnounced = new boolean[0];
     private int hazardFetchRequestId;
@@ -267,6 +268,7 @@ public class MainActivity extends Activity {
         writeAutomaticBackup();
         voicePlayer = new VoiceGuidancePlayer(this);
         locationTracker = new DeviceLocationTracker(this);
+        offlineRoadSafetyProvider = new OfflineRoadSafetyProvider(this);
         neshanRoutingProvider = new NeshanRoutingProvider(BuildConfig.NESHAN_API_KEY);
         mapIrRoutingProvider = new MapIrRoutingProvider(BuildConfig.MAPIR_API_KEY);
         openRouteServiceRoutingProvider = new OpenRouteServiceRoutingProvider(BuildConfig.OPENROUTESERVICE_API_KEY);
@@ -2330,11 +2332,9 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Loads community-mapped OpenStreetMap speed camera / speed bump / police-checkpoint points
-     * along the given route in the background. Neither Neshan nor map.ir expose this data through
-     * any public developer API, so OpenStreetMap/Overpass is the only source; results are
-     * best-effort and depend entirely on what contributors have mapped for that road (see
-     * OverpassPoiProvider). This never represents live police presence.
+     * Loads only community-mapped police/checkpoint points from Overpass. Camera, speed-bump and
+     * stop-sign records are supplied through RouteSafetyAlert from the offline database, with an
+     * Overpass fallback there only when the offline lookup has no matching data.
      */
     private void fetchRouteHazards(RouteResult route) {
         activeRouteHazards = new ArrayList<>();
@@ -2351,18 +2351,28 @@ public class MainActivity extends Activity {
             }
             runOnUiThread(() -> {
                 if (requestId != hazardFetchRequestId) return;
-                activeRouteHazards = hazards == null ? new ArrayList<>() : hazards;
+                activeRouteHazards = onlyPoliceHazards(hazards);
                 activeRouteHazardAnnounced = new boolean[activeRouteHazards.size()];
             });
         }).start();
         fetchRouteSpeedLimits(route);
     }
 
+    private List<double[]> onlyPoliceHazards(List<double[]> hazards) {
+        ArrayList<double[]> policeHazards = new ArrayList<>();
+        if (hazards == null) return policeHazards;
+        for (double[] hazard : hazards) {
+            if (hazard != null && hazard.length >= 3 && hazard[2] == OverpassPoiProvider.HAZARD_POLICE) {
+                policeHazards.add(hazard);
+            }
+        }
+        return policeHazards;
+    }
+
     /**
-     * Loads sharp curves (pure geometry, no network), best-effort OpenStreetMap railway
-     * crossings / school zones / hazard-tagged points, and OSM way tags for tunnels, narrow
-     * bridges and steep inclines along the given route. See RouteSafetyAlert and
-     * OverpassPoiProvider for the honesty rules behind each type.
+     * Loads sharp curves plus safety points from the bundled offline OSM database. Overpass is
+     * only a fallback when the database has no matching point, or a completer for road-way
+     * feature types (tunnel, narrow bridge and steep grade) absent from that database.
      */
     private void fetchRouteSafetyAlerts(RouteResult route) {
         activeRouteSafetyAlerts = new ArrayList<>();
@@ -2371,13 +2381,27 @@ public class MainActivity extends Activity {
         final List<RoutePoint> geometry = route.geometry;
         new Thread(() -> {
             ArrayList<RouteSafetyAlert> merged = new ArrayList<>(RouteCurveAnalyzer.sharpCurves(geometry));
+            List<RouteSafetyAlert> offlineAlerts = new ArrayList<>();
             try {
-                merged.addAll(hazardProvider.pointSafetyFeaturesNear(geometry));
+                offlineAlerts = offlineRoadSafetyProvider.safetyAlertsNear(geometry);
+                addUniqueSafetyAlerts(merged, offlineAlerts);
             } catch (Exception exception) {
-                android.util.Log.w("DriveMateSafety", "Point safety feature lookup failed: " + exception.getMessage());
+                android.util.Log.w("DriveMateSafety", "Offline safety database lookup failed: " + exception.getMessage());
+            }
+            if (offlineAlerts.isEmpty()) {
+                try {
+                    addOverpassHazardFallbackAsSafety(merged, hazardProvider.hazardsNear(geometry));
+                } catch (Exception exception) {
+                    android.util.Log.w("DriveMateSafety", "Fallback hazard lookup failed: " + exception.getMessage());
+                }
+                try {
+                    addUniqueSafetyAlerts(merged, hazardProvider.pointSafetyFeaturesNear(geometry));
+                } catch (Exception exception) {
+                    android.util.Log.w("DriveMateSafety", "Fallback point safety lookup failed: " + exception.getMessage());
+                }
             }
             try {
-                merged.addAll(hazardProvider.roadWayFeaturesNear(geometry));
+                addUniqueSafetyAlerts(merged, hazardProvider.roadWayFeaturesNear(geometry));
             } catch (Exception exception) {
                 android.util.Log.w("DriveMateSafety", "Road way feature lookup failed: " + exception.getMessage());
             }
@@ -2387,6 +2411,48 @@ public class MainActivity extends Activity {
                 activeRouteSafetyAlertAnnounced = new boolean[merged.size()];
             });
         }).start();
+    }
+
+    private void addOverpassHazardFallbackAsSafety(List<RouteSafetyAlert> target, List<double[]> hazards) {
+        if (hazards == null) return;
+        ArrayList<RouteSafetyAlert> converted = new ArrayList<>();
+        for (double[] hazard : hazards) {
+            if (hazard == null || hazard.length < 3) continue;
+            RouteSafetyAlert.Type type;
+            if (hazard[2] == OverpassPoiProvider.HAZARD_CAMERA) {
+                type = RouteSafetyAlert.Type.SPEED_CAMERA;
+            } else if (hazard[2] == OverpassPoiProvider.HAZARD_SPEED_BUMP) {
+                type = RouteSafetyAlert.Type.SPEED_BUMP;
+            } else if (hazard[2] == OverpassPoiProvider.HAZARD_TRAFFIC_SIGN) {
+                type = RouteSafetyAlert.Type.STOP_SIGN;
+            } else {
+                continue;
+            }
+            converted.add(new RouteSafetyAlert(type, hazard[0], hazard[1], 0d));
+        }
+        addUniqueSafetyAlerts(target, converted);
+    }
+
+    /** Removes duplicate points returned by overlapping offline query boxes or a fallback source. */
+    private void addUniqueSafetyAlerts(List<RouteSafetyAlert> target, List<RouteSafetyAlert> candidates) {
+        if (candidates == null) return;
+        for (RouteSafetyAlert candidate : candidates) {
+            boolean duplicate = false;
+            for (RouteSafetyAlert existing : target) {
+                if (existing.type != candidate.type) continue;
+                Location first = new Location("safety_alert");
+                first.setLatitude(existing.latitude);
+                first.setLongitude(existing.longitude);
+                Location second = new Location("safety_alert");
+                second.setLatitude(candidate.latitude);
+                second.setLongitude(candidate.longitude);
+                if (first.distanceTo(second) <= 35f) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) target.add(candidate);
+        }
     }
 
     /** Fetches live traffic incidents once for the given route in the background, and reschedules
@@ -2771,6 +2837,21 @@ public class MainActivity extends Activity {
                 speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
                         "پیچ نسبتاً تندی بر اساس هندسه مسیر در جلوی راه تشخیص داده شده است. یک هشدار فارسی بسیار کوتاه، طبیعی و آرام برای کاهش سرعت بگو.",
                         "dangerous_curve_ahead", "پیچ نسبتاً تند در این نزدیکی است؛ سرعت را کم کنید.", 10_000L);
+                break;
+            case SPEED_CAMERA:
+                speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
+                        "داده آفلاین OpenStreetMap درباره دوربین سرعت در این نزدیکی هشدار داده است. یک هشدار فارسی بسیار کوتاه، طبیعی و آرام بگو.",
+                        "speed_camera", "دوربین سرعت احتمالی در این نزدیکی است.", 10_000L);
+                break;
+            case SPEED_BUMP:
+                speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
+                        "داده آفلاین OpenStreetMap درباره دست‌انداز یا سرعت‌گیر در این نزدیکی هشدار داده است. یک هشدار فارسی بسیار کوتاه، طبیعی و آرام بگو.",
+                        "speed_bump_warning", "دست‌انداز یا سرعت‌گیر احتمالی در این نزدیکی است.", 10_000L);
+                break;
+            case STOP_SIGN:
+                speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
+                        "داده آفلاین OpenStreetMap به تابلوی ایست در این نزدیکی اشاره کرده است. یک هشدار فارسی بسیار کوتاه، طبیعی و آرام بگو.",
+                        "stop_ahead", "تابلوی ایست در این نزدیکی است.", 10_000L);
                 break;
             case STEEP_GRADE: {
                 String direction = alert.detail > 0 ? "صعودی" : "نزولی";

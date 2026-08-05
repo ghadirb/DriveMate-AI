@@ -16,7 +16,10 @@ public final class RouteSafetyAlert {
         TUNNEL,
         NARROW_BRIDGE,
         STEEP_GRADE,
-        SHARP_CURVE
+        SHARP_CURVE,
+        SPEED_CAMERA,
+        SPEED_BUMP,
+        STOP_SIGN
     }
 
     public final Type type;
