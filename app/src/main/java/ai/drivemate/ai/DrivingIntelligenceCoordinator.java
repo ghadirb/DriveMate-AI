@@ -20,6 +20,12 @@ public class DrivingIntelligenceCoordinator {
 
     private enum State { PENDING, RUNNING, FALLBACK, CANCELLED, READY }
     private static final long FULL_MODE_SAFETY_WAIT_MS = 1500L;
+    /** Turn-by-turn directions are time-critical in a way conversational answers are not: the
+     *  perfectly good local instruction text is available instantly, so waiting up to 3 seconds
+     *  hoping the AI phrases it more naturally is a bad trade when turns come every few seconds in
+     *  a dense street network - the announcement can end up arriving late (after the turn) or get
+     *  pre-empted by the next instruction's own request before it was ever heard. */
+    private static final long FULL_MODE_DRIVING_WAIT_MS = 1200L;
     private static final long FULL_MODE_STANDARD_WAIT_MS = 3000L;
     private static final long ECONOMY_ONLINE_COOLDOWN_MS = 45_000L; // 45-60s suggested
     private static final long ECONOMY_ONLINE_WAIT_MS = 2_500L;
@@ -152,7 +158,11 @@ public class DrivingIntelligenceCoordinator {
     }
 
     private long waitBudget(Priority priority) {
-        return priority == Priority.SAFETY ? FULL_MODE_SAFETY_WAIT_MS : FULL_MODE_STANDARD_WAIT_MS;
+        switch (priority) {
+            case SAFETY: return FULL_MODE_SAFETY_WAIT_MS;
+            case DRIVING: return FULL_MODE_DRIVING_WAIT_MS;
+            default: return FULL_MODE_STANDARD_WAIT_MS;
+        }
     }
 
     private void dispatch(Request request, String text, boolean online) {

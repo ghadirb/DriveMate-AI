@@ -27,6 +27,7 @@ import android.text.style.StyleSpan;
 import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
@@ -235,6 +236,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             originLongitude = lastKnown != null ? lastKnown.getLongitude() : DEFAULT_LONGITUDE;
         }
         navigationMode = getIntent().getBooleanExtra(EXTRA_NAVIGATION_MODE, false);
+        if (navigationMode) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         navigationRouteIndex = Math.max(0, getIntent().getIntExtra(EXTRA_NAVIGATION_ROUTE_INDEX, 0));
         restoreNavigationWaypoints();
         String neshanKey = getIntent().getStringExtra(EXTRA_NESHAN_KEY);
@@ -1986,8 +1988,20 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             // cadence, and the hidden route/save buttons all key off that flag, so without
             // clearing it here the screen stays stuck looking like navigation is still running.
             navigationMode = false;
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             followVehicle = false;
             navigationCameraEnabled = false;
+            // Nothing previously removed the drawn route line itself - the map kept showing the
+            // route even though navigation had fully stopped, until the activity happened to be
+            // recreated (e.g. leaving and returning) and started fresh with no polyline at all.
+            if (map != null) {
+                for (Polyline polyline : alternateRoutePolylines) map.removePolyline(polyline);
+                alternateRoutePolylines.clear();
+                if (routePolyline != null) {
+                    map.removePolyline(routePolyline);
+                    routePolyline = null;
+                }
+            }
             applyMapOrientation(0f, 0f, 0.3f);
             if (map != null) {
                 map.moveCamera(new LatLng(originLatitude, originLongitude), 0.3f);
@@ -2362,7 +2376,15 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     @Override protected void onPause() {
-        if (locationManager != null) {
+        // While actively navigating, a pause is very often transient (screen timeout despite
+        // FLAG_KEEP_SCREEN_ON not always being honored by every OEM, an incoming call, the
+        // notification shade) rather than the driver actually leaving this screen. Cutting
+        // location updates here meant this activity's own NavigationEngine instance - which drives
+        // arrival detection, turn advancement, and the on-screen state - went completely silent
+        // until the next onResume, which is why the map could stay stuck showing an active route
+        // long after the trip had actually ended (voiced from MainActivity's separate engine)
+        // until the driver happened to leave and return, finally delivering a fresh fix here too.
+        if (!navigationMode && locationManager != null) {
             try {
                 locationManager.removeUpdates(this);
             } catch (SecurityException ignored) {
