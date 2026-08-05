@@ -12,6 +12,9 @@ public class NavigationEngine {
         void onInstruction(RouteStep step);
         void onOffRoute();
         void onArrived();
+        /** Fired once when the next intermediate stop is close enough to announce. This is
+         * separate from onWaypointReached(), so a driver can hear about a stop before arriving. */
+        default void onWaypointApproaching(RouteStep step, int waypointOrdinal) { }
         /** Fired once, when the driver reaches an intermediate stop (see RouteStep.waypointOrdinal)
          *  rather than the final destination. Navigation continues on the same route afterward;
          *  this never stops the engine. Default no-op so existing Listener implementations compile
@@ -23,11 +26,15 @@ public class NavigationEngine {
     private int nextStep;
     private long lastOffRouteCallbackAt;
     private Listener listener;
+    /** The actual requested final coordinate. Provider maneuver endpoints can be several streets
+     * away from it, so arrival must never depend solely on the final maneuver's coordinate. */
+    private RoutePoint finalDestination;
     private Location targetReference;
     private float targetDistanceAtReference;
     private int offRouteSamples;
     private long lastInstructionAt;
     private boolean currentInstructionAnnounced;
+    private int announcedWaypointIndex = -1;
     private boolean instructionAnnouncementsEnabled = true;
     private static final long MIN_MS_BETWEEN_INSTRUCTIONS = 1800L;
     private static final float MAX_ACCURACY_FOR_ADVANCE_METERS = 60f;
@@ -54,14 +61,21 @@ public class NavigationEngine {
      * hundreds of meters ahead must never be mistaken for an off-route position at trip start.
      */
     public void start(RouteResult route, Listener listener, Location currentLocation) {
+        start(route, listener, currentLocation, null);
+    }
+
+    /** Starts navigation with the exact final destination requested by the user. */
+    public void start(RouteResult route, Listener listener, Location currentLocation, RoutePoint finalDestination) {
         this.route = route;
         this.listener = listener;
+        this.finalDestination = finalDestination;
         this.nextStep = 0;
         this.lastOffRouteCallbackAt = 0L;
         this.offRouteSamples = 0;
         this.advanceConfirmSamples = 0;
         this.lastInstructionAt = 0L;
         this.currentInstructionAnnounced = false;
+        this.announcedWaypointIndex = -1;
         this.instructionAnnouncementsEnabled = true;
         updateTargetReference(currentLocation);
     }
@@ -69,9 +83,11 @@ public class NavigationEngine {
     public void stop() {
         route = null;
         listener = null;
+        finalDestination = null;
         targetReference = null;
         offRouteSamples = 0;
         currentInstructionAnnounced = false;
+        announcedWaypointIndex = -1;
         instructionAnnouncementsEnabled = true;
     }
     public boolean isNavigating() { return route != null; }
@@ -95,18 +111,37 @@ public class NavigationEngine {
         // engine would keep waiting to reach maneuver points on a path that was never taken, even
         // while standing at the actual destination.
         RouteStep destinationStep = route.steps.get(route.steps.size() - 1);
-        float metersToDestination = location.distanceTo(asLocation(destinationStep));
+        float metersToDestination = location.distanceTo(finalDestination == null
+                ? asLocation(destinationStep) : asLocation(finalDestination));
         if (metersToDestination < FINAL_ARRIVAL_RADIUS_METERS) {
             Listener callback = listener;
             stop();
             callback.onArrived();
             return;
         }
+        int nextWaypointIndex = nextWaypointIndex();
+        if (nextWaypointIndex >= 0) {
+            RouteStep waypoint = route.steps.get(nextWaypointIndex);
+            float metersToWaypoint = location.distanceTo(asLocation(waypoint));
+            float waypointAnnounceDistance = Math.max(90f, Math.min(260f,
+                    Math.max(120f, waypoint.distanceMeters * 0.65f)));
+            if (instructionAnnouncementsEnabled && announcedWaypointIndex != nextWaypointIndex
+                    && metersToWaypoint <= waypointAnnounceDistance) {
+                announcedWaypointIndex = nextWaypointIndex;
+                listener.onWaypointApproaching(waypoint, waypoint.waypointOrdinal);
+            }
+            // A shortcut can reach a stop without ever touching all of the provider's maneuver
+            // points. Advance directly past that stop so navigation continues to the next one.
+            if (accuracyOk(location) && metersToWaypoint <= FINAL_ARRIVAL_RADIUS_METERS) {
+                advancePastWaypoint(nextWaypointIndex, location, waypoint);
+                return;
+            }
+        }
         RouteStep target = route.steps.get(Math.min(nextStep, route.steps.size() - 1));
         float meters = location.distanceTo(asLocation(target));
         // Announce before reaching the maneuver. A no-map experience needs the next action in
         // advance, while route progression still waits until the maneuver endpoint is reached.
-        boolean accuracyOk = !location.hasAccuracy() || location.getAccuracy() <= MAX_ACCURACY_FOR_ADVANCE_METERS;
+        boolean accuracyOk = accuracyOk(location);
         boolean cooldownOk = System.currentTimeMillis() - lastInstructionAt >= MIN_MS_BETWEEN_INSTRUCTIONS;
         float announceDistance = Math.max(70f, Math.min(250f, Math.max(100f, target.distanceMeters * 0.55f)));
         if (instructionAnnouncementsEnabled && accuracyOk && cooldownOk && !currentInstructionAnnounced && meters <= announceDistance) {
@@ -124,10 +159,13 @@ public class NavigationEngine {
             if (advanceConfirmSamples < STEP_ADVANCE_CONFIRM_SAMPLES) return;
             advanceConfirmSamples = 0;
             RouteStep justReached = target;
+            if (justReached.waypointOrdinal >= 0) {
+                advancePastWaypoint(nextStep, location, justReached);
+                return;
+            }
             nextStep = Math.min(nextStep + 1, route.steps.size() - 1);
             currentInstructionAnnounced = false;
             updateTargetReference(location);
-            if (justReached.waypointOrdinal >= 0) listener.onWaypointReached(justReached, justReached.waypointOrdinal);
             RouteStep next = route.steps.get(Math.min(nextStep, route.steps.size() - 1));
             float nextDistance = location.distanceTo(asLocation(next));
             float nextAnnounceDistance = Math.max(90f, Math.min(260f, Math.max(120f, next.distanceMeters * 0.65f)));
@@ -193,6 +231,29 @@ public class NavigationEngine {
         return offRouteSamples >= 3;
     }
 
+    private boolean accuracyOk(Location location) {
+        return !location.hasAccuracy() || location.getAccuracy() <= MAX_ACCURACY_FOR_ADVANCE_METERS;
+    }
+
+    private int nextWaypointIndex() {
+        if (route == null || route.steps == null) return -1;
+        for (int index = Math.max(0, nextStep); index < route.steps.size(); index++) {
+            if (route.steps.get(index).waypointOrdinal >= 0) return index;
+        }
+        return -1;
+    }
+
+    private void advancePastWaypoint(int waypointIndex, Location location, RouteStep waypoint) {
+        nextStep = Math.min(waypointIndex + 1, route.steps.size() - 1);
+        currentInstructionAnnounced = false;
+        updateTargetReference(location);
+        listener.onWaypointReached(waypoint, waypoint.waypointOrdinal);
+        RouteStep next = route.steps.get(Math.min(nextStep, route.steps.size() - 1));
+        float nextDistance = location.distanceTo(asLocation(next));
+        float nextAnnounceDistance = Math.max(90f, Math.min(260f, Math.max(120f, next.distanceMeters * 0.65f)));
+        if (instructionAnnouncementsEnabled && nextDistance <= nextAnnounceDistance) announceCurrentInstruction();
+    }
+
     private float distanceToRoute(Location location) {
         if (route == null || route.geometry == null || route.geometry.isEmpty()) return Float.MAX_VALUE;
         if (route.geometry.size() == 1) return location.distanceTo(asLocation(route.geometry.get(0)));
@@ -241,6 +302,13 @@ public class NavigationEngine {
         Location location = new Location("route");
         location.setLatitude(step.latitude);
         location.setLongitude(step.longitude);
+        return location;
+    }
+
+    private Location asLocation(RoutePoint point) {
+        Location location = new Location("destination");
+        location.setLatitude(point.latitude);
+        location.setLongitude(point.longitude);
         return location;
     }
 }

@@ -172,6 +172,16 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
      *  callbacks (which can each fire independently) don't show it twice. Navigation itself is
      *  never stopped for this - the engine keeps tracking against the last known fix. */
     private boolean gpsWarningActive;
+    /** The map receives GPS and network-provider callbacks directly, so retain the last accepted
+     * fix here too; otherwise a weak network fix can visibly jump the vehicle/route in alleys. */
+    private Location lastAcceptedMapLocation;
+    private boolean routeNeedsRefreshFromCurrentLocation;
+    private boolean routeRefreshInFlight;
+    private long lastRouteRefreshAttemptAt;
+    private static final long ROUTE_REFRESH_RETRY_MS = 15_000L;
+    private Location lastRouteRenderLocation;
+    private long lastRouteRenderAt;
+    private static final long NAVIGATION_ROUTE_REDRAW_INTERVAL_MS = 2_500L;
     private PoiCategory activeNearbyCategory;
     private final List<Marker> nearbyMarkers = new ArrayList<>();
     private final EnumSet<PoiCategory> enabledPoiLayers = EnumSet.noneOf(PoiCategory.class);
@@ -1205,6 +1215,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         routeOptions = new ArrayList<>();
         routeOptions.add(cached);
         selectedRoute = cached;
+        routeNeedsRefreshFromCurrentLocation = true;
         showRoutePreview(cached);
         startTurnByTurn(cached);
         Toast.makeText(this, "اتصال اینترنت برقرار نیست؛ آخرین مسیر ذخیره‌شده نمایش داده شد.", Toast.LENGTH_LONG).show();
@@ -1553,12 +1564,60 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     private ArrayList<LatLng> routePoints(RouteResult route) {
         ArrayList<LatLng> points = new ArrayList<>();
-        for (RoutePoint point : route.geometry) points.add(new LatLng(point.latitude, point.longitude));
+        int firstPoint = 0;
+        if (navigationMode && route == selectedRoute && !route.geometry.isEmpty()) {
+            Location current = currentMapLocation();
+            int nearestIndex = closestRouteGeometryIndex(route.geometry, current);
+            if (nearestIndex >= 0) {
+                // Always draw the selected navigation line from the live device position, not the
+                // origin used when this route was fetched or restored from the offline cache.
+                points.add(new LatLng(current.getLatitude(), current.getLongitude()));
+                firstPoint = nearestIndex;
+            }
+        }
+        for (int index = firstPoint; index < route.geometry.size(); index++) {
+            RoutePoint point = route.geometry.get(index);
+            points.add(new LatLng(point.latitude, point.longitude));
+        }
         if (points.size() < 2) {
-            points.add(new LatLng(originLatitude, originLongitude));
+            Location current = navigationMode && route == selectedRoute ? currentMapLocation() : null;
+            points.add(current == null ? new LatLng(originLatitude, originLongitude)
+                    : new LatLng(current.getLatitude(), current.getLongitude()));
             for (RouteStep step : route.steps) points.add(new LatLng(step.latitude, step.longitude));
         }
         return points;
+    }
+
+    private int closestRouteGeometryIndex(List<RoutePoint> geometry, Location current) {
+        if (current == null || geometry == null || geometry.isEmpty()) return -1;
+        int nearestIndex = -1;
+        float nearestMeters = Float.MAX_VALUE;
+        for (int index = 0; index < geometry.size(); index++) {
+            RoutePoint point = geometry.get(index);
+            Location candidate = new Location("route");
+            candidate.setLatitude(point.latitude);
+            candidate.setLongitude(point.longitude);
+            float meters = current.distanceTo(candidate);
+            if (meters < nearestMeters) {
+                nearestMeters = meters;
+                nearestIndex = index;
+            }
+        }
+        return nearestIndex;
+    }
+
+    private boolean shouldRedrawNavigationRoute(Location location) {
+        if (location == null || selectedRoute == null) return false;
+        long now = System.currentTimeMillis();
+        if (lastRouteRenderLocation == null || now - lastRouteRenderAt >= NAVIGATION_ROUTE_REDRAW_INTERVAL_MS) {
+            lastRouteRenderLocation = new Location(location);
+            lastRouteRenderAt = now;
+            return true;
+        }
+        if (lastRouteRenderLocation.distanceTo(location) < 8f) return false;
+        lastRouteRenderLocation = new Location(location);
+        lastRouteRenderAt = now;
+        return true;
     }
 
     /** Starts real turn-by-turn tracking for the active route: shows the first maneuver right
@@ -1570,7 +1629,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         current.setLatitude(originLatitude);
         current.setLongitude(originLongitude);
         current.setBearing(lastBearing);
-        navigationEngine.start(route, this, current);
+        navigationEngine.start(route, this, current, new RoutePoint(destination.latitude, destination.longitude));
         turnBannerContainer.setVisibility(View.VISIBLE);
         turnDistanceText.setText("");
         turnStepsExpanded = false;
@@ -1914,17 +1973,56 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
      *  would silently drop every remaining intermediate stop from the recomputed route, so a
      *  waypoint reached after any reroute would never be detected or announced again. */
     private void recalculateActiveRoute() {
-        if (destination == null) return;
-        routeRepository.getRoute(originLatitude, originLongitude, waypointCoordinates(),
+        Location current = currentMapLocation();
+        if (destination == null || current == null) return;
+        refreshNavigationRouteFrom(current, true);
+    }
+
+    private void refreshNavigationRouteFrom(Location current, boolean force) {
+        if (!navigationMode || destination == null || current == null || routeRefreshInFlight) return;
+        long now = System.currentTimeMillis();
+        if (!force && now - lastRouteRefreshAttemptAt < ROUTE_REFRESH_RETRY_MS) return;
+        routeRefreshInFlight = true;
+        lastRouteRefreshAttemptAt = now;
+        final double latitude = current.getLatitude();
+        final double longitude = current.getLongitude();
+        routeRepository.getRoute(latitude, longitude, waypointCoordinates(),
                 destination.latitude, destination.longitude,
                 route -> runOnUiThread(() -> {
+                    routeRefreshInFlight = false;
+                    if (!navigationMode || destination == null) return;
                     routeOptions = new ArrayList<>();
                     routeOptions.add(route);
                     selectedRoute = route;
+                    routeNeedsRefreshFromCurrentLocation = false;
                     showRoutePreview(route);
                     startTurnByTurn(route);
                 }),
-                error -> runOnUiThread(() -> turnInstructionText.setText("بازیابی مسیر انجام نشد: " + error)));
+                error -> runOnUiThread(() -> {
+                    routeRefreshInFlight = false;
+                    routeNeedsRefreshFromCurrentLocation = true;
+                    if (turnInstructionText != null && force) {
+                        turnInstructionText.setText("بازیابی مسیر انجام نشد: " + error);
+                    }
+                }));
+    }
+
+    private Location currentMapLocation() {
+        if (lastAcceptedMapLocation != null) return new Location(lastAcceptedMapLocation);
+        Location known = bestKnownDeviceLocation();
+        if (known != null) return known;
+        Location fallback = new Location("map_origin");
+        fallback.setLatitude(originLatitude);
+        fallback.setLongitude(originLongitude);
+        return fallback;
+    }
+
+    @Override public void onWaypointApproaching(RouteStep step, int ordinal) {
+        runOnUiThread(() -> {
+            turnInstructionText.setText("توقف میانی " + (ordinal + 1) + " نزدیک است.");
+            turnArrowText.setText("●");
+            renderLaneGuidance(null);
+        });
     }
 
     @Override public void onInstruction(RouteStep step) {
@@ -2405,9 +2503,11 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     @Override public void onProviderEnabled(String provider) {
-        if (!gpsWarningActive) return;
-        gpsWarningActive = false;
-        Toast.makeText(this, "موقعیت مکانی دوباره در دسترس است.", Toast.LENGTH_SHORT).show();
+        if (gpsWarningActive) {
+            gpsWarningActive = false;
+            Toast.makeText(this, "موقعیت مکانی دوباره در دسترس است.", Toast.LENGTH_SHORT).show();
+        }
+        if (routeNeedsRefreshFromCurrentLocation) refreshNavigationRouteFrom(currentMapLocation(), false);
     }
 
     @Override protected void onDestroy() {
@@ -2417,7 +2517,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     @Override public void onLocationChanged(Location location) {
+        if (!isUsableMapLocation(location)) return;
         gpsWarningActive = false;
+        lastAcceptedMapLocation = new Location(location);
         originLatitude = location.getLatitude();
         originLongitude = location.getLongitude();
         if (location.hasBearing()) {
@@ -2429,7 +2531,11 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             if (selectedRoute != null) updateRoadSpeedLimit(location.getLatitude(), location.getLongitude());
             if (navigationMode && navigationEngine.isNavigating()) {
                 navigationEngine.onLocation(location);
-                updateTurnBanner(location);
+                if (navigationMode && navigationEngine.isNavigating()) {
+                    updateTurnBanner(location);
+                    if (routeNeedsRefreshFromCurrentLocation) refreshNavigationRouteFrom(location, false);
+                    if (shouldRedrawNavigationRoute(location)) drawAllRoutes();
+                }
             }
             if (navigationMode && followVehicle && navigationCameraEnabled) {
                 updateNavigationCamera();
@@ -2438,5 +2544,19 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                 map.setZoom(17f, 0.35f);
             }
         });
+    }
+
+    private boolean isUsableMapLocation(Location candidate) {
+        if (candidate == null || (candidate.hasAccuracy() && candidate.getAccuracy() > 80f)) return false;
+        if (lastAcceptedMapLocation == null) return true;
+        long elapsedMs = candidate.getTime() - lastAcceptedMapLocation.getTime();
+        if (elapsedMs < -2_000L) return false;
+        elapsedMs = Math.max(1_000L, elapsedMs);
+        float candidateAccuracy = candidate.hasAccuracy() ? candidate.getAccuracy() : 50f;
+        float previousAccuracy = lastAcceptedMapLocation.hasAccuracy() ? lastAcceptedMapLocation.getAccuracy() : 50f;
+        if (elapsedMs < 12_000L && candidateAccuracy > previousAccuracy + 25f) return false;
+        float allowedMeters = elapsedMs / 1000f * 55f + Math.max(candidateAccuracy, previousAccuracy) + 20f;
+        return lastAcceptedMapLocation.distanceTo(candidate) <= allowedMeters
+                || candidateAccuracy + 15f < previousAccuracy;
     }
 }

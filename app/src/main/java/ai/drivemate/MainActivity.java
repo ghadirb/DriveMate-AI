@@ -915,10 +915,13 @@ public class MainActivity extends Activity {
                         @Override public void onArrived() {
                             runOnUiThread(() -> finishTrip(destination));
                         }
+                        @Override public void onWaypointApproaching(RouteStep step, int ordinal) {
+                            runOnUiThread(() -> announceWaypointApproaching(step, ordinal));
+                        }
                         @Override public void onWaypointReached(RouteStep step, int ordinal) {
                             runOnUiThread(() -> announceWaypointReached(step, ordinal));
                         }
-                    }, origin);
+                    }, origin, new RoutePoint(destination.latitude, destination.longitude));
                     rerouteInFlight = false;
                     navigationEngine.setInstructionAnnouncementsEnabled(false);
                     // A recalculation must resume the next maneuver quickly; otherwise a turn in
@@ -2172,8 +2175,11 @@ public class MainActivity extends Activity {
             @Override public void onInstruction(RouteStep step) { runOnUiThread(() -> announceRouteStep(step)); }
             @Override public void onOffRoute() { runOnUiThread(() -> rerouteFromCurrentLocation()); }
             @Override public void onArrived() { runOnUiThread(() -> finishTrip(destination)); }
+            @Override public void onWaypointApproaching(RouteStep step, int ordinal) {
+                runOnUiThread(() -> announceWaypointApproaching(step, ordinal));
+            }
             @Override public void onWaypointReached(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointReached(step, ordinal)); }
-        }, locationTracker.getLastLocation());
+        }, locationTracker.getLastLocation(), new RoutePoint(destination.latitude, destination.longitude));
         setStatus("مسیر با ترافیک به‌روزرسانی شد؛ حدود " + Math.max(1, gainSeconds / 60) + " دقیقه سریع‌تر است.");
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
                 "مسیر ترافیک‌محور به " + destination.name + " حدود " + Math.max(1, gainSeconds / 60) + " دقیقه زمان بهتری دارد. یک هشدار صوتی بسیار کوتاه و آرام بگو.",
@@ -2954,6 +2960,16 @@ public class MainActivity extends Activity {
                 "راننده به توقف میانی شماره " + humanNumber
                         + " رسیده است. یک پیام فارسی کوتاه و طبیعی بگو که مسیر تا مقصد نهایی ادامه دارد.",
                 "continue_route", fallback, 12_000L);
+        setStatus(fallback);
+    }
+
+    private void announceWaypointApproaching(RouteStep step, int ordinal) {
+        int humanNumber = ordinal + 1;
+        String fallback = "توقف میانی " + humanNumber + " نزدیک است.";
+        speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
+                "راننده در حال نزدیک شدن به توقف میانی شماره " + humanNumber
+                        + " است. یک هشدار فارسی بسیار کوتاه و مناسب رانندگی بگو.",
+                "continue_route", fallback, 10_000L);
         setStatus(fallback);
     }
 
