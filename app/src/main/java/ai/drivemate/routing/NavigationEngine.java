@@ -88,14 +88,22 @@ public class NavigationEngine {
     public void onLocation(Location location) {
         if (route == null || listener == null) return;
         if (route.steps.isEmpty()) return;
-        RouteStep target = route.steps.get(Math.min(nextStep, route.steps.size() - 1));
-        float meters = location.distanceTo(asLocation(target));
-        if (nextStep == route.steps.size() - 1 && meters < FINAL_ARRIVAL_RADIUS_METERS) {
+        // Checked independently of nextStep: sequential step advancement (below) requires getting
+        // close to each intermediate maneuver point in order, which never happens if the traveled
+        // path diverges from the routed streets (a pedestrian shortcut through an alley/park, a
+        // driver cutting through a lot). Without this, arrival could never fire in that case - the
+        // engine would keep waiting to reach maneuver points on a path that was never taken, even
+        // while standing at the actual destination.
+        RouteStep destinationStep = route.steps.get(route.steps.size() - 1);
+        float metersToDestination = location.distanceTo(asLocation(destinationStep));
+        if (metersToDestination < FINAL_ARRIVAL_RADIUS_METERS) {
             Listener callback = listener;
             stop();
             callback.onArrived();
             return;
         }
+        RouteStep target = route.steps.get(Math.min(nextStep, route.steps.size() - 1));
+        float meters = location.distanceTo(asLocation(target));
         // Announce before reaching the maneuver. A no-map experience needs the next action in
         // advance, while route progression still waits until the maneuver endpoint is reached.
         boolean accuracyOk = !location.hasAccuracy() || location.getAccuracy() <= MAX_ACCURACY_FOR_ADVANCE_METERS;
