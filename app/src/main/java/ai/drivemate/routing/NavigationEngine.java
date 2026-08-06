@@ -100,7 +100,7 @@ public class NavigationEngine {
         // advance, while route progression still waits until the maneuver endpoint is reached.
         boolean accuracyOk = !location.hasAccuracy() || location.getAccuracy() <= MAX_ACCURACY_FOR_ADVANCE_METERS;
         boolean cooldownOk = System.currentTimeMillis() - lastInstructionAt >= MIN_MS_BETWEEN_INSTRUCTIONS;
-        float announceDistance = Math.max(70f, Math.min(250f, Math.max(100f, target.distanceMeters * 0.55f)));
+        float announceDistance = Math.max(35f, Math.min(220f, target.distanceMeters * 0.6f));
         if (instructionAnnouncementsEnabled && accuracyOk && cooldownOk && !currentInstructionAnnounced && meters <= announceDistance) {
             announceCurrentInstruction();
         }
@@ -122,7 +122,7 @@ public class NavigationEngine {
             if (justReached.waypointOrdinal >= 0) listener.onWaypointReached(justReached, justReached.waypointOrdinal);
             RouteStep next = route.steps.get(Math.min(nextStep, route.steps.size() - 1));
             float nextDistance = location.distanceTo(asLocation(next));
-            float nextAnnounceDistance = Math.max(90f, Math.min(260f, Math.max(120f, next.distanceMeters * 0.65f)));
+            float nextAnnounceDistance = Math.max(35f, Math.min(220f, next.distanceMeters * 0.6f));
             if (instructionAnnouncementsEnabled && nextDistance <= nextAnnounceDistance) announceCurrentInstruction();
             return;
         }
