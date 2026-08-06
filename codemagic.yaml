@@ -1,0 +1,91 @@
+workflows:
+  android-debug:
+    name: DriveMate AI - Debug APK
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      java: 17
+      groups:
+        - drivemate_api_keys
+    cache:
+      cache_paths:
+        - ~/.gradle/caches
+        - ~/.gradle/wrapper
+        - $CM_BUILD_DIR/.ci/gradle-8.9
+    triggering:
+      events:
+        - push
+        - pull_request
+      branch_patterns:
+        - pattern: main
+          include: true
+          source: false
+        - pattern: master
+          include: true
+          source: false
+      cancel_previous_builds: true
+    scripts:
+      - name: Configure Android SDK
+        script: |
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
+          printf "sdk.dir=%s\n" "$ANDROID_SDK_ROOT" > "$CM_BUILD_DIR/local.properties"
+      - name: Install project Gradle version
+        script: |
+          GRADLE_DIR="$CM_BUILD_DIR/.ci/gradle-8.9"
+          if [ ! -x "$GRADLE_DIR/bin/gradle" ]; then
+            mkdir -p "$CM_BUILD_DIR/.ci"
+            curl --fail --location --retry 3 \
+              "https://services.gradle.org/distributions/gradle-8.9-bin.zip" \
+              --output "$CM_BUILD_DIR/.ci/gradle-8.9-bin.zip"
+            unzip -q "$CM_BUILD_DIR/.ci/gradle-8.9-bin.zip" -d "$CM_BUILD_DIR/.ci"
+          fi
+          "$GRADLE_DIR/bin/gradle" --version
+      - name: Build debug APK
+        script: |
+          "$CM_BUILD_DIR/.ci/gradle-8.9/bin/gradle" --no-daemon assembleDebug --stacktrace
+    artifacts:
+      - app/build/outputs/apk/debug/*.apk
+      - app/build/outputs/logs/**/*.txt
+
+  android-release:
+    name: DriveMate AI - Signed Release APK and AAB
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      java: 17
+      groups:
+        - drivemate_api_keys
+      android_signing:
+        - drivemate_release
+    cache:
+      cache_paths:
+        - ~/.gradle/caches
+        - ~/.gradle/wrapper
+        - $CM_BUILD_DIR/.ci/gradle-8.9
+    scripts:
+      - name: Configure Android SDK
+        script: |
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
+          printf "sdk.dir=%s\n" "$ANDROID_SDK_ROOT" > "$CM_BUILD_DIR/local.properties"
+      - name: Install project Gradle version
+        script: |
+          GRADLE_DIR="$CM_BUILD_DIR/.ci/gradle-8.9"
+          if [ ! -x "$GRADLE_DIR/bin/gradle" ]; then
+            mkdir -p "$CM_BUILD_DIR/.ci"
+            curl --fail --location --retry 3 \
+              "https://services.gradle.org/distributions/gradle-8.9-bin.zip" \
+              --output "$CM_BUILD_DIR/.ci/gradle-8.9-bin.zip"
+            unzip -q "$CM_BUILD_DIR/.ci/gradle-8.9-bin.zip" -d "$CM_BUILD_DIR/.ci"
+          fi
+          "$GRADLE_DIR/bin/gradle" --version
+      - name: Build signed release artifacts
+        script: |
+          export RELEASE_STORE_FILE="$CM_KEYSTORE_PATH"
+          export ANDROID_KEYSTORE_PASSWORD="$CM_KEYSTORE_PASSWORD"
+          export ANDROID_KEY_ALIAS="$CM_KEY_ALIAS"
+          export ANDROID_KEY_PASSWORD="$CM_KEY_PASSWORD"
+          "$CM_BUILD_DIR/.ci/gradle-8.9/bin/gradle" --no-daemon assembleRelease bundleRelease --stacktrace
+    artifacts:
+      - app/build/outputs/apk/release/*.apk
+      - app/build/outputs/bundle/release/*.aab
+      - app/build/outputs/logs/**/*.txt
