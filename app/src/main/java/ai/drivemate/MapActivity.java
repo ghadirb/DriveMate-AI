@@ -1583,9 +1583,17 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             Location current = currentMapLocation();
             int nearestIndex = closestRouteGeometryIndex(route.geometry, current);
             if (nearestIndex >= 0) {
-                // Always draw the selected navigation line from the live device position, not the
-                // origin used when this route was fetched or restored from the offline cache.
-                points.add(new LatLng(current.getLatitude(), current.getLongitude()));
+                RoutePoint nearestPoint = route.geometry.get(nearestIndex);
+                Location nearestLocation = new Location("route");
+                nearestLocation.setLatitude(nearestPoint.latitude);
+                nearestLocation.setLongitude(nearestPoint.longitude);
+                // Only draw the connector from the live position when it is close enough to
+                // plausibly be the same street - a large gap (deviated from the suggested route,
+                // or a GPS jump) drawn as a direct line looked like a real, precise route segment
+                // rather than what it actually was: a straight jump across unrelated streets.
+                if (current.distanceTo(nearestLocation) <= 150f) {
+                    points.add(new LatLng(current.getLatitude(), current.getLongitude()));
+                }
                 firstPoint = nearestIndex;
             }
         }
@@ -2066,6 +2074,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             turnInstructionText.setText("به توقف میانی رسیدید؛ مسیر ادامه دارد.");
             turnArrowText.setText("●");
             renderLaneGuidance(null);
+            if (destination != null) destinationText.setText(waypointLabelSuffix(destination.name));
             findViewById(R.id.routeWaypointsButton).setVisibility(!navigationMode && !routeWaypoints.isEmpty() ? View.VISIBLE : View.GONE);
         });
     }
@@ -2076,6 +2085,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             turnInstructionText.setText("توقف میانی رد شد؛ مسیر به مقصد بعدی ادامه دارد.");
             turnArrowText.setText("↻");
             renderLaneGuidance(null);
+            if (destination != null) destinationText.setText(waypointLabelSuffix(destination.name));
         });
     }
 
