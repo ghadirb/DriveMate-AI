@@ -73,6 +73,7 @@ import ai.drivemate.model.RouteStep;
 import ai.drivemate.model.TrafficIncident;
 import ai.drivemate.model.SavedPlace;
 import ai.drivemate.model.SpeedLimitPoint;
+import ai.drivemate.location.LocationQualityFilter;
 import ai.drivemate.routing.MapIrRoutingProvider;
 import ai.drivemate.routing.NavigationEngine;
 import ai.drivemate.traffic.TrafficIncidentProvider;
@@ -102,6 +103,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     public static final String RESULT_OPEN_NAVIGATION_MAP = "open_navigation_map";
     public static final String RESULT_ROUTE_INDEX = "route_index";
     public static final String RESULT_STOP_NAVIGATION = "stop_navigation";
+    public static final String RESULT_TRIP_COMPLETED = "trip_completed";
     /** ArrayList<String> of "lat,lng,name" for every intermediate stop added on this screen, in
      *  visit order, so MainActivity can request the same multi-stop route for real navigation. */
     public static final String RESULT_WAYPOINTS = "destination_waypoints";
@@ -154,6 +156,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private int navigationRouteIndex;
     private final NavigationEngine navigationEngine = new NavigationEngine();
     private final SimpleDateFormat etaFormat = new SimpleDateFormat("HH:mm", Locale.US);
+    private long mapNavigationStartedAt;
+    private boolean tripCompletionShown;
     private View turnBannerContainer;
     private TextView turnArrowText;
     private TextView turnDistanceText;
@@ -175,6 +179,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     /** The map receives GPS and network-provider callbacks directly, so retain the last accepted
      * fix here too; otherwise a weak network fix can visibly jump the vehicle/route in alleys. */
     private Location lastAcceptedMapLocation;
+    private final LocationQualityFilter mapLocationFilter = new LocationQualityFilter();
     private boolean routeNeedsRefreshFromCurrentLocation;
     private boolean routeRefreshInFlight;
     private long lastRouteRefreshAttemptAt;
@@ -244,6 +249,15 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             Location lastKnown = bestKnownDeviceLocation();
             originLatitude = lastKnown != null ? lastKnown.getLatitude() : DEFAULT_LATITUDE;
             originLongitude = lastKnown != null ? lastKnown.getLongitude() : DEFAULT_LONGITUDE;
+            mapLocationFilter.seed(lastKnown);
+            lastAcceptedMapLocation = mapLocationFilter.getLastAcceptedLocation();
+        } else {
+            Location initialOrigin = new Location("shared_navigation");
+            initialOrigin.setLatitude(originLatitude);
+            initialOrigin.setLongitude(originLongitude);
+            initialOrigin.setTime(System.currentTimeMillis());
+            mapLocationFilter.seed(initialOrigin);
+            lastAcceptedMapLocation = mapLocationFilter.getLastAcceptedLocation();
         }
         navigationMode = getIntent().getBooleanExtra(EXTRA_NAVIGATION_MODE, false);
         if (navigationMode) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -1630,6 +1644,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         current.setLongitude(originLongitude);
         current.setBearing(lastBearing);
         navigationEngine.start(route, this, current, new RoutePoint(destination.latitude, destination.longitude));
+        mapNavigationStartedAt = System.currentTimeMillis();
+        tripCompletionShown = false;
         turnBannerContainer.setVisibility(View.VISIBLE);
         turnDistanceText.setText("");
         turnStepsExpanded = false;
@@ -1664,11 +1680,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
      *  it moves with the car instead of freezing at the numbers shown when the route was chosen. */
     private void updateDrivingHud(float metersToCurrentTarget) {
         if (selectedRoute == null || selectedRoute.steps.isEmpty()) return;
-        int index = navigationEngine.currentStepIndex();
-        int remainingMeters = Math.round(metersToCurrentTarget);
-        for (int i = index + 1; i < selectedRoute.steps.size(); i++) {
-            remainingMeters += selectedRoute.steps.get(i).distanceMeters;
-        }
+        int remainingMeters = navigationEngine.remainingMeters();
+        if (remainingMeters <= 0) remainingMeters = Math.round(metersToCurrentTarget);
         int totalMeters = Math.max(1, selectedRoute.distanceMeters);
         double fraction = Math.max(0.02, Math.min(1.0, remainingMeters / (double) totalMeters));
         int remainingSeconds = (int) Math.round(selectedRoute.durationSeconds * fraction);
@@ -2057,6 +2070,15 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         });
     }
 
+    @Override public void onWaypointSkipped(RouteStep step, int ordinal) {
+        runOnUiThread(() -> {
+            removeReachedWaypoint(step);
+            turnInstructionText.setText("توقف میانی رد شد؛ مسیر به مقصد بعدی ادامه دارد.");
+            turnArrowText.setText("↻");
+            renderLaneGuidance(null);
+        });
+    }
+
     private void removeReachedWaypoint(RouteStep step) {
         Location reached = new Location("reached_waypoint");
         reached.setLatitude(step.latitude);
@@ -2076,6 +2098,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     @Override public void onArrived() {
         runOnUiThread(() -> {
+            if (tripCompletionShown) return;
+            tripCompletionShown = true;
             turnInstructionText.setText("به مقصد رسیدید");
             turnDistanceText.setText("");
             turnArrowText.setText("●");
@@ -2108,9 +2132,35 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             findViewById(R.id.routeOptionsButton).setVisibility(View.VISIBLE);
             findViewById(R.id.saveMapPlaceButton).setVisibility(View.VISIBLE);
             findViewById(R.id.routeWaypointsButton).setVisibility(!routeWaypoints.isEmpty() ? View.VISIBLE : View.GONE);
-            turnBannerContainer.postDelayed(() -> turnBannerContainer.setVisibility(View.GONE), 4000L);
+            showMapTripCompletionReport();
         });
         trafficIncidentHandler.removeCallbacks(trafficIncidentRefresh);
+    }
+
+    private void showMapTripCompletionReport() {
+        int routeDistanceMeters = selectedRoute == null ? 0 : selectedRoute.distanceMeters;
+        int routeDurationSeconds = selectedRoute == null ? 0 : selectedRoute.durationSeconds;
+        long elapsedMinutes = mapNavigationStartedAt == 0L ? 0L
+                : Math.max(1L, (System.currentTimeMillis() - mapNavigationStartedAt) / 60_000L);
+        String destinationName = destination == null ? "مقصد" : destination.name;
+        String report = "به " + destinationName + " رسیدید."
+                + "\nمدت سفر: " + elapsedMinutes + " دقیقه"
+                + (routeDistanceMeters > 0 ? "\nمسیر: " + formatDistance(routeDistanceMeters) : "")
+                + (routeDurationSeconds > 0 ? "\nبرآورد اولیه: " + formatDuration(routeDurationSeconds) : "");
+        new AlertDialog.Builder(this)
+                .setTitle("گزارش پایان سفر")
+                .setMessage(report)
+                .setPositiveButton("بستن و پایان مسیر", (dialog, which) -> returnCompletedTripToMain())
+                .setOnCancelListener(dialog -> returnCompletedTripToMain())
+                .setCancelable(true)
+                .show();
+    }
+
+    private void returnCompletedTripToMain() {
+        Intent result = new Intent();
+        result.putExtra(RESULT_TRIP_COMPLETED, true);
+        setResult(RESULT_OK, result);
+        finish();
     }
 
     /** Best-effort synchronous device location: the last cached GPS fix, or the last cached
@@ -2142,9 +2192,11 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             navigationCameraEnabled = true;
         }
         Location latest = bestKnownDeviceLocation();
-        if (latest != null) {
-            originLatitude = latest.getLatitude();
-            originLongitude = latest.getLongitude();
+        Location accepted = latest == null ? null : mapLocationFilter.filter(latest);
+        if (accepted != null) {
+            lastAcceptedMapLocation = new Location(accepted);
+            originLatitude = accepted.getLatitude();
+            originLongitude = accepted.getLongitude();
             showCurrentMarker();
         }
         if (navigationMode && navigationCameraEnabled) {
@@ -2180,6 +2232,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     private LatLng drivingPosition() {
+        RoutePoint snapped = navigationEngine.snappedRoutePosition();
+        if (navigationMode && snapped != null) {
+            return new LatLng(snapped.latitude, snapped.longitude);
+        }
         if (selectedRoute == null || selectedRoute.geometry.isEmpty()) {
             return new LatLng(originLatitude, originLongitude);
         }
@@ -2232,6 +2288,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     private float navigationHeading() {
+        if (navigationEngine.isNavigating() && navigationEngine.snappedRoutePosition() != null) {
+            return navigationEngine.routeHeading();
+        }
         LatLng position = drivingPosition();
         if (selectedRoute != null) {
             int nearestIndex = -1;
@@ -2449,7 +2508,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         // is a harmless no-op (no updates arrive), and it means updates resume automatically the
         // moment the driver turns location back on - without waiting for another onResume.
         long minTimeMs = navigationMode ? 1000L : 2500L;
-        float minDistanceM = navigationMode ? 4f : 8f;
+        float minDistanceM = navigationMode ? 0f : 8f;
         try {
             locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, minTimeMs, minDistanceM, this);
         } catch (SecurityException | IllegalArgumentException ignored) {
@@ -2517,24 +2576,25 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     @Override public void onLocationChanged(Location location) {
-        if (!isUsableMapLocation(location)) return;
+        Location accepted = mapLocationFilter.filter(location);
+        if (accepted == null) return;
         gpsWarningActive = false;
-        lastAcceptedMapLocation = new Location(location);
-        originLatitude = location.getLatitude();
-        originLongitude = location.getLongitude();
-        if (location.hasBearing()) {
-            lastBearing = location.getBearing();
+        lastAcceptedMapLocation = new Location(accepted);
+        originLatitude = accepted.getLatitude();
+        originLongitude = accepted.getLongitude();
+        if (accepted.hasBearing()) {
+            lastBearing = accepted.getBearing();
             hasHeading = true;
         }
         runOnUiThread(() -> {
             showCurrentMarker();
-            if (selectedRoute != null) updateRoadSpeedLimit(location.getLatitude(), location.getLongitude());
+            if (selectedRoute != null) updateRoadSpeedLimit(accepted.getLatitude(), accepted.getLongitude());
             if (navigationMode && navigationEngine.isNavigating()) {
-                navigationEngine.onLocation(location);
+                navigationEngine.onLocation(accepted);
                 if (navigationMode && navigationEngine.isNavigating()) {
-                    updateTurnBanner(location);
-                    if (routeNeedsRefreshFromCurrentLocation) refreshNavigationRouteFrom(location, false);
-                    if (shouldRedrawNavigationRoute(location)) drawAllRoutes();
+                    updateTurnBanner(accepted);
+                    if (routeNeedsRefreshFromCurrentLocation) refreshNavigationRouteFrom(accepted, false);
+                    if (shouldRedrawNavigationRoute(accepted)) drawAllRoutes();
                 }
             }
             if (navigationMode && followVehicle && navigationCameraEnabled) {
@@ -2544,19 +2604,5 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                 map.setZoom(17f, 0.35f);
             }
         });
-    }
-
-    private boolean isUsableMapLocation(Location candidate) {
-        if (candidate == null || (candidate.hasAccuracy() && candidate.getAccuracy() > 80f)) return false;
-        if (lastAcceptedMapLocation == null) return true;
-        long elapsedMs = candidate.getTime() - lastAcceptedMapLocation.getTime();
-        if (elapsedMs < -2_000L) return false;
-        elapsedMs = Math.max(1_000L, elapsedMs);
-        float candidateAccuracy = candidate.hasAccuracy() ? candidate.getAccuracy() : 50f;
-        float previousAccuracy = lastAcceptedMapLocation.hasAccuracy() ? lastAcceptedMapLocation.getAccuracy() : 50f;
-        if (elapsedMs < 12_000L && candidateAccuracy > previousAccuracy + 25f) return false;
-        float allowedMeters = elapsedMs / 1000f * 55f + Math.max(candidateAccuracy, previousAccuracy) + 20f;
-        return lastAcceptedMapLocation.distanceTo(candidate) <= allowedMeters
-                || candidateAccuracy + 15f < previousAccuracy;
     }
 }
