@@ -1591,6 +1591,28 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static final class DrivingAnnouncement {
+        final DrivingIntelligenceCoordinator.Priority priority;
+        final String prompt;
+        final String clipName;
+        final String fallback;
+        final long expiresAt;
+
+        DrivingAnnouncement(DrivingIntelligenceCoordinator.Priority priority, String prompt,
+                            String clipName, String fallback, long expiresAt) {
+            this.priority = priority;
+            this.prompt = prompt == null ? "" : prompt;
+            this.clipName = clipName;
+            this.fallback = fallback == null ? "" : fallback;
+            this.expiresAt = expiresAt;
+        }
+
+        DrivingAnnouncement withMinimumLifetime(long minimumLifetimeMs) {
+            return new DrivingAnnouncement(priority, prompt, clipName, fallback,
+                    Math.max(expiresAt, System.currentTimeMillis() + minimumLifetimeMs));
+        }
+    }
+
     private boolean playDrivingFallback(String clipName, String fallback) {
         onlineSpeechClient.stopPlayback();
         voicePlayer.interrupt();
