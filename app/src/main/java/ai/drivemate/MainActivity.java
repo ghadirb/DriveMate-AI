@@ -302,11 +302,16 @@ public class MainActivity extends Activity {
                 updateTripStats(location);
                 maybeSuggestRecurringDestination(location);
                 boolean movingNow = isCurrentlyMoving(location);
-                checkRouteHazards(location, movingNow);
-                checkRouteSafetyAlerts(location, movingNow);
-                checkTrafficIncidentsProximity(location);
-                checkUpcomingSpeedZone(location);
-                checkRouteSpeedLimit(location);
+                // The old route is no longer authoritative once off-route recovery begins.
+                // Do not emit a stale hazard, speed or maneuver-derived alert while the new route
+                // is being fetched; the successful replacement repopulates all route-bound data.
+                if (!rerouteInFlight && navigationEngine.isNavigating()) {
+                    checkRouteHazards(location, movingNow);
+                    checkRouteSafetyAlerts(location, movingNow);
+                    checkTrafficIncidentsProximity(location);
+                    checkUpcomingSpeedZone(location);
+                    checkRouteSpeedLimit(location);
+                }
             }
 
             @Override public void onLocationAvailabilityChanged(boolean available) {
@@ -2281,6 +2286,11 @@ public class MainActivity extends Activity {
     private void rerouteFromCurrentLocation() {
         if (rerouteInFlight || activeDestination == null || locationTracker.getLastLocation() == null) return;
         rerouteInFlight = true;
+        // A new route gets a new engine state. Keeping the previous engine active until the
+        // network call completes allowed its old progress and turn callbacks to leak into the
+        // new route, producing repeated off-route or wrong-turn guidance.
+        navigationEngine.stop();
+        initialGuidanceHeldUntil = 0L;
         setStatus("از مسیر خارج شدید؛ در حال محاسبه مسیر جدید...");
         startNavigation(activeDestination, activeWaypoints, true);
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
