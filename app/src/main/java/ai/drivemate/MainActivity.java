@@ -62,6 +62,8 @@ import ai.drivemate.routing.PlaceSearchRepository;
 import ai.drivemate.routing.PoiCategory;
 import ai.drivemate.routing.RouteCache;
 import ai.drivemate.routing.RouteCurveAnalyzer;
+import ai.drivemate.routing.DriverProfileAnalyzer;
+import ai.drivemate.routing.PersonalRouteAnalyzer;
 import ai.drivemate.routing.RoutePatternAnalyzer;
 import ai.drivemate.routing.RouteRepository;
 import ai.drivemate.settings.NightModeManager;
@@ -194,6 +196,8 @@ public class MainActivity extends Activity {
     private boolean voiceRequestedWhileKeysLoad;
     private long tripStartedAt;
     private int activeTripDistanceMeters;
+    /** A compact sample of the road actually driven, retained only with a valid trip report. */
+    private final List<RoutePoint> activeTripPath = new ArrayList<>();
     private double activeTripOriginLatitude = Double.NaN;
     private double activeTripOriginLongitude = Double.NaN;
     private Location lastTripLocation;
@@ -892,8 +896,13 @@ public class MainActivity extends Activity {
         routeRepository.getRoutes(originLatitude, originLongitude, requestedWaypoints, destination.latitude, destination.longitude,
                 routes -> runOnUiThread(() -> {
                     if (routes == null || routes.isEmpty()) return;
-                    RouteResult route = routes.get(Math.min(preferredRouteIndex, routes.size() - 1));
                     if (requestSequence != routeRequestSequence) return;
+                    PersonalRouteAnalyzer.Suggestion personalRoute = preferredRouteIndex == 0
+                            ? PersonalRouteAnalyzer.suggest(routes, tripStore.recent(60), originLatitude, originLongitude,
+                            destination.latitude, destination.longitude) : null;
+                    int routeIndex = personalRoute == null ? Math.min(preferredRouteIndex, routes.size() - 1)
+                            : personalRoute.routeIndex;
+                    RouteResult route = routes.get(routeIndex);
                     placeStore.addRecent(destination);
                     observingBackgroundSession = false;
                     activeSessionOwner = new java.lang.ref.WeakReference<>(MainActivity.this);
@@ -904,6 +913,8 @@ public class MainActivity extends Activity {
                     if (!preserveTripProgress || tripStartedAt == 0L) {
                         tripStartedAt = System.currentTimeMillis();
                         activeTripDistanceMeters = 0;
+                        activeTripPath.clear();
+                        appendTripPath(origin);
                         activeTripOriginLatitude = originLatitude;
                         activeTripOriginLongitude = originLongitude;
                     }
@@ -949,6 +960,9 @@ public class MainActivity extends Activity {
                     lastInstruction = "start_navigation";
                     lastInstructionText = "مسیر به " + destination.name + " آماده است.";
                     setStatus("مسیر آماده است. فاصله تقریبی: " + route.distanceMeters + " متر");
+                    if (personalRoute != null) {
+                        setStatus("مسیر آشنای شما بر اساس " + personalRoute.supportingTrips + " سفر قبلی پیشنهاد شد.");
+                    }
                     showTripAnalysis(route, destination);
                     guidanceHandler.postDelayed(() -> {
                         if (requestSequence != routeRequestSequence || activeDestination != destination
@@ -1053,8 +1067,24 @@ public class MainActivity extends Activity {
         float delta = lastTripLocation.distanceTo(location);
         boolean hasMovingSpeed = location.hasSpeed() && location.getSpeed() >= 0.8f;
         boolean movementIsPlausible = (hasMovingSpeed && delta >= 3f) || (!location.hasSpeed() && delta >= 12f);
-        if (movementIsPlausible && delta <= 1_500f) activeTripDistanceMeters += Math.round(delta);
+        if (movementIsPlausible && delta <= 1_500f) {
+            activeTripDistanceMeters += Math.round(delta);
+            appendTripPath(location);
+        }
         lastTripLocation = new Location(location);
+    }
+
+    private void appendTripPath(Location location) {
+        if (location == null) return;
+        if (!activeTripPath.isEmpty()) {
+            RoutePoint previous = activeTripPath.get(activeTripPath.size() - 1);
+            Location previousLocation = new Location("trip_path");
+            previousLocation.setLatitude(previous.latitude);
+            previousLocation.setLongitude(previous.longitude);
+            if (previousLocation.distanceTo(location) < 20f) return;
+        }
+        if (activeTripPath.size() >= 240) activeTripPath.remove(0);
+        activeTripPath.add(new RoutePoint(location.getLatitude(), location.getLongitude()));
     }
 
     private TripRecord buildTripRecord(SavedPlace destination, boolean completed) {
@@ -1064,7 +1094,7 @@ public class MainActivity extends Activity {
         return new TripRecord(destination.name, activeTripOriginLatitude, activeTripOriginLongitude,
                 destination.latitude, destination.longitude, activeRoute.distanceMeters, activeRoute.durationSeconds,
                 tripStartedAt, endedAt, activeTripDistanceMeters, activeRoute.providerName,
-                activeWaypoints.size(), completed);
+                activeWaypoints.size(), completed, activeTripPath);
     }
 
     private void saveTripRecord(TripRecord record) {
@@ -1358,6 +1388,7 @@ public class MainActivity extends Activity {
         announcedTrafficIncidentIds.clear();
         tripStartedAt = 0L;
         activeTripDistanceMeters = 0;
+        activeTripPath.clear();
         activeTripOriginLatitude = Double.NaN;
         activeTripOriginLongitude = Double.NaN;
         lastTripLocation = null;
@@ -1944,6 +1975,7 @@ public class MainActivity extends Activity {
         }
         java.util.List<TripRecord> trips = tripStore.recent(60);
         if (!trips.isEmpty()) {
+            context.append(DriverProfileAnalyzer.summarize(trips)).append(" ");
             int shown = Math.min(trips.size(), 15);
             context.append("تاریخچه سفرهای اخیر کاربر (از جدید به قدیم): ");
             for (int i = 0; i < shown; i++) context.append(trips.get(i).destinationName).append(i == shown - 1 ? ". " : "، ");
@@ -2402,6 +2434,7 @@ public class MainActivity extends Activity {
         activeDestination = null;
         tripStartedAt = 0L;
         activeTripDistanceMeters = 0;
+        activeTripPath.clear();
         activeTripOriginLatitude = Double.NaN;
         activeTripOriginLongitude = Double.NaN;
         lastTripLocation = null;
