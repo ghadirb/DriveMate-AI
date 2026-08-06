@@ -19,25 +19,9 @@ public class DeviceLocationTracker implements LocationListener {
     }
     private final Context context;
     private final LocationManager locationManager;
+    private final LocationQualityFilter locationFilter = new LocationQualityFilter();
     private Location lastLocation;
-    /** The last fix actually accepted by isUsableFix(), used as the jump-plausibility reference.
-     *  Deliberately separate from lastLocation, which callers may read via getLastLocation(). */
-    private Location lastAcceptedLocation;
-    private int consecutiveJumpRejections;
     private UpdateListener updateListener;
-
-    /** Fixes worse than this are essentially useless for street-level navigation and are dropped
-     *  outright rather than acted on. */
-    private static final float MAX_USABLE_ACCURACY_METERS = 100f;
-    /** Generous upper bound (~200 km/h) on how fast a car could plausibly move between two fixes;
-     *  anything beyond this, scaled by the elapsed time, is a GPS jump (multipath/urban-canyon
-     *  reflection) rather than real movement - this is the "location jumped" behavior reported on
-     *  two different test phones. */
-    private static final float MAX_PLAUSIBLE_SPEED_MPS = 55f;
-    /** After this many consecutive rejections, accept the next fix anyway - guards against the
-     *  reference point itself having been a bad fix, which would otherwise lock the filter out for
-     *  the rest of the trip. */
-    private static final int MAX_CONSECUTIVE_JUMP_REJECTIONS = 3;
 
     public DeviceLocationTracker(Context context) {
         this.context = context;
@@ -51,7 +35,8 @@ public class DeviceLocationTracker implements LocationListener {
         try {
             Location gps = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
             Location network = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
-            lastLocation = gps != null ? gps : network;
+            lastLocation = bestLastKnown(gps, network);
+            locationFilter.seed(lastLocation);
         } catch (SecurityException | IllegalArgumentException ignored) {
             // A provider that is missing or was just revoked must never crash trip start.
         }
@@ -95,56 +80,20 @@ public class DeviceLocationTracker implements LocationListener {
 
     @Override
     public void onLocationChanged(Location location) {
-        if (location == null || !shouldAccept(location) || !isUsableFix(location)) return;
-        lastLocation = location;
-        lastAcceptedLocation = location;
-        if (updateListener != null) updateListener.onLocationUpdate(location);
+        Location accepted = locationFilter.filter(location);
+        if (accepted == null) return;
+        lastLocation = accepted;
+        if (updateListener != null) updateListener.onLocationUpdate(new Location(accepted));
     }
 
-    /** Prefer a fresh, accurate fix and ignore implausible low-quality jumps from a secondary
-     * provider. This keeps a network fix from replacing a stable GPS fix during navigation. */
-    private boolean shouldAccept(Location candidate) {
-        if (lastLocation == null) return true;
-        long rawAgeMs = candidate.getTime() - lastLocation.getTime();
-        if (candidate.getTime() > 0L && lastLocation.getTime() > 0L && rawAgeMs < -2_000L) return false;
-        long ageMs = Math.max(0L, rawAgeMs);
-        float candidateAccuracy = candidate.hasAccuracy() ? candidate.getAccuracy() : Float.MAX_VALUE;
-        float previousAccuracy = lastLocation.hasAccuracy() ? lastLocation.getAccuracy() : Float.MAX_VALUE;
-        if (ageMs < 12_000L && candidateAccuracy > previousAccuracy + 35f) return false;
-        float jumpMeters = lastLocation.distanceTo(candidate);
-        float plausibleMeters = Math.max(140f, (ageMs / 1000f) * 55f);
-        return jumpMeters <= plausibleMeters || candidateAccuracy + 15f < previousAccuracy;
-    }
-
-    /** Rejects fixes too imprecise to act on, and implausible instantaneous jumps from the last
-     *  accepted fix. Recovers automatically after a few consecutive rejections (see
-     *  MAX_CONSECUTIVE_JUMP_REJECTIONS) so a genuinely bad reference point can't lock this out. */
-    private boolean isUsableFix(Location location) {
-        if (location.hasAccuracy() && location.getAccuracy() > MAX_USABLE_ACCURACY_METERS) return false;
-        if (lastAcceptedLocation == null) return true;
-        long elapsedMs = location.getTime() - lastAcceptedLocation.getTime();
-        if (elapsedMs <= 0) elapsedMs = 1000L; // some OEM providers do not set a reliable timestamp delta
-        float distance = lastAcceptedLocation.distanceTo(location);
-        // Summing both fixes' raw accuracy (as before) let the tolerance balloon past 200m whenever
-        // both readings happened to be near the 100m cap - exactly the poor-signal, narrow-alley
-        // conditions this filter is meant to catch, making it nearly toothless there. One fix's
-        // worth of uncertainty, capped, is a more honest margin than compounding both.
-        float accuracyMargin = Math.min(60f, Math.max(
-                lastAcceptedLocation.hasAccuracy() ? lastAcceptedLocation.getAccuracy() : 0f,
-                location.hasAccuracy() ? location.getAccuracy() : 0f));
-        float maxPlausibleDistance = (elapsedMs / 1000f) * MAX_PLAUSIBLE_SPEED_MPS + accuracyMargin + 20f;
-        if (distance <= maxPlausibleDistance) {
-            consecutiveJumpRejections = 0;
-            return true;
-        }
-        consecutiveJumpRejections++;
-        boolean recover = consecutiveJumpRejections > MAX_CONSECUTIVE_JUMP_REJECTIONS;
-        // Reset on recovery too, not just on a plausible fix - otherwise the counter only ever
-        // grows past the threshold and every fix afterward is accepted unconditionally for the
-        // rest of the trip, silently disabling jump detection instead of recovering from one bad
-        // reference point.
-        if (recover) consecutiveJumpRejections = 0;
-        return recover;
+    private Location bestLastKnown(Location gps, Location network) {
+        if (gps == null) return network;
+        if (network == null) return gps;
+        long timeDifferenceMs = gps.getTime() - network.getTime();
+        if (Math.abs(timeDifferenceMs) > 10_000L) return timeDifferenceMs > 0L ? gps : network;
+        float gpsAccuracy = gps.hasAccuracy() ? gps.getAccuracy() : Float.MAX_VALUE;
+        float networkAccuracy = network.hasAccuracy() ? network.getAccuracy() : Float.MAX_VALUE;
+        return gpsAccuracy <= networkAccuracy ? gps : network;
     }
 
     @Override

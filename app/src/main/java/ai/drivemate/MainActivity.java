@@ -27,6 +27,7 @@ import com.google.android.material.card.MaterialCardView;
 
 import java.io.File;
 import java.text.SimpleDateFormat;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -55,11 +56,14 @@ import ai.drivemate.routing.MapIrRoutingProvider;
 import ai.drivemate.routing.NeshanRoutingProvider;
 import ai.drivemate.routing.OpenRouteServiceRoutingProvider;
 import ai.drivemate.routing.NavigationEngine;
+import ai.drivemate.routing.OfflineRoadSafetyProvider;
 import ai.drivemate.routing.OverpassPoiProvider;
 import ai.drivemate.routing.PlaceSearchRepository;
 import ai.drivemate.routing.PoiCategory;
 import ai.drivemate.routing.RouteCache;
 import ai.drivemate.routing.RouteCurveAnalyzer;
+import ai.drivemate.routing.DriverProfileAnalyzer;
+import ai.drivemate.routing.PersonalRouteAnalyzer;
 import ai.drivemate.routing.RoutePatternAnalyzer;
 import ai.drivemate.routing.RouteRepository;
 import ai.drivemate.settings.NightModeManager;
@@ -140,10 +144,10 @@ public class MainActivity extends Activity {
     private RouteResult activeRoute;
     /** Ordered intermediate stops for the active trip. Kept through reroutes and map reopening. */
     private List<RoutePoint> activeWaypoints = new ArrayList<>();
-    /** Community-mapped OpenStreetMap speed camera / speed bump / police-checkpoint points along
-     *  the active route. Neshan and map.ir do not expose this through any public developer API,
-     *  so it is the only source available; see OverpassPoiProvider for coverage caveats. */
+    /** Community-mapped OpenStreetMap police/checkpoint points along the active route. Camera,
+     * speed-bump and stop-sign records now come from the bundled offline safety database first. */
     private final OverpassPoiProvider hazardProvider = new OverpassPoiProvider();
+    private OfflineRoadSafetyProvider offlineRoadSafetyProvider;
     private List<double[]> activeRouteHazards = new ArrayList<>();
     private boolean[] activeRouteHazardAnnounced = new boolean[0];
     private int hazardFetchRequestId;
@@ -192,6 +196,8 @@ public class MainActivity extends Activity {
     private boolean voiceRequestedWhileKeysLoad;
     private long tripStartedAt;
     private int activeTripDistanceMeters;
+    /** A compact sample of the road actually driven, retained only with a valid trip report. */
+    private final List<RoutePoint> activeTripPath = new ArrayList<>();
     private double activeTripOriginLatitude = Double.NaN;
     private double activeTripOriginLongitude = Double.NaN;
     private Location lastTripLocation;
@@ -209,6 +215,9 @@ public class MainActivity extends Activity {
     private long dismissedPatternSuggestionUntil;
     private final android.os.Handler voiceHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private final android.os.Handler guidanceHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final ArrayDeque<DrivingAnnouncement> safetyAnnouncementQueue = new ArrayDeque<>();
+    private boolean safetyAnnouncementPlaying;
+    private DrivingAnnouncement pendingDrivingAnnouncement;
     private final Runnable automaticStop = this::finishOnlineRecording;
     private final Runnable trafficCheck = this::checkTrafficAndMaybeReroute;
     private final Runnable weatherCheck = this::checkWeatherAlong;
@@ -267,6 +276,7 @@ public class MainActivity extends Activity {
         writeAutomaticBackup();
         voicePlayer = new VoiceGuidancePlayer(this);
         locationTracker = new DeviceLocationTracker(this);
+        offlineRoadSafetyProvider = new OfflineRoadSafetyProvider(this);
         neshanRoutingProvider = new NeshanRoutingProvider(BuildConfig.NESHAN_API_KEY);
         mapIrRoutingProvider = new MapIrRoutingProvider(BuildConfig.MAPIR_API_KEY);
         openRouteServiceRoutingProvider = new OpenRouteServiceRoutingProvider(BuildConfig.OPENROUTESERVICE_API_KEY);
@@ -296,11 +306,16 @@ public class MainActivity extends Activity {
                 updateTripStats(location);
                 maybeSuggestRecurringDestination(location);
                 boolean movingNow = isCurrentlyMoving(location);
-                checkRouteHazards(location, movingNow);
-                checkRouteSafetyAlerts(location, movingNow);
-                checkTrafficIncidentsProximity(location);
-                checkUpcomingSpeedZone(location);
-                checkRouteSpeedLimit(location);
+                // The old route is no longer authoritative once off-route recovery begins.
+                // Do not emit a stale hazard, speed or maneuver-derived alert while the new route
+                // is being fetched; the successful replacement repopulates all route-bound data.
+                if (!rerouteInFlight && navigationEngine.isNavigating()) {
+                    checkRouteHazards(location, movingNow);
+                    checkRouteSafetyAlerts(location, movingNow);
+                    checkTrafficIncidentsProximity(location);
+                    checkUpcomingSpeedZone(location);
+                    checkRouteSpeedLimit(location);
+                }
             }
 
             @Override public void onLocationAvailabilityChanged(boolean available) {
@@ -424,6 +439,8 @@ public class MainActivity extends Activity {
                 selectMainTab("saved".equals(requestedTab) ? 1 : "profile".equals(requestedTab) ? 2 : 0);
             } else if (data.getBooleanExtra(MapActivity.RESULT_START_VOICE, false)) {
                 toggleVoiceInput();
+            } else if (data.getBooleanExtra(MapActivity.RESULT_TRIP_COMPLETED, false)) {
+                if (activeDestination != null) finishTrip(activeDestination, false);
             } else if (data.getBooleanExtra(MapActivity.RESULT_STOP_NAVIGATION, false)) {
                 requestStopNavigation("مسیریابی متوقف شد.");
             } else if (data.hasExtra(MapActivity.RESULT_LATITUDE) && data.hasExtra(MapActivity.RESULT_LONGITUDE)) {
@@ -879,8 +896,13 @@ public class MainActivity extends Activity {
         routeRepository.getRoutes(originLatitude, originLongitude, requestedWaypoints, destination.latitude, destination.longitude,
                 routes -> runOnUiThread(() -> {
                     if (routes == null || routes.isEmpty()) return;
-                    RouteResult route = routes.get(Math.min(preferredRouteIndex, routes.size() - 1));
                     if (requestSequence != routeRequestSequence) return;
+                    PersonalRouteAnalyzer.Suggestion personalRoute = preferredRouteIndex == 0
+                            ? PersonalRouteAnalyzer.suggest(routes, tripStore.recent(60), originLatitude, originLongitude,
+                            destination.latitude, destination.longitude) : null;
+                    int routeIndex = personalRoute == null ? Math.min(preferredRouteIndex, routes.size() - 1)
+                            : personalRoute.routeIndex;
+                    RouteResult route = routes.get(routeIndex);
                     placeStore.addRecent(destination);
                     observingBackgroundSession = false;
                     activeSessionOwner = new java.lang.ref.WeakReference<>(MainActivity.this);
@@ -891,10 +913,14 @@ public class MainActivity extends Activity {
                     if (!preserveTripProgress || tripStartedAt == 0L) {
                         tripStartedAt = System.currentTimeMillis();
                         activeTripDistanceMeters = 0;
+                        activeTripPath.clear();
+                        appendTripPath(origin);
                         activeTripOriginLatitude = originLatitude;
                         activeTripOriginLongitude = originLongitude;
                     }
                     lastTripLocation = new Location(origin);
+                    lastAlertMovementLocation = new Location(origin);
+                    alertMovingUntil = 0L;
                     smartCompanion.start();
                     fetchRouteHazards(route);
                     fetchRouteSafetyAlerts(route);
@@ -915,10 +941,16 @@ public class MainActivity extends Activity {
                         @Override public void onArrived() {
                             runOnUiThread(() -> finishTrip(destination));
                         }
+                        @Override public void onWaypointApproaching(RouteStep step, int ordinal) {
+                            runOnUiThread(() -> announceWaypointApproaching(step, ordinal));
+                        }
                         @Override public void onWaypointReached(RouteStep step, int ordinal) {
                             runOnUiThread(() -> announceWaypointReached(step, ordinal));
                         }
-                    }, origin);
+                        @Override public void onWaypointSkipped(RouteStep step, int ordinal) {
+                            runOnUiThread(() -> announceWaypointSkipped(step, ordinal));
+                        }
+                    }, origin, new RoutePoint(destination.latitude, destination.longitude));
                     rerouteInFlight = false;
                     navigationEngine.setInstructionAnnouncementsEnabled(false);
                     // A recalculation must resume the next maneuver quickly; otherwise a turn in
@@ -928,6 +960,9 @@ public class MainActivity extends Activity {
                     lastInstruction = "start_navigation";
                     lastInstructionText = "مسیر به " + destination.name + " آماده است.";
                     setStatus("مسیر آماده است. فاصله تقریبی: " + route.distanceMeters + " متر");
+                    if (personalRoute != null) {
+                        setStatus("مسیر آشنای شما بر اساس " + personalRoute.supportingTrips + " سفر قبلی پیشنهاد شد.");
+                    }
                     showTripAnalysis(route, destination);
                     guidanceHandler.postDelayed(() -> {
                         if (requestSequence != routeRequestSequence || activeDestination != destination
@@ -1001,18 +1036,8 @@ public class MainActivity extends Activity {
             return;
         }
         tripStatsPanel.setVisibility(View.VISIBLE);
-        RouteStep step = navigationEngine.currentStep();
-        int remainingMeters;
-        if (step != null) {
-            Location target = new Location("route");
-            target.setLatitude(step.latitude);
-            target.setLongitude(step.longitude);
-            remainingMeters = Math.round(location.distanceTo(target));
-            int index = navigationEngine.currentStepIndex();
-            for (int i = index + 1; i < activeRoute.steps.size(); i++) remainingMeters += activeRoute.steps.get(i).distanceMeters;
-        } else {
-            remainingMeters = activeRoute.distanceMeters;
-        }
+        int remainingMeters = navigationEngine.remainingMeters();
+        if (remainingMeters <= 0) remainingMeters = activeRoute.distanceMeters;
         int totalMeters = Math.max(1, activeRoute.distanceMeters);
         double fraction = Math.max(0.02, Math.min(1.0, remainingMeters / (double) totalMeters));
         int remainingSeconds = (int) Math.round(activeRoute.durationSeconds * fraction);
@@ -1042,8 +1067,24 @@ public class MainActivity extends Activity {
         float delta = lastTripLocation.distanceTo(location);
         boolean hasMovingSpeed = location.hasSpeed() && location.getSpeed() >= 0.8f;
         boolean movementIsPlausible = (hasMovingSpeed && delta >= 3f) || (!location.hasSpeed() && delta >= 12f);
-        if (movementIsPlausible && delta <= 1_500f) activeTripDistanceMeters += Math.round(delta);
+        if (movementIsPlausible && delta <= 1_500f) {
+            activeTripDistanceMeters += Math.round(delta);
+            appendTripPath(location);
+        }
         lastTripLocation = new Location(location);
+    }
+
+    private void appendTripPath(Location location) {
+        if (location == null) return;
+        if (!activeTripPath.isEmpty()) {
+            RoutePoint previous = activeTripPath.get(activeTripPath.size() - 1);
+            Location previousLocation = new Location("trip_path");
+            previousLocation.setLatitude(previous.latitude);
+            previousLocation.setLongitude(previous.longitude);
+            if (previousLocation.distanceTo(location) < 20f) return;
+        }
+        if (activeTripPath.size() >= 240) activeTripPath.remove(0);
+        activeTripPath.add(new RoutePoint(location.getLatitude(), location.getLongitude()));
     }
 
     private TripRecord buildTripRecord(SavedPlace destination, boolean completed) {
@@ -1053,7 +1094,7 @@ public class MainActivity extends Activity {
         return new TripRecord(destination.name, activeTripOriginLatitude, activeTripOriginLongitude,
                 destination.latitude, destination.longitude, activeRoute.distanceMeters, activeRoute.durationSeconds,
                 tripStartedAt, endedAt, activeTripDistanceMeters, activeRoute.providerName,
-                activeWaypoints.size(), completed);
+                activeWaypoints.size(), completed, activeTripPath);
     }
 
     private void saveTripRecord(TripRecord record) {
@@ -1307,6 +1348,10 @@ public class MainActivity extends Activity {
     }
 
     private void finishTrip(SavedPlace destination) {
+        finishTrip(destination, true);
+    }
+
+    private void finishTrip(SavedPlace destination, boolean showCompletionReport) {
         if (activeDestination == null) return;
         resetGuidance(true);
         TripRecord tripReport = buildTripRecord(destination, true);
@@ -1343,9 +1388,12 @@ public class MainActivity extends Activity {
         announcedTrafficIncidentIds.clear();
         tripStartedAt = 0L;
         activeTripDistanceMeters = 0;
+        activeTripPath.clear();
         activeTripOriginLatitude = Double.NaN;
         activeTripOriginLongitude = Double.NaN;
         lastTripLocation = null;
+        lastAlertMovementLocation = null;
+        alertMovingUntil = 0L;
         initialGuidanceHeldUntil = 0L;
         smartCompanion.stop();
         voiceHandler.removeCallbacks(trafficCheck);
@@ -1354,7 +1402,7 @@ public class MainActivity extends Activity {
         stopBackgroundNavigation();
         hideTripAnalysis();
         if (tripStatsPanel != null) tripStatsPanel.setVisibility(View.GONE);
-        showTripCompletionReport(tripReport);
+        if (showCompletionReport) showTripCompletionReport(tripReport);
     }
 
     private void searchAndNavigate(String term) {
@@ -1476,6 +1524,9 @@ public class MainActivity extends Activity {
     private void resetGuidance(boolean interruptPlayback) {
         guidanceEpoch++;
         guidanceHandler.removeCallbacksAndMessages(null);
+        safetyAnnouncementQueue.clear();
+        safetyAnnouncementPlaying = false;
+        pendingDrivingAnnouncement = null;
         intelligenceCoordinator.cancelAll();
         if (interruptPlayback) {
             onlineSpeechClient.stopPlayback();
@@ -1490,6 +1541,56 @@ public class MainActivity extends Activity {
     /** Uses the local clip immediately in economy mode; full mode gives online AI/TTS first refusal. */
     private void speakDrivingEvent(DrivingIntelligenceCoordinator.Priority priority, String prompt, String clipName,
                                    String fallback, long expiresInMs) {
+        DrivingAnnouncement announcement = new DrivingAnnouncement(priority, prompt, clipName, fallback,
+                System.currentTimeMillis() + Math.max(1_000L, expiresInMs));
+        if (priority == DrivingIntelligenceCoordinator.Priority.SAFETY) {
+            safetyAnnouncementQueue.add(announcement.withMinimumLifetime(45_000L));
+            drainSafetyAnnouncements();
+            return;
+        }
+        if (safetyAnnouncementPlaying || !safetyAnnouncementQueue.isEmpty()) {
+            pendingDrivingAnnouncement = announcement;
+            return;
+        }
+        playDrivingAnnouncement(announcement);
+    }
+
+    private void drainSafetyAnnouncements() {
+        if (safetyAnnouncementPlaying) return;
+        DrivingAnnouncement announcement;
+        do {
+            announcement = safetyAnnouncementQueue.poll();
+        } while (announcement != null && announcement.expiresAt < System.currentTimeMillis());
+        if (announcement == null) {
+            DrivingAnnouncement pending = pendingDrivingAnnouncement;
+            pendingDrivingAnnouncement = null;
+            if (pending != null && pending.expiresAt >= System.currentTimeMillis()) {
+                playDrivingAnnouncement(pending);
+            }
+            return;
+        }
+
+        safetyAnnouncementPlaying = true;
+        voicePlayer.interrupt();
+        onlineSpeechClient.stopPlayback();
+        boolean played = announcement.clipName != null
+                ? voicePlayer.announce(announcement.clipName, announcement.fallback)
+                : voicePlayer.speak(announcement.fallback);
+        setStatus(played ? "هشدار ایمنی پخش شد." : "هشدار ایمنی آماده شد، ولی صدای دستگاه در دسترس نیست.");
+        long playbackWindowMs = Math.max(4_000L,
+                Math.min(9_000L, 1_500L + announcement.fallback.length() * 85L));
+        guidanceHandler.postDelayed(() -> {
+            safetyAnnouncementPlaying = false;
+            drainSafetyAnnouncements();
+        }, playbackWindowMs);
+    }
+
+    private void playDrivingAnnouncement(DrivingAnnouncement announcement) {
+        DrivingIntelligenceCoordinator.Priority priority = announcement.priority;
+        String prompt = announcement.prompt;
+        String clipName = announcement.clipName;
+        String fallback = announcement.fallback;
+        long expiresInMs = Math.max(1_000L, announcement.expiresAt - System.currentTimeMillis());
         final long epoch = guidanceEpoch;
         // The route engine immediately speaks the first real maneuver; avoid a second generic
         // "start moving" prompt that would delay the actionable instruction.
@@ -1523,6 +1624,28 @@ public class MainActivity extends Activity {
             voicePlayer.announce(clipName, fallback);
         } else {
             voicePlayer.speak(fallback);
+        }
+    }
+
+    private static final class DrivingAnnouncement {
+        final DrivingIntelligenceCoordinator.Priority priority;
+        final String prompt;
+        final String clipName;
+        final String fallback;
+        final long expiresAt;
+
+        DrivingAnnouncement(DrivingIntelligenceCoordinator.Priority priority, String prompt,
+                            String clipName, String fallback, long expiresAt) {
+            this.priority = priority;
+            this.prompt = prompt == null ? "" : prompt;
+            this.clipName = clipName;
+            this.fallback = fallback == null ? "" : fallback;
+            this.expiresAt = expiresAt;
+        }
+
+        DrivingAnnouncement withMinimumLifetime(long minimumLifetimeMs) {
+            return new DrivingAnnouncement(priority, prompt, clipName, fallback,
+                    Math.max(expiresAt, System.currentTimeMillis() + minimumLifetimeMs));
         }
     }
 
@@ -1852,6 +1975,7 @@ public class MainActivity extends Activity {
         }
         java.util.List<TripRecord> trips = tripStore.recent(60);
         if (!trips.isEmpty()) {
+            context.append(DriverProfileAnalyzer.summarize(trips)).append(" ");
             int shown = Math.min(trips.size(), 15);
             context.append("تاریخچه سفرهای اخیر کاربر (از جدید به قدیم): ");
             for (int i = 0; i < shown; i++) context.append(trips.get(i).destinationName).append(i == shown - 1 ? ". " : "، ");
@@ -2172,8 +2296,12 @@ public class MainActivity extends Activity {
             @Override public void onInstruction(RouteStep step) { runOnUiThread(() -> announceRouteStep(step)); }
             @Override public void onOffRoute() { runOnUiThread(() -> rerouteFromCurrentLocation()); }
             @Override public void onArrived() { runOnUiThread(() -> finishTrip(destination)); }
+            @Override public void onWaypointApproaching(RouteStep step, int ordinal) {
+                runOnUiThread(() -> announceWaypointApproaching(step, ordinal));
+            }
             @Override public void onWaypointReached(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointReached(step, ordinal)); }
-        }, locationTracker.getLastLocation());
+            @Override public void onWaypointSkipped(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointSkipped(step, ordinal)); }
+        }, locationTracker.getLastLocation(), new RoutePoint(destination.latitude, destination.longitude));
         setStatus("مسیر با ترافیک به‌روزرسانی شد؛ حدود " + Math.max(1, gainSeconds / 60) + " دقیقه سریع‌تر است.");
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
                 "مسیر ترافیک‌محور به " + destination.name + " حدود " + Math.max(1, gainSeconds / 60) + " دقیقه زمان بهتری دارد. یک هشدار صوتی بسیار کوتاه و آرام بگو.",
@@ -2190,6 +2318,11 @@ public class MainActivity extends Activity {
     private void rerouteFromCurrentLocation() {
         if (rerouteInFlight || activeDestination == null || locationTracker.getLastLocation() == null) return;
         rerouteInFlight = true;
+        // A new route gets a new engine state. Keeping the previous engine active until the
+        // network call completes allowed its old progress and turn callbacks to leak into the
+        // new route, producing repeated off-route or wrong-turn guidance.
+        navigationEngine.stop();
+        initialGuidanceHeldUntil = 0L;
         setStatus("از مسیر خارج شدید؛ در حال محاسبه مسیر جدید...");
         startNavigation(activeDestination, activeWaypoints, true);
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
@@ -2301,9 +2434,12 @@ public class MainActivity extends Activity {
         activeDestination = null;
         tripStartedAt = 0L;
         activeTripDistanceMeters = 0;
+        activeTripPath.clear();
         activeTripOriginLatitude = Double.NaN;
         activeTripOriginLongitude = Double.NaN;
         lastTripLocation = null;
+        lastAlertMovementLocation = null;
+        alertMovingUntil = 0L;
         initialGuidanceHeldUntil = 0L;
         hideTripAnalysis();
         stopBackgroundNavigation();
@@ -2324,11 +2460,9 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Loads community-mapped OpenStreetMap speed camera / speed bump / police-checkpoint points
-     * along the given route in the background. Neither Neshan nor map.ir expose this data through
-     * any public developer API, so OpenStreetMap/Overpass is the only source; results are
-     * best-effort and depend entirely on what contributors have mapped for that road (see
-     * OverpassPoiProvider). This never represents live police presence.
+     * Loads only community-mapped police/checkpoint points from Overpass. Camera, speed-bump and
+     * stop-sign records are supplied through RouteSafetyAlert from the offline database, with an
+     * Overpass fallback there only when the offline lookup has no matching data.
      */
     private void fetchRouteHazards(RouteResult route) {
         activeRouteHazards = new ArrayList<>();
@@ -2345,18 +2479,28 @@ public class MainActivity extends Activity {
             }
             runOnUiThread(() -> {
                 if (requestId != hazardFetchRequestId) return;
-                activeRouteHazards = hazards == null ? new ArrayList<>() : hazards;
+                activeRouteHazards = onlyPoliceHazards(hazards);
                 activeRouteHazardAnnounced = new boolean[activeRouteHazards.size()];
             });
         }).start();
         fetchRouteSpeedLimits(route);
     }
 
+    private List<double[]> onlyPoliceHazards(List<double[]> hazards) {
+        ArrayList<double[]> policeHazards = new ArrayList<>();
+        if (hazards == null) return policeHazards;
+        for (double[] hazard : hazards) {
+            if (hazard != null && hazard.length >= 3 && hazard[2] == OverpassPoiProvider.HAZARD_POLICE) {
+                policeHazards.add(hazard);
+            }
+        }
+        return policeHazards;
+    }
+
     /**
-     * Loads sharp curves (pure geometry, no network), best-effort OpenStreetMap railway
-     * crossings / school zones / hazard-tagged points, and OSM way tags for tunnels, narrow
-     * bridges and steep inclines along the given route. See RouteSafetyAlert and
-     * OverpassPoiProvider for the honesty rules behind each type.
+     * Loads sharp curves plus safety points from the bundled offline OSM database. Overpass is
+     * only a fallback when the database has no matching point, or a completer for road-way
+     * feature types (tunnel, narrow bridge and steep grade) absent from that database.
      */
     private void fetchRouteSafetyAlerts(RouteResult route) {
         activeRouteSafetyAlerts = new ArrayList<>();
@@ -2365,13 +2509,27 @@ public class MainActivity extends Activity {
         final List<RoutePoint> geometry = route.geometry;
         new Thread(() -> {
             ArrayList<RouteSafetyAlert> merged = new ArrayList<>(RouteCurveAnalyzer.sharpCurves(geometry));
+            List<RouteSafetyAlert> offlineAlerts = new ArrayList<>();
             try {
-                merged.addAll(hazardProvider.pointSafetyFeaturesNear(geometry));
+                offlineAlerts = offlineRoadSafetyProvider.safetyAlertsNear(geometry);
+                addUniqueSafetyAlerts(merged, offlineAlerts);
             } catch (Exception exception) {
-                android.util.Log.w("DriveMateSafety", "Point safety feature lookup failed: " + exception.getMessage());
+                android.util.Log.w("DriveMateSafety", "Offline safety database lookup failed: " + exception.getMessage());
+            }
+            if (offlineAlerts.isEmpty()) {
+                try {
+                    addOverpassHazardFallbackAsSafety(merged, hazardProvider.hazardsNear(geometry));
+                } catch (Exception exception) {
+                    android.util.Log.w("DriveMateSafety", "Fallback hazard lookup failed: " + exception.getMessage());
+                }
+                try {
+                    addUniqueSafetyAlerts(merged, hazardProvider.pointSafetyFeaturesNear(geometry));
+                } catch (Exception exception) {
+                    android.util.Log.w("DriveMateSafety", "Fallback point safety lookup failed: " + exception.getMessage());
+                }
             }
             try {
-                merged.addAll(hazardProvider.roadWayFeaturesNear(geometry));
+                addUniqueSafetyAlerts(merged, hazardProvider.roadWayFeaturesNear(geometry));
             } catch (Exception exception) {
                 android.util.Log.w("DriveMateSafety", "Road way feature lookup failed: " + exception.getMessage());
             }
@@ -2381,6 +2539,48 @@ public class MainActivity extends Activity {
                 activeRouteSafetyAlertAnnounced = new boolean[merged.size()];
             });
         }).start();
+    }
+
+    private void addOverpassHazardFallbackAsSafety(List<RouteSafetyAlert> target, List<double[]> hazards) {
+        if (hazards == null) return;
+        ArrayList<RouteSafetyAlert> converted = new ArrayList<>();
+        for (double[] hazard : hazards) {
+            if (hazard == null || hazard.length < 3) continue;
+            RouteSafetyAlert.Type type;
+            if (hazard[2] == OverpassPoiProvider.HAZARD_CAMERA) {
+                type = RouteSafetyAlert.Type.SPEED_CAMERA;
+            } else if (hazard[2] == OverpassPoiProvider.HAZARD_SPEED_BUMP) {
+                type = RouteSafetyAlert.Type.SPEED_BUMP;
+            } else if (hazard[2] == OverpassPoiProvider.HAZARD_TRAFFIC_SIGN) {
+                type = RouteSafetyAlert.Type.STOP_SIGN;
+            } else {
+                continue;
+            }
+            converted.add(new RouteSafetyAlert(type, hazard[0], hazard[1], 0d));
+        }
+        addUniqueSafetyAlerts(target, converted);
+    }
+
+    /** Removes duplicate points returned by overlapping offline query boxes or a fallback source. */
+    private void addUniqueSafetyAlerts(List<RouteSafetyAlert> target, List<RouteSafetyAlert> candidates) {
+        if (candidates == null) return;
+        for (RouteSafetyAlert candidate : candidates) {
+            boolean duplicate = false;
+            for (RouteSafetyAlert existing : target) {
+                if (existing.type != candidate.type) continue;
+                Location first = new Location("safety_alert");
+                first.setLatitude(existing.latitude);
+                first.setLongitude(existing.longitude);
+                Location second = new Location("safety_alert");
+                second.setLatitude(candidate.latitude);
+                second.setLongitude(candidate.longitude);
+                if (first.distanceTo(second) <= 35f) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) target.add(candidate);
+        }
     }
 
     /** Fetches live traffic incidents once for the given route in the background, and reschedules
@@ -2636,6 +2836,7 @@ public class MainActivity extends Activity {
     /** Tracks the last fix used to judge movement for hazard/safety-alert gating (separate from
      *  lastTripLocation, which is trip-distance bookkeeping and gets reset on start/finish). */
     private Location lastAlertMovementLocation;
+    private long alertMovingUntil;
 
     /** Location.hasSpeed() is frequently false on real devices (weak fix, just starting to move,
      *  some OEM GPS chips), and relying on it alone silently disables every hazard/curve alert -
@@ -2644,15 +2845,17 @@ public class MainActivity extends Activity {
      *  uses for trip-distance accumulation. Computed once per location update and shared by every
      *  alert check in that round, not per-alert, so it reflects one consistent movement judgement. */
     private boolean isCurrentlyMoving(Location location) {
-        boolean result;
-        if (location.hasSpeed()) {
-            result = location.getSpeed() >= ALERT_MIN_MOVING_SPEED_MPS;
-        } else {
-            result = lastAlertMovementLocation != null
-                    && lastAlertMovementLocation.distanceTo(location) >= 12f;
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (location.hasSpeed() && location.getSpeed() >= ALERT_MIN_MOVING_SPEED_MPS) {
+            alertMovingUntil = now + 4_000L;
+        } else if (lastAlertMovementLocation != null
+                && lastAlertMovementLocation.distanceTo(location) >= 10f) {
+            alertMovingUntil = now + 4_000L;
+            lastAlertMovementLocation = new Location(location);
+        } else if (lastAlertMovementLocation == null) {
+            lastAlertMovementLocation = new Location(location);
         }
-        lastAlertMovementLocation = new Location(location);
-        return result;
+        return now <= alertMovingUntil;
     }
 
     private void checkRouteHazards(Location location, boolean movingNow) {
@@ -2727,7 +2930,11 @@ public class MainActivity extends Activity {
      *  alone can't tell "ahead" from "nearby in any direction", which was firing curve/hazard
      *  warnings while stationary. */
     private boolean isAlertAheadAndRelevant(Location location, boolean movingNow, double alertLatitude, double alertLongitude) {
-        if (!movingNow) return false;
+        if (!movingNow || location.hasAccuracy() && location.getAccuracy() > 45f) return false;
+        if (activeRoute != null && activeRoute.geometry != null && activeRoute.geometry.size() >= 2) {
+            return navigationEngine.isPointAhead(alertLatitude, alertLongitude, -20d,
+                    ALERT_TRIGGER_RADIUS_METERS + 150d, 120f);
+        }
         Location alertLocation = new Location("route_alert_check");
         alertLocation.setLatitude(alertLatitude);
         alertLocation.setLongitude(alertLongitude);
@@ -2765,6 +2972,21 @@ public class MainActivity extends Activity {
                 speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
                         "پیچ نسبتاً تندی بر اساس هندسه مسیر در جلوی راه تشخیص داده شده است. یک هشدار فارسی بسیار کوتاه، طبیعی و آرام برای کاهش سرعت بگو.",
                         "dangerous_curve_ahead", "پیچ نسبتاً تند در این نزدیکی است؛ سرعت را کم کنید.", 10_000L);
+                break;
+            case SPEED_CAMERA:
+                speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
+                        "داده آفلاین OpenStreetMap درباره دوربین سرعت در این نزدیکی هشدار داده است. یک هشدار فارسی بسیار کوتاه، طبیعی و آرام بگو.",
+                        "speed_camera", "دوربین سرعت احتمالی در این نزدیکی است.", 10_000L);
+                break;
+            case SPEED_BUMP:
+                speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
+                        "داده آفلاین OpenStreetMap درباره دست‌انداز یا سرعت‌گیر در این نزدیکی هشدار داده است. یک هشدار فارسی بسیار کوتاه، طبیعی و آرام بگو.",
+                        "speed_bump_warning", "دست‌انداز یا سرعت‌گیر احتمالی در این نزدیکی است.", 10_000L);
+                break;
+            case STOP_SIGN:
+                speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
+                        "داده آفلاین OpenStreetMap به تابلوی ایست در این نزدیکی اشاره کرده است. یک هشدار فارسی بسیار کوتاه، طبیعی و آرام بگو.",
+                        "stop_ahead", "تابلوی ایست در این نزدیکی است.", 10_000L);
                 break;
             case STEEP_GRADE: {
                 String direction = alert.detail > 0 ? "صعودی" : "نزولی";
@@ -2953,6 +3175,28 @@ public class MainActivity extends Activity {
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
                 "راننده به توقف میانی شماره " + humanNumber
                         + " رسیده است. یک پیام فارسی کوتاه و طبیعی بگو که مسیر تا مقصد نهایی ادامه دارد.",
+                "continue_route", fallback, 12_000L);
+        setStatus(fallback);
+    }
+
+    private void announceWaypointApproaching(RouteStep step, int ordinal) {
+        int humanNumber = ordinal + 1;
+        String fallback = "توقف میانی " + humanNumber + " نزدیک است.";
+        speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
+                "راننده در حال نزدیک شدن به توقف میانی شماره " + humanNumber
+                        + " است. یک هشدار فارسی بسیار کوتاه و مناسب رانندگی بگو.",
+                "continue_route", fallback, 10_000L);
+        setStatus(fallback);
+    }
+
+    private void announceWaypointSkipped(RouteStep step, int ordinal) {
+        removeReachedWaypoint(activeWaypoints, step);
+        int humanNumber = ordinal + 1;
+        String fallback = "توقف میانی " + humanNumber
+                + " رد شد و از مسیر حذف شد؛ مسیریابی به مقصد بعدی ادامه دارد.";
+        speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
+                "راننده با چند نمونه دقیق GPS از توقف میانی شماره " + humanNumber
+                        + " عبور کرده و آن را نرفته است. یک پیام فارسی کوتاه بگو که توقف حذف شده و مسیر ادامه دارد.",
                 "continue_route", fallback, 12_000L);
         setStatus(fallback);
     }
