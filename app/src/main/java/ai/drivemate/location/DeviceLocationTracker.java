@@ -72,7 +72,8 @@ public class DeviceLocationTracker implements LocationListener {
     private boolean startFusedProvider() {
         try {
             fusedClient = LocationServices.getFusedLocationProviderClient(context);
-            LocationRequest request = new LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L)
+            LocationRequest request = new LocationRequest.Builder(1000L)
+                    .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
                     .setMinUpdateIntervalMillis(500L)
                     // Deliberately no setMinUpdateDistanceMeters: a nonzero value makes Android
                     // withhold updates once the driver stops moving (e.g. parking within the
@@ -98,7 +99,7 @@ public class DeviceLocationTracker implements LocationListener {
                         }
                     });
             return true;
-        } catch (SecurityException | IllegalStateException | NoClassDefFoundError | RuntimeException e) {
+        } catch (RuntimeException | NoClassDefFoundError e) {
             // Any synchronous failure here (Play Services missing/outdated, no Google account, or
             // anything else) must fall back to the legacy path, never leave the app with no
             // location at all.
