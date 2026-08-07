@@ -1083,8 +1083,20 @@ public class MainActivity extends Activity {
             previousLocation.setLongitude(previous.longitude);
             if (previousLocation.distanceTo(location) < 20f) return;
         }
-        if (activeTripPath.size() >= 240) activeTripPath.remove(0);
+        if (activeTripPath.size() >= 240) compactTripPath();
         activeTripPath.add(new RoutePoint(location.getLatitude(), location.getLongitude()));
+    }
+
+    private void compactTripPath() {
+        if (activeTripPath.size() < 3) return;
+        List<RoutePoint> compacted = new ArrayList<>();
+        compacted.add(activeTripPath.get(0));
+        for (int index = 2; index < activeTripPath.size() - 1; index += 2) {
+            compacted.add(activeTripPath.get(index));
+        }
+        compacted.add(activeTripPath.get(activeTripPath.size() - 1));
+        activeTripPath.clear();
+        activeTripPath.addAll(compacted);
     }
 
     private TripRecord buildTripRecord(SavedPlace destination, boolean completed) {

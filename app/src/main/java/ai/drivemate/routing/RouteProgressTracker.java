@@ -4,6 +4,7 @@ import android.location.Location;
 import android.os.SystemClock;
 
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Collections;
 import java.util.List;
 
@@ -47,6 +48,9 @@ public final class RouteProgressTracker {
     private double totalGeometryMeters;
     private Snapshot snapshot;
     private long lastOnRouteRealtimeMs;
+    private final ArrayDeque<Location> recentLocations = new ArrayDeque<>();
+    private static final int LOCATION_HISTORY_SIZE = 4;
+    private static final float MIN_HEADING_DISTANCE_METERS = 12f;
 
     public synchronized void reset(RouteResult route, Location initialLocation) {
         this.route = route;
@@ -56,6 +60,7 @@ public final class RouteProgressTracker {
                 ? 0d : cumulativeMeters[cumulativeMeters.length - 1];
         this.snapshot = null;
         this.lastOnRouteRealtimeMs = 0L;
+        this.recentLocations.clear();
         if (initialLocation != null && geometry.size() >= 2) update(initialLocation);
     }
 
@@ -66,6 +71,7 @@ public final class RouteProgressTracker {
         totalGeometryMeters = 0d;
         snapshot = null;
         lastOnRouteRealtimeMs = 0L;
+        recentLocations.clear();
     }
 
     public synchronized Snapshot update(Location location) {
@@ -75,7 +81,8 @@ public final class RouteProgressTracker {
         if (projection == null) return snapshot;
 
         float accuracyMeters = location.hasAccuracy() ? location.getAccuracy() : 35f;
-        float routeCorridorMeters = Math.max(45f, Math.min(110f, accuracyMeters * 1.8f));
+        float routeCorridorMeters = Math.max(45f, Math.min(130f,
+                accuracyMeters * 1.8f + Math.min(24f, motionSpeedMps(location) * 1.5f)));
         boolean onRoute = projection.distanceMeters <= routeCorridorMeters;
         double progressMeters = snapshot == null ? projection.progressMeters : snapshot.progressMeters;
         int segmentIndex = snapshot == null ? projection.segmentIndex : snapshot.segmentIndex;
@@ -103,6 +110,7 @@ public final class RouteProgressTracker {
         float heading = headingAt(progressMeters, location);
         snapshot = new Snapshot(snappedPoint, progressMeters, remainingMeters,
                 projection.distanceMeters, heading, segmentIndex, onRoute);
+        rememberLocation(location);
         return snapshot;
     }
 
@@ -139,7 +147,9 @@ public final class RouteProgressTracker {
 
         long elapsedOffRouteMs = lastOnRouteRealtimeMs == 0L
                 ? 1_000L : Math.max(1_000L, nowRealtimeMs - lastOnRouteRealtimeMs);
-        double maximumForwardMeters = Math.max(250d, elapsedOffRouteMs / 1000d * 60d + 120d);
+        float expectedSpeedMps = Math.max(18f, Math.min(60f, motionSpeedMps(location) + 22f));
+        double maximumForwardMeters = Math.max(250d,
+                elapsedOffRouteMs / 1000d * expectedSpeedMps + 120d);
         double startMeters = Math.max(0d, snapshot.progressMeters - 45d);
         double endMeters = Math.min(totalGeometryMeters, snapshot.progressMeters + maximumForwardMeters);
         Projection local = projectBetween(location, startMeters, endMeters, false);
@@ -159,6 +169,8 @@ public final class RouteProgressTracker {
     private Projection projectBetween(Location location, double startMeters, double endMeters,
                                       boolean preferLaterOnTie) {
         Projection best = null;
+        float movementHeading = movementHeading(location);
+        float headingPenaltyMeters = headingPenaltyMeters(location, movementHeading);
         double latitudeRadians = Math.toRadians(location.getLatitude());
         double metersPerLatitude = 111_320d;
         double metersPerLongitude = Math.max(1d, metersPerLatitude * Math.cos(latitudeRadians));
@@ -183,14 +195,20 @@ public final class RouteProgressTracker {
             float distanceMeters = (float) Math.sqrt(projectedX * projectedX + projectedY * projectedY);
             double progressMeters = segmentStart + (segmentEnd - segmentStart) * fraction;
             if (progressMeters < startMeters || progressMeters > endMeters) continue;
-            boolean better = best == null || distanceMeters < best.distanceMeters - 0.5f
-                    || (preferLaterOnTie && Math.abs(distanceMeters - best.distanceMeters) <= 0.5f
+            float scoreMeters = distanceMeters;
+            if (!Float.isNaN(movementHeading) && headingPenaltyMeters > 0f) {
+                float segmentHeading = asLocation(first).bearingTo(asLocation(second));
+                scoreMeters += shortestAngleDifference(movementHeading, segmentHeading)
+                        / 180f * headingPenaltyMeters;
+            }
+            boolean better = best == null || scoreMeters < best.scoreMeters - 0.5f
+                    || (preferLaterOnTie && Math.abs(scoreMeters - best.scoreMeters) <= 0.5f
                     && progressMeters > best.progressMeters);
             if (!better) continue;
             double latitude = first.latitude + (second.latitude - first.latitude) * fraction;
             double longitude = first.longitude + (second.longitude - first.longitude) * fraction;
             best = new Projection(new RoutePoint(latitude, longitude), progressMeters,
-                    distanceMeters, index - 1);
+                    distanceMeters, scoreMeters, index - 1);
         }
         return best;
     }
@@ -257,16 +275,58 @@ public final class RouteProgressTracker {
         return location;
     }
 
+    private float movementHeading(Location location) {
+        if (location.hasBearing() && location.hasSpeed() && location.getSpeed() >= 2.8f) {
+            return location.getBearing();
+        }
+        Location oldest = recentLocations.peekFirst();
+        if (oldest == null || oldest.distanceTo(location) < MIN_HEADING_DISTANCE_METERS) {
+            return Float.NaN;
+        }
+        return oldest.bearingTo(location);
+    }
+
+    private float motionSpeedMps(Location location) {
+        if (location.hasSpeed()) return Math.max(0f, location.getSpeed());
+        Location oldest = recentLocations.peekFirst();
+        if (oldest == null) return 0f;
+        long elapsedMs = location.getElapsedRealtimeNanos() > 0L && oldest.getElapsedRealtimeNanos() > 0L
+                ? (location.getElapsedRealtimeNanos() - oldest.getElapsedRealtimeNanos()) / 1_000_000L
+                : location.getTime() - oldest.getTime();
+        if (elapsedMs <= 0L) return 0f;
+        return oldest.distanceTo(location) / Math.max(0.5f, elapsedMs / 1000f);
+    }
+
+    private float headingPenaltyMeters(Location location, float movementHeading) {
+        if (Float.isNaN(movementHeading)) return 0f;
+        float speedMps = motionSpeedMps(location);
+        if (speedMps < 2.8f) return 0f;
+        return Math.min(38f, 12f + speedMps * 2.2f);
+    }
+
+    private void rememberLocation(Location location) {
+        recentLocations.addLast(new Location(location));
+        while (recentLocations.size() > LOCATION_HISTORY_SIZE) recentLocations.removeFirst();
+    }
+
+    private static float shortestAngleDifference(float first, float second) {
+        float difference = Math.abs((first - second) % 360f);
+        return difference > 180f ? 360f - difference : difference;
+    }
+
     private static final class Projection {
         final RoutePoint point;
         final double progressMeters;
         final float distanceMeters;
+        final float scoreMeters;
         final int segmentIndex;
 
-        Projection(RoutePoint point, double progressMeters, float distanceMeters, int segmentIndex) {
+        Projection(RoutePoint point, double progressMeters, float distanceMeters,
+                   float scoreMeters, int segmentIndex) {
             this.point = point;
             this.progressMeters = progressMeters;
             this.distanceMeters = distanceMeters;
+            this.scoreMeters = scoreMeters;
             this.segmentIndex = segmentIndex;
         }
     }

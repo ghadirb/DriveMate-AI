@@ -3,6 +3,8 @@ package ai.drivemate.location;
 import android.location.Location;
 import android.os.SystemClock;
 
+import java.util.ArrayDeque;
+
 /**
  * Shared navigation-grade location filter for every UI surface.
  *
@@ -17,6 +19,9 @@ public final class LocationQualityFilter {
     private static final int RELOCATION_CONFIRM_SAMPLES = 3;
     private static final long RELOCATION_MIN_SPAN_MS = 1_500L;
     private static final long MAX_SEED_AGE_MS = 2 * 60_000L;
+    private static final int MOTION_HISTORY_SIZE = 4;
+    private static final float LOW_SPEED_MAX_PLAUSIBLE_MPS = 28f;
+    private static final float MAX_CONFIRMED_ACCELERATION_MPS2 = 9f;
 
     private Location acceptedLocation;
     private long acceptedAtRealtimeMs;
@@ -25,6 +30,8 @@ public final class LocationQualityFilter {
     private long relocationStartedAtRealtimeMs;
     private boolean hasStableBearing;
     private float stableBearing;
+    private float lastDerivedSpeedMps = -1f;
+    private final ArrayDeque<Location> recentAcceptedLocations = new ArrayDeque<>();
 
     public synchronized void reset() {
         acceptedLocation = null;
@@ -32,6 +39,8 @@ public final class LocationQualityFilter {
         clearRelocationCandidate();
         hasStableBearing = false;
         stableBearing = 0f;
+        lastDerivedSpeedMps = -1f;
+        recentAcceptedLocations.clear();
     }
 
     public synchronized void seed(Location location) {
@@ -40,6 +49,7 @@ public final class LocationQualityFilter {
         if (ageMs > MAX_SEED_AGE_MS) return;
         acceptedLocation = new Location(location);
         acceptedAtRealtimeMs = SystemClock.elapsedRealtime();
+        addRecentLocation(location);
         if (location.hasBearing()) {
             stableBearing = normalizeBearing(location.getBearing());
             hasStableBearing = true;
@@ -66,8 +76,13 @@ public final class LocationQualityFilter {
 
         float distanceMeters = acceptedLocation.distanceTo(candidate);
         float uncertaintyMeters = Math.min(45f, Math.max(candidateAccuracy, acceptedAccuracy));
+        float observedSpeedMps = distanceMeters / Math.max(0.25f, elapsedMs / 1000f);
+        float plausibleSpeedMps = adaptivePlausibleSpeed(candidate);
         float plausibleMeters = Math.max(45f,
-                elapsedMs / 1000f * MAX_PLAUSIBLE_SPEED_MPS + uncertaintyMeters + 12f);
+                elapsedMs / 1000f * plausibleSpeedMps + uncertaintyMeters + 12f);
+        if (isAccelerationImplausible(candidate, observedSpeedMps, elapsedMs)) {
+            return considerRelocation(candidate, nowRealtimeMs);
+        }
         if (distanceMeters <= plausibleMeters) {
             clearRelocationCandidate();
             return accept(candidate, nowRealtimeMs);
@@ -113,22 +128,27 @@ public final class LocationQualityFilter {
         Location previous = acceptedLocation;
         Location accepted = new Location(candidate);
         updateStableBearing(previous, accepted);
+        if (previous != null) {
+            long elapsedMs = Math.max(1L, nowRealtimeMs - acceptedAtRealtimeMs);
+            lastDerivedSpeedMps = previous.distanceTo(accepted) / Math.max(0.25f, elapsedMs / 1000f);
+        }
         acceptedLocation = new Location(accepted);
         acceptedAtRealtimeMs = nowRealtimeMs;
+        addRecentLocation(accepted);
         return accepted;
     }
 
     private void updateStableBearing(Location previous, Location accepted) {
         float movedMeters = previous == null ? 0f : previous.distanceTo(accepted);
-        boolean movingBearing = accepted.hasBearing()
-                && ((accepted.hasSpeed() && accepted.getSpeed() >= 1.2f) || movedMeters >= 5f);
-        boolean derivedBearing = previous != null && movedMeters >= 7f;
+        boolean movingBearing = accepted.hasBearing() && accepted.hasSpeed() && accepted.getSpeed() >= 2.8f;
+        Float historicalBearing = derivedBearingFromHistory(accepted);
+        boolean derivedBearing = historicalBearing != null;
         if (!movingBearing && !derivedBearing) {
             if (hasStableBearing) accepted.setBearing(stableBearing);
             return;
         }
 
-        float observed = movingBearing ? accepted.getBearing() : previous.bearingTo(accepted);
+        float observed = movingBearing ? accepted.getBearing() : historicalBearing;
         observed = normalizeBearing(observed);
         if (!hasStableBearing) {
             stableBearing = observed;
@@ -136,7 +156,8 @@ public final class LocationQualityFilter {
         } else {
             float difference = shortestAngle(stableBearing, observed);
             if (Math.abs(difference) <= 120f || movedMeters >= 20f) {
-                float weight = accuracyOr(accepted, 50f) <= 20f ? 0.45f : 0.28f;
+                float weight = movingBearing && accepted.getSpeed() >= 4.2f
+                        ? 0.62f : accuracyOr(accepted, 50f) <= 20f ? 0.42f : 0.25f;
                 stableBearing = normalizeBearing(stableBearing + difference * weight);
             }
         }
@@ -169,6 +190,35 @@ public final class LocationQualityFilter {
 
     private static float accuracyOr(Location location, float fallback) {
         return location != null && location.hasAccuracy() ? location.getAccuracy() : fallback;
+    }
+
+    private float adaptivePlausibleSpeed(Location candidate) {
+        float reportedSpeedMps = candidate.hasSpeed() ? candidate.getSpeed() : 0f;
+        float motionSpeedMps = Math.max(reportedSpeedMps, Math.max(0f, lastDerivedSpeedMps));
+        if (motionSpeedMps < 3f) return LOW_SPEED_MAX_PLAUSIBLE_MPS;
+        if (motionSpeedMps < 12f) return Math.min(MAX_PLAUSIBLE_SPEED_MPS, 36f + motionSpeedMps * 0.7f);
+        return Math.min(MAX_PLAUSIBLE_SPEED_MPS, Math.max(42f, motionSpeedMps + 22f));
+    }
+
+    private boolean isAccelerationImplausible(Location candidate, float observedSpeedMps, long elapsedMs) {
+        if (lastDerivedSpeedMps < 0f || elapsedMs >= 8_000L) return false;
+        float reportedSpeedMps = candidate.hasSpeed() ? candidate.getSpeed() : 0f;
+        float confirmedSpeedMps = Math.max(reportedSpeedMps, lastDerivedSpeedMps);
+        float allowedSpeedMps = confirmedSpeedMps
+                + MAX_CONFIRMED_ACCELERATION_MPS2 * (elapsedMs / 1000f) + 8f;
+        return observedSpeedMps > allowedSpeedMps;
+    }
+
+    private Float derivedBearingFromHistory(Location accepted) {
+        if (recentAcceptedLocations.isEmpty()) return null;
+        Location oldest = recentAcceptedLocations.peekFirst();
+        if (oldest == null || oldest.distanceTo(accepted) < 10f) return null;
+        return oldest.bearingTo(accepted);
+    }
+
+    private void addRecentLocation(Location location) {
+        recentAcceptedLocations.addLast(new Location(location));
+        while (recentAcceptedLocations.size() > MOTION_HISTORY_SIZE) recentAcceptedLocations.removeFirst();
     }
 
     private static float shortestAngle(float from, float to) {
