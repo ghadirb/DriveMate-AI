@@ -371,6 +371,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        maybeShowPendingTripReport();
         if (NightModeManager.refreshIfChanged(this)) return;
         NightModeManager.applyWindowBrightness(this);
     }
@@ -1472,11 +1473,6 @@ public class MainActivity extends Activity {
                 }
             });
         }).start();
-    }
-
-    @Override protected void onResume() {
-        super.onResume();
-        maybeShowPendingTripReport();
     }
 
     @Override protected void onNewIntent(Intent intent) {
