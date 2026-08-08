@@ -86,6 +86,8 @@ import ai.drivemate.routing.RouteCache;
 import ai.drivemate.routing.RouteRepository;
 import ai.drivemate.settings.NightModeManager;
 import ai.drivemate.storage.PlaceStore;
+import ai.drivemate.storage.TripStore;
+import ai.drivemate.model.TripRecord;
 
 /** Map UI is isolated from the driving activity; it returns a selected destination to the existing engine. */
 public class MapActivity extends Activity implements LocationListener, NavigationEngine.Listener {
@@ -147,6 +149,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private PlaceSearchRepository placeSearchRepository;
     private RouteRepository routeRepository;
     private PlaceStore placeStore;
+    private TripStore tripStore;
     private LocationManager locationManager;
     private boolean navigationMode;
     private boolean followVehicle = true;
@@ -237,6 +240,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         setContentView(R.layout.activity_map);
         NightModeManager.applyWindowBrightness(this);
         placeStore = new PlaceStore(this);
+        tripStore = new TripStore(this);
         locationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
         originLatitude = getIntent().getDoubleExtra(EXTRA_ORIGIN_LATITUDE, Double.NaN);
         originLongitude = getIntent().getDoubleExtra(EXTRA_ORIGIN_LONGITUDE, Double.NaN);
@@ -2106,10 +2110,37 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         if (closestIndex >= 0 && closestDistance <= 120f) routeWaypoints.remove(closestIndex);
     }
 
+    /** MainActivity runs its own independent NavigationEngine tracking the same trip in the
+     *  background, and normally saves the trip itself when it detects arrival - but that instance
+     *  can be destroyed by Android before arrival (extended screen-off time while the driver was on
+     *  this map screen), silently losing the save entirely. Saving here too, directly from this
+     *  activity's own arrival detection, guarantees at least one of the two persists it. The
+     *  startedAt + destination name check below skips this if MainActivity's save already landed,
+     *  so the trip does not appear twice in history when both fire normally. */
+    private void saveTripRecordIfNeeded() {
+        if (destination == null || tripStore == null) return;
+        long startedAt = mapNavigationStartedAt > 0 ? mapNavigationStartedAt : System.currentTimeMillis();
+        // MainActivity's own tripStartedAt and this activity's mapNavigationStartedAt are each set
+        // independently, so they are never exactly equal for the same real trip - a 5-minute
+        // window on the same destination is a reliable enough match to avoid a duplicate entry
+        // without needing the two engines to share a single clock.
+        for (TripRecord existing : tripStore.recent(5)) {
+            if (existing.destinationName.equals(destination.name)
+                    && Math.abs(existing.startedAt - startedAt) <= 300_000L) return;
+        }
+        int distanceMeters = selectedRoute != null ? selectedRoute.distanceMeters : 0;
+        int durationSeconds = selectedRoute != null ? selectedRoute.durationSeconds : 0;
+        String provider = selectedRoute != null ? selectedRoute.providerName : "";
+        tripStore.add(new TripRecord(destination.name, originLatitude, originLongitude,
+                destination.latitude, destination.longitude, distanceMeters, durationSeconds,
+                startedAt, System.currentTimeMillis(), distanceMeters, provider, routeWaypoints.size(), true));
+    }
+
     @Override public void onArrived() {
         runOnUiThread(() -> {
             if (tripCompletionShown) return;
             tripCompletionShown = true;
+            saveTripRecordIfNeeded();
             turnInstructionText.setText("به مقصد رسیدید");
             turnDistanceText.setText("");
             turnArrowText.setText("●");
@@ -2157,13 +2188,46 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                 + "\nمدت سفر: " + elapsedMinutes + " دقیقه"
                 + (routeDistanceMeters > 0 ? "\nمسیر: " + formatDistance(routeDistanceMeters) : "")
                 + (routeDurationSeconds > 0 ? "\nبرآورد اولیه: " + formatDuration(routeDurationSeconds) : "");
-        new AlertDialog.Builder(this)
-                .setTitle("گزارش پایان سفر")
-                .setMessage(report)
-                .setPositiveButton("بستن و پایان مسیر", (dialog, which) -> returnCompletedTripToMain())
-                .setOnCancelListener(dialog -> returnCompletedTripToMain())
-                .setCancelable(true)
-                .show();
+        try {
+            new AlertDialog.Builder(this)
+                    .setTitle("گزارش پایان سفر")
+                    .setMessage(report)
+                    .setPositiveButton("بستن و پایان مسیر", (dialog, which) -> returnCompletedTripToMain())
+                    .setOnCancelListener(dialog -> returnCompletedTripToMain())
+                    .setCancelable(true)
+                    .show();
+            if (tripStore != null && mapNavigationStartedAt > 0) tripStore.markReportShown(mapNavigationStartedAt);
+        } catch (RuntimeException e) {
+            // The window may already be invalid right at this moment (activity mid-destruction,
+            // screen off for a long time) - leave the report unmarked so pendingReport() below
+            // picks it up and shows it on whichever screen the driver opens next, instead of the
+            // report being lost entirely because this attempt happened to fail.
+        }
+    }
+
+    /** Checks for a trip that completed without its report ever being successfully shown (the
+     *  driver's screen was off or this activity was not in the foreground at that exact moment)
+     *  and shows it now. Called from onResume so it catches up regardless of which screen the
+     *  driver opens first after such a trip. */
+    private void maybeShowPendingTripReport() {
+        if (tripStore == null) return;
+        TripRecord pending = tripStore.pendingReport();
+        if (pending == null) return;
+        long minutes = pending.endedAt <= pending.startedAt ? 0L
+                : Math.max(1L, (pending.endedAt - pending.startedAt) / 60_000L);
+        String report = "به " + pending.destinationName + " رسیدید."
+                + "\nمدت سفر: " + minutes + " دقیقه"
+                + (pending.distanceMeters > 0 ? "\nمسیر: " + formatDistance(pending.distanceMeters) : "");
+        try {
+            new AlertDialog.Builder(this)
+                    .setTitle("گزارش پایان سفر")
+                    .setMessage(report)
+                    .setPositiveButton("باشه", (dialog, which) -> { })
+                    .setCancelable(true)
+                    .show();
+            tripStore.markReportShown(pending.startedAt);
+        } catch (RuntimeException ignored) {
+        }
     }
 
     private void returnCompletedTripToMain() {
@@ -2503,6 +2567,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     @Override protected void onResume() {
         super.onResume();
+        maybeShowPendingTripReport();
         if (NightModeManager.refreshIfChanged(this)) return;
         NightModeManager.applyWindowBrightness(this);
         // Some native map SDK builds tear down and rebuild their rendering surface across an

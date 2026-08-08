@@ -14,6 +14,7 @@ import ai.drivemate.model.TripRecord;
 public class TripStore {
     private static final String PREFS = "drivemate_trips";
     private static final String KEY_HISTORY = "history";
+    private static final String KEY_LAST_SHOWN_REPORT = "last_shown_report_started_at";
     private final SharedPreferences preferences;
 
     public TripStore(Context context) { preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE); }
@@ -28,6 +29,23 @@ public class TripStore {
             catch (org.json.JSONException ignored) { }
         }
         preferences.edit().putString(KEY_HISTORY, values.toString()).apply();
+    }
+
+    /** The most recently completed trip whose report has not yet been shown to the driver, or null
+     *  if none is pending. Neither MainActivity nor MapActivity can guarantee showing the
+     *  completion dialog at the exact moment arrival is detected (the activity may be paused,
+     *  backgrounded, or mid-destruction right then) - this lets whichever screen the driver next
+     *  opens pick it up and show it there instead, rather than the report silently never appearing. */
+    public TripRecord pendingReport() {
+        long lastShown = preferences.getLong(KEY_LAST_SHOWN_REPORT, 0L);
+        for (TripRecord record : recent(5)) {
+            if (record.completed && record.startedAt != lastShown) return record;
+        }
+        return null;
+    }
+
+    public void markReportShown(long startedAt) {
+        preferences.edit().putLong(KEY_LAST_SHOWN_REPORT, startedAt).apply();
     }
 
     public void remove(long startedAt) {

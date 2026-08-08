@@ -1135,14 +1135,31 @@ public class MainActivity extends Activity {
         return String.format(Locale.US, "%.5f, %.5f", latitude, longitude);
     }
 
+    /** Checks for a trip that completed without its report ever being successfully shown (this
+     *  activity was paused/backgrounded/mid-destruction at that exact moment, or the trip finished
+     *  while the driver was on the map screen and that instance could not persist it) and shows it
+     *  now. Called from onResume so it catches up regardless of which screen the driver opens next. */
+    private void maybeShowPendingTripReport() {
+        if (tripStore == null) return;
+        TripRecord pending = tripStore.pendingReport();
+        if (pending != null) showTripCompletionReport(pending);
+    }
+
     private void showTripCompletionReport(TripRecord record) {
         if (record == null || isFinishing()) return;
-        new AlertDialog.Builder(this)
-                .setTitle(record.completed ? "گزارش پایان سفر" : "گزارش مسیریابی متوقف‌شده")
-                .setMessage(tripDetailText(record))
-                .setPositiveButton("بستن", null)
-                .setNeutralButton("تاریخچه سفرها", (dialog, which) -> showTripHistory())
-                .show();
+        try {
+            new AlertDialog.Builder(this)
+                    .setTitle(record.completed ? "گزارش پایان سفر" : "گزارش مسیریابی متوقف‌شده")
+                    .setMessage(tripDetailText(record))
+                    .setPositiveButton("بستن", null)
+                    .setNeutralButton("تاریخچه سفرها", (dialog, which) -> showTripHistory())
+                    .show();
+            if (record.completed) tripStore.markReportShown(record.startedAt);
+        } catch (RuntimeException e) {
+            // Window may already be invalid right at this moment (activity paused/backgrounded,
+            // screen off) - leave unmarked so maybeShowPendingTripReport() catches it on whichever
+            // screen the driver opens next, instead of the report being lost entirely.
+        }
     }
 
     private void showTripHistory() {
@@ -1455,6 +1472,11 @@ public class MainActivity extends Activity {
                 }
             });
         }).start();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        maybeShowPendingTripReport();
     }
 
     @Override protected void onNewIntent(Intent intent) {
