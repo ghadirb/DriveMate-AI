@@ -40,16 +40,11 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import com.carto.graphics.Color;
-import com.carto.styles.LineStyle;
-import com.carto.styles.LineStyleBuilder;
-import com.carto.styles.MarkerStyle;
-import com.carto.styles.MarkerStyleBuilder;
-import com.carto.utils.BitmapUtils;
 import com.google.android.material.card.MaterialCardView;
 
 import ai.drivemate.map.LatLng;
 import ai.drivemate.map.Marker;
+import ai.drivemate.map.MarkerStyle;
 import ai.drivemate.map.OsmMapView;
 import ai.drivemate.map.Polyline;
 
@@ -93,6 +88,7 @@ import ai.drivemate.ai.RuntimeKeys;
 
 /** Map UI is isolated from the driving activity; it returns a selected destination to the existing engine. */
 public class MapActivity extends Activity implements LocationListener, NavigationEngine.Listener {
+    private static final int REQUEST_MAP_LOCATION_PERMISSION = 410;
     public static final String EXTRA_ORIGIN_LATITUDE = "origin_latitude";
     public static final String EXTRA_ORIGIN_LONGITUDE = "origin_longitude";
     public static final String EXTRA_NESHAN_KEY = "neshan_key";
@@ -127,6 +123,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private MapIrRoutingProvider mapIrRoutingProvider;
     private TomTomRoutingProvider tomTomRoutingProvider;
     private OpenRouteServiceRoutingProvider openRouteServiceRoutingProvider;
+    private boolean remoteRoutingConfigLoading = true;
+    private SavedPlace pendingRouteDestination;
     private Marker currentMarker;
     private Marker vehicleMarker;
     private Marker destinationMarker;
@@ -283,7 +281,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         openRouteServiceRoutingProvider = new OpenRouteServiceRoutingProvider(openRouteServiceKey);
         placeSearchRepository = new PlaceSearchRepository(neshanRoutingProvider, mapIrRoutingProvider, tomtomKey);
         trafficIncidentProvider = new TrafficIncidentProvider(tomtomKey);
-        routeRepository = new RouteRepository(tomTomRoutingProvider, openRouteServiceRoutingProvider, neshanRoutingProvider);
+        routeRepository = new RouteRepository(tomTomRoutingProvider, openRouteServiceRoutingProvider,
+                neshanRoutingProvider, mapIrRoutingProvider);
 
         destinationInfoContainer = findViewById(R.id.mapDestinationInfo);
         mapRoutePanel = findViewById(R.id.mapRoutePanel);
@@ -411,6 +410,14 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             placeSearchRepository.setTomTomEnabled(keys.providerEnabled("TOMTOM", true));
             trafficIncidentProvider.setApiKey(keys.get("TOMTOM_API_KEY"));
             trafficIncidentProvider.setEnabled(keys.providerEnabled("TOMTOM", true));
+            runOnUiThread(() -> {
+                remoteRoutingConfigLoading = false;
+                if (pendingRouteDestination != null) {
+                    SavedPlace pending = pendingRouteDestination;
+                    pendingRouteDestination = null;
+                    selectDestinationWithOptions(pending);
+                }
+            });
         }).start();
     }
 
@@ -455,9 +462,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                     }
                 });
             });
-        } catch (LinkageError error) {
-            // A malformed or stale SDK artifact must not close the app or block destination search.
-            Log.e("DriveMateMap", "Neshan MapView runtime could not be loaded", error);
+        } catch (RuntimeException | LinkageError error) {
+            // A renderer failure must not close the app or block destination search.
+            Log.e("DriveMateMap", "OpenStreetMap renderer could not be loaded", error);
             map = null;
             routeText.setText("نقشه آماده نشد؛ جست‌وجو و مکان‌های ذخیره‌شده همچنان در دسترس هستند.");
             Toast.makeText(this, "نمایش نقشه در این نسخه آماده نشد.", Toast.LENGTH_LONG).show();
@@ -849,10 +856,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         Paint.FontMetrics metrics = text.getFontMetrics();
         float y = 36f - (metrics.ascent + metrics.descent) / 2f;
         canvas.drawText(emoji, 36f, y, text);
-        MarkerStyleBuilder builder = new MarkerStyleBuilder();
-        builder.setSize(38f);
-        builder.setBitmap(BitmapUtils.createBitmapFromAndroidBitmap(bitmap));
-        return builder.buildStyle();
+        return new MarkerStyle(bitmap);
     }
 
     /** Tappable banner shown above the grouped result list; plots the given places (search
@@ -962,10 +966,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         Paint.FontMetrics metrics = text.getFontMetrics();
         float y = 36f - (metrics.ascent + metrics.descent) / 2f;
         canvas.drawText(String.valueOf(number), 36f, y, text);
-        MarkerStyleBuilder builder = new MarkerStyleBuilder();
-        builder.setSize(38f);
-        builder.setBitmap(BitmapUtils.createBitmapFromAndroidBitmap(bitmap));
-        return builder.buildStyle();
+        return new MarkerStyle(bitmap);
     }
 
     private void addSectionTitle(String title) {
@@ -1225,6 +1226,15 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     private void selectDestinationWithOptions(SavedPlace place) {
+        if (!routeRepository.hasConfiguredProvider()) {
+            if (remoteRoutingConfigLoading) {
+                pendingRouteDestination = place;
+                routeText.setText("در حال آماده سازی مسیریابی...");
+                return;
+            }
+            routeText.setText("سرویس مسیریابی در دسترس نیست. اتصال اینترنت و تنظیمات آنلاین را بررسی کنید.");
+            return;
+        }
         destination = place;
         if (mapRoutePanel != null) mapRoutePanel.setVisibility(View.VISIBLE);
         if (destinationInfoContainer != null) destinationInfoContainer.setVisibility(View.VISIBLE);
@@ -1840,10 +1850,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         Paint.FontMetrics metrics = text.getFontMetrics();
         float y = 32f - (metrics.ascent + metrics.descent) / 2f;
         canvas.drawText(String.valueOf(kilometersPerHour), 32f, y, text);
-        MarkerStyleBuilder builder = new MarkerStyleBuilder();
-        builder.setSize(30f);
-        builder.setBitmap(BitmapUtils.createBitmapFromAndroidBitmap(bitmap));
-        return builder.buildStyle();
+        return new MarkerStyle(bitmap);
     }
 
     /** Live, point-based traffic-incident markers (accident/closure/roadworks/hazard) for the
@@ -1924,10 +1931,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         text.setTypeface(Typeface.DEFAULT_BOLD);
         text.setTextSize(26f);
         canvas.drawText("!", 32f, 50f, text);
-        MarkerStyleBuilder builder = new MarkerStyleBuilder();
-        builder.setSize(30f);
-        builder.setBitmap(BitmapUtils.createBitmapFromAndroidBitmap(bitmap));
-        return builder.buildStyle();
+        return new MarkerStyle(bitmap);
     }
 
     /** Renders explicit provider per-lane guidance (see LaneGuidance) as a row of small tiles
@@ -2268,8 +2272,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
      *  as a same-frame fallback so the map never has to sit at a fixed Tehran point while waiting
      *  for a fresh live GPS update to arrive. */
     private Location bestKnownDeviceLocation() {
-        if (locationManager == null
-                || checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+        if (locationManager == null || !hasLocationPermission()) {
             return null;
         }
         try {
@@ -2282,6 +2285,11 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     private void focusOrigin() {
+        if (!hasLocationPermission()) {
+            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION}, REQUEST_MAP_LOCATION_PERMISSION);
+            return;
+        }
         if (!isLocationEnabled()) {
             Toast.makeText(this, "مکان گوشی خاموش است. آن را روشن کنید.", Toast.LENGTH_LONG).show();
             startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS));
@@ -2308,9 +2316,24 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         map.setZoom(15f, 0.25f);
     }
 
+    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQUEST_MAP_LOCATION_PERMISSION) return;
+        if (hasLocationPermission()) {
+            focusOrigin();
+        } else {
+            Toast.makeText(this, "برای نمایش موقعیت فعلی، مجوز مکان را فعال کنید.", Toast.LENGTH_LONG).show();
+        }
+    }
+
     private boolean isLocationEnabled() {
         return locationManager != null && (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
                 || locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER));
+    }
+
+    private boolean hasLocationPermission() {
+        return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                || checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;
     }
 
     private void showCurrentMarker() {
@@ -2544,10 +2567,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         canvas.drawCircle(32f, 32f, 22f, paint);
         paint.setColor(0xffffffff);
         canvas.drawCircle(32f, 32f, 9f, paint);
-        MarkerStyleBuilder builder = new MarkerStyleBuilder();
-        builder.setSize(34f);
-        builder.setBitmap(BitmapUtils.createBitmapFromAndroidBitmap(bitmap));
-        return builder.buildStyle();
+        return new MarkerStyle(bitmap);
     }
 
     private MarkerStyle vehicleMarkerStyle(float bearing) {
@@ -2567,28 +2587,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         paint.setStrokeWidth(4f);
         paint.setColor(0xffffffff);
         canvas.drawPath(arrow, paint);
-        MarkerStyleBuilder builder = new MarkerStyleBuilder();
-        builder.setSize(46f);
-        builder.setBitmap(BitmapUtils.createBitmapFromAndroidBitmap(bitmap));
-        return builder.buildStyle();
-    }
-
-    private LineStyle routeLineStyle() {
-        LineStyleBuilder builder = new LineStyleBuilder();
-        builder.setColor(new Color((short) 23, (short) 107, (short) 135, (short) 230));
-        builder.setWidth(9f);
-        builder.setStretchFactor(0f);
-        return builder.buildStyle();
-    }
-
-    /** Muted style for alternative routes drawn alongside the selected one, so the highlighted
-     *  route reads clearly without hiding the others entirely. */
-    private LineStyle alternateRouteLineStyle() {
-        LineStyleBuilder builder = new LineStyleBuilder();
-        builder.setColor(new Color((short) 150, (short) 162, (short) 170, (short) 200));
-        builder.setWidth(6f);
-        builder.setStretchFactor(0f);
-        return builder.buildStyle();
+        return new MarkerStyle(bitmap);
     }
 
     @Override protected void onResume() {
@@ -2604,7 +2603,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         // appearing to vanish after leaving and reopening the map.
         redrawCachedPoiLayers();
         if (!routeSpeedLimits.isEmpty()) renderSpeedLimitMarkers();
-        if (locationManager == null || checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) return;
+        if (locationManager == null || !hasLocationPermission()) return;
         // Requested regardless of isLocationEnabled(): if GPS/network is off right now, this call
         // is a harmless no-op (no updates arrive), and it means updates resume automatically the
         // moment the driver turns location back on - without waiting for another onResume.

@@ -283,7 +283,8 @@ public class MainActivity extends Activity {
         mapIrRoutingProvider = new MapIrRoutingProvider("");
         openRouteServiceRoutingProvider = new OpenRouteServiceRoutingProvider("");
         tomTomRoutingProvider = new TomTomRoutingProvider("");
-        routeRepository = new RouteRepository(tomTomRoutingProvider, openRouteServiceRoutingProvider, neshanRoutingProvider);
+        routeRepository = new RouteRepository(tomTomRoutingProvider, openRouteServiceRoutingProvider,
+                neshanRoutingProvider, mapIrRoutingProvider);
         placeSearchRepository = new PlaceSearchRepository(neshanRoutingProvider, mapIrRoutingProvider,
                 "");
         commandParser = new VoiceCommandParser();

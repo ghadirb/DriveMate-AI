@@ -20,14 +20,20 @@ public final class OsmMapView extends org.osmdroid.views.MapView {
     }
 
     public void moveCamera(LatLng point, float ignoredDuration) {
-        getController().animateTo(new org.osmdroid.util.GeoPoint(point.getLatitude(), point.getLongitude()));
+        org.osmdroid.util.GeoPoint target =
+                new org.osmdroid.util.GeoPoint(point.getLatitude(), point.getLongitude());
+        if (ignoredDuration <= 0f) getController().setCenter(target);
+        else getController().animateTo(target);
     }
 
     public void setZoom(float zoom, float ignoredDuration) { getController().setZoom(Math.round(zoom)); }
 
     public void setOnMapLongClickListener(LongClickListener listener) {
         getOverlays().add(new MapEventsOverlay(new MapEventsReceiver() {
-            @Override public boolean singleTapConfirmedHelper(org.osmdroid.util.GeoPoint point) { return false; }
+            @Override public boolean singleTapConfirmedHelper(org.osmdroid.util.GeoPoint point) {
+                listener.onLongClick(new LatLng(point.getLatitude(), point.getLongitude()));
+                return true;
+            }
             @Override public boolean longPressHelper(org.osmdroid.util.GeoPoint point) {
                 listener.onLongClick(new LatLng(point.getLatitude(), point.getLongitude()));
                 return true;

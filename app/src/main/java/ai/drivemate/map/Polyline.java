@@ -2,8 +2,6 @@ package ai.drivemate.map;
 
 import android.graphics.Color;
 
-import com.carto.styles.LineStyle;
-
 import java.util.ArrayList;
 import java.util.List;
 
@@ -12,8 +10,6 @@ public final class Polyline {
     private final List<LatLng> points;
     private final boolean primary;
     private org.osmdroid.views.overlay.Polyline overlay;
-
-    public Polyline(List<LatLng> points, LineStyle ignoredStyle) { this(points, true); }
 
     public Polyline(List<LatLng> points, boolean primary) {
         this.points = points == null ? new ArrayList<>() : new ArrayList<>(points);

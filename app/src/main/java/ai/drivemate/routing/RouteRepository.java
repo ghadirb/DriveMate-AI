@@ -3,6 +3,8 @@ package ai.drivemate.routing;
 import android.os.Handler;
 import android.os.Looper;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import ai.drivemate.model.RoutePoint;
@@ -13,22 +15,31 @@ public class RouteRepository {
     public interface RoutesCallback { void onSuccess(List<RouteResult> routes); }
     public interface ErrorCallback { void onError(String message); }
 
-    private final RoutingProvider primary;
-    private final RoutingProvider fallback;
-    private final RoutingProvider finalFallback;
+    private final List<RoutingProvider> providers;
 
     public RouteRepository(RoutingProvider primary, RoutingProvider fallback) {
         this(primary, fallback, null);
     }
 
     public RouteRepository(RoutingProvider primary, RoutingProvider fallback, RoutingProvider finalFallback) {
-        this.primary = primary;
-        this.fallback = fallback;
-        this.finalFallback = finalFallback;
+        this(new RoutingProvider[]{primary, fallback, finalFallback});
+    }
+
+    /** Providers are tried in order. Disabled or unconfigured entries are skipped, so a missing
+     * middle-provider key never prevents a later configured provider from being used. */
+    public RouteRepository(RoutingProvider... providers) {
+        this.providers = new ArrayList<>();
+        if (providers == null) return;
+        for (RoutingProvider provider : Arrays.asList(providers)) {
+            if (provider != null) this.providers.add(provider);
+        }
     }
 
     public boolean hasConfiguredProvider() {
-        return isConfigured(primary) || isConfigured(fallback) || isConfigured(finalFallback);
+        for (RoutingProvider provider : providers) {
+            if (isConfigured(provider)) return true;
+        }
+        return false;
     }
 
     public void getRoute(double originLat, double originLng, double destinationLat, double destinationLng,
@@ -39,40 +50,12 @@ public class RouteRepository {
 
     public void getRoutes(double originLat, double originLng, double destinationLat, double destinationLng,
                           RoutesCallback successCallback, ErrorCallback errorCallback) {
-        new Thread(() -> {
-            try {
-                List<RouteResult> routes = primary.routes(originLat, originLng, destinationLat, destinationLng);
-                if (routes == null || routes.isEmpty()) throw new IllegalStateException("Primary provider returned no routes.");
-                successCallback.onSuccess(routes);
-            } catch (Exception primaryError) {
-                if (!isConfigured(fallback)) {
-                    reportFailure(primaryError, null, null, errorCallback);
-                    return;
-                }
-                try {
-                    List<RouteResult> routes = fallback.routes(originLat, originLng, destinationLat, destinationLng);
-                    if (routes == null || routes.isEmpty()) throw new IllegalStateException("Fallback provider returned no routes.");
-                    successCallback.onSuccess(routes);
-                } catch (Exception fallbackError) {
-                    if (finalFallback == null || !isConfigured(finalFallback)) {
-                        reportFailure(primaryError, fallbackError, null, errorCallback);
-                        return;
-                    }
-                    try {
-                        List<RouteResult> routes = finalFallback.routes(originLat, originLng, destinationLat, destinationLng);
-                        if (routes == null || routes.isEmpty()) throw new IllegalStateException("Final fallback returned no routes." );
-                        successCallback.onSuccess(routes);
-                    } catch (Exception finalFallbackError) {
-                        reportFailure(primaryError, fallbackError, finalFallbackError, errorCallback);
-                    }
-                }
-            }
-        }).start();
+        requestRoutes(provider -> provider.routes(originLat, originLng, destinationLat, destinationLng),
+                successCallback, errorCallback);
     }
 
     /** Multi-stop counterpart of getRoute: origin -> each waypoint in order -> destination, as one
-     *  continuous route. Same primary/fallback/finalFallback chain as the plain two-point request
-     *  above; an empty or null waypoints list behaves exactly like the plain request. */
+     * continuous route. Same ordered provider chain as the plain two-point request. */
     public void getRoute(double originLat, double originLng, List<RoutePoint> waypoints,
                          double destinationLat, double destinationLng,
                          SuccessCallback successCallback, ErrorCallback errorCallback) {
@@ -91,34 +74,31 @@ public class RouteRepository {
             getRoutes(originLat, originLng, destinationLat, destinationLng, successCallback, errorCallback);
             return;
         }
+        requestRoutes(provider -> provider.routesWithWaypoints(originLat, originLng, waypoints,
+                destinationLat, destinationLng), successCallback, errorCallback);
+    }
+
+    private interface RoutesRequest {
+        List<RouteResult> run(RoutingProvider provider) throws Exception;
+    }
+
+    private void requestRoutes(RoutesRequest request, RoutesCallback successCallback, ErrorCallback errorCallback) {
         new Thread(() -> {
-            try {
-                List<RouteResult> routes = primary.routesWithWaypoints(originLat, originLng, waypoints, destinationLat, destinationLng);
-                if (routes == null || routes.isEmpty()) throw new IllegalStateException("Primary provider returned no route.");
-                successCallback.onSuccess(routes);
-            } catch (Exception primaryError) {
-                if (!isConfigured(fallback)) {
-                    reportFailure(primaryError, null, null, errorCallback);
-                    return;
-                }
+            Exception lastError = null;
+            for (RoutingProvider provider : providers) {
+                if (!isConfigured(provider)) continue;
                 try {
-                    List<RouteResult> routes = fallback.routesWithWaypoints(originLat, originLng, waypoints, destinationLat, destinationLng);
-                    if (routes == null || routes.isEmpty()) throw new IllegalStateException("Fallback provider returned no route.");
+                    List<RouteResult> routes = request.run(provider);
+                    if (routes == null || routes.isEmpty()) {
+                        throw new IllegalStateException(provider.name() + " returned no routes.");
+                    }
                     successCallback.onSuccess(routes);
-                } catch (Exception fallbackError) {
-                    if (finalFallback == null || !isConfigured(finalFallback)) {
-                        reportFailure(primaryError, fallbackError, null, errorCallback);
-                        return;
-                    }
-                    try {
-                        List<RouteResult> routes = finalFallback.routesWithWaypoints(originLat, originLng, waypoints, destinationLat, destinationLng);
-                        if (routes == null || routes.isEmpty()) throw new IllegalStateException("Final fallback returned no route.");
-                        successCallback.onSuccess(routes);
-                    } catch (Exception finalFallbackError) {
-                        reportFailure(primaryError, fallbackError, finalFallbackError, errorCallback);
-                    }
+                    return;
+                } catch (Exception error) {
+                    lastError = error;
                 }
             }
+            reportFailure(lastError, errorCallback);
         }).start();
     }
 
@@ -131,14 +111,8 @@ public class RouteRepository {
         return true;
     }
 
-    private void reportFailure(Exception primaryError, Exception fallbackError, Exception finalFallbackError,
-                               ErrorCallback errorCallback) {
+    private void reportFailure(Exception error, ErrorCallback errorCallback) {
         new Handler(Looper.getMainLooper()).post(() ->
                 errorCallback.onError("دریافت مسیر در حال حاضر انجام نشد. اتصال اینترنت را بررسی و دوباره تلاش کنید."));
-    }
-
-    private String messageOf(Exception error) {
-        String message = error.getMessage();
-        return message == null || message.trim().isEmpty() ? "Unknown error" : message;
     }
 }
