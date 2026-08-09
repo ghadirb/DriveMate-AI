@@ -55,6 +55,7 @@ import ai.drivemate.model.TripRecord;
 import ai.drivemate.routing.MapIrRoutingProvider;
 import ai.drivemate.routing.NeshanRoutingProvider;
 import ai.drivemate.routing.OpenRouteServiceRoutingProvider;
+import ai.drivemate.routing.TomTomRoutingProvider;
 import ai.drivemate.routing.NavigationEngine;
 import ai.drivemate.routing.OfflineRoadSafetyProvider;
 import ai.drivemate.routing.OverpassPoiProvider;
@@ -132,6 +133,7 @@ public class MainActivity extends Activity {
     private NeshanRoutingProvider neshanRoutingProvider;
     private MapIrRoutingProvider mapIrRoutingProvider;
     private OpenRouteServiceRoutingProvider openRouteServiceRoutingProvider;
+    private TomTomRoutingProvider tomTomRoutingProvider;
     private RouteRepository routeRepository;
     private PlaceSearchRepository placeSearchRepository;
     private VoiceCommandParser commandParser;
@@ -280,7 +282,8 @@ public class MainActivity extends Activity {
         neshanRoutingProvider = new NeshanRoutingProvider(BuildConfig.NESHAN_API_KEY);
         mapIrRoutingProvider = new MapIrRoutingProvider(BuildConfig.MAPIR_API_KEY);
         openRouteServiceRoutingProvider = new OpenRouteServiceRoutingProvider(BuildConfig.OPENROUTESERVICE_API_KEY);
-        routeRepository = new RouteRepository(neshanRoutingProvider, mapIrRoutingProvider, openRouteServiceRoutingProvider);
+        tomTomRoutingProvider = new TomTomRoutingProvider(BuildConfig.TOMTOM_API_KEY);
+        routeRepository = new RouteRepository(tomTomRoutingProvider, openRouteServiceRoutingProvider, neshanRoutingProvider);
         placeSearchRepository = new PlaceSearchRepository(neshanRoutingProvider, mapIrRoutingProvider,
                 BuildConfig.TOMTOM_API_KEY);
         commandParser = new VoiceCommandParser();
@@ -500,8 +503,8 @@ public class MainActivity extends Activity {
         // by GitHub Actions available to the map as a fallback.
         intent.putExtra(MapActivity.EXTRA_NESHAN_KEY, routingKey("NESHAN_API_KEY", BuildConfig.NESHAN_API_KEY));
         intent.putExtra(MapActivity.EXTRA_MAPIR_KEY, routingKey("MAPIR_API_KEY", BuildConfig.MAPIR_API_KEY));
-        intent.putExtra(MapActivity.EXTRA_TOMTOM_KEY, BuildConfig.TOMTOM_API_KEY);
-        intent.putExtra(MapActivity.EXTRA_OPENROUTESERVICE_KEY, BuildConfig.OPENROUTESERVICE_API_KEY);
+        intent.putExtra(MapActivity.EXTRA_TOMTOM_KEY, routingKey("TOMTOM_API_KEY", BuildConfig.TOMTOM_API_KEY));
+        intent.putExtra(MapActivity.EXTRA_OPENROUTESERVICE_KEY, routingKey("OPENROUTESERVICE_API_KEY", BuildConfig.OPENROUTESERVICE_API_KEY));
         startActivityForResult(intent, REQ_MAP);
     }
 
@@ -522,8 +525,8 @@ public class MainActivity extends Activity {
         }
         intent.putExtra(MapActivity.EXTRA_NESHAN_KEY, routingKey("NESHAN_API_KEY", BuildConfig.NESHAN_API_KEY));
         intent.putExtra(MapActivity.EXTRA_MAPIR_KEY, routingKey("MAPIR_API_KEY", BuildConfig.MAPIR_API_KEY));
-        intent.putExtra(MapActivity.EXTRA_TOMTOM_KEY, BuildConfig.TOMTOM_API_KEY);
-        intent.putExtra(MapActivity.EXTRA_OPENROUTESERVICE_KEY, BuildConfig.OPENROUTESERVICE_API_KEY);
+        intent.putExtra(MapActivity.EXTRA_TOMTOM_KEY, routingKey("TOMTOM_API_KEY", BuildConfig.TOMTOM_API_KEY));
+        intent.putExtra(MapActivity.EXTRA_OPENROUTESERVICE_KEY, routingKey("OPENROUTESERVICE_API_KEY", BuildConfig.OPENROUTESERVICE_API_KEY));
         intent.putExtra(MapActivity.EXTRA_NAVIGATION_MODE, true);
         intent.putExtra(MapActivity.EXTRA_DESTINATION_LATITUDE, destination.latitude);
         intent.putExtra(MapActivity.EXTRA_DESTINATION_LONGITUDE, destination.longitude);
@@ -1455,8 +1458,10 @@ public class MainActivity extends Activity {
             onlineSpeechClient.setRuntimeKeys(runtimeKeys);
             neshanRoutingProvider.setApiKey(runtimeKeys.get("NESHAN_API_KEY"));
             mapIrRoutingProvider.setApiKey(runtimeKeys.get("MAPIR_API_KEY"));
+            tomTomRoutingProvider.setApiKey(runtimeKeys.get("TOMTOM_API_KEY"));
+            openRouteServiceRoutingProvider.setApiKey(runtimeKeys.get("OPENROUTESERVICE_API_KEY"));
             StringBuilder found = new StringBuilder();
-            for (String name : new String[]{"GAPGPT_API_KEY", "LIARA_API_KEY", "AI_API_KEY", "NESHAN_API_KEY", "MAPIR_API_KEY"}) {
+            for (String name : new String[]{"GAPGPT_API_KEY", "LIARA_API_KEY", "AI_API_KEY", "TOMTOM_API_KEY", "OPENROUTESERVICE_API_KEY", "NESHAN_API_KEY", "MAPIR_API_KEY"}) {
                 if (runtimeKeys.has(name)) found.append(name).append(' ');
             }
             android.util.Log.d("DriveMateKeys", found.length() == 0
@@ -2280,9 +2285,8 @@ public class MainActivity extends Activity {
 
     private void scheduleTrafficCheck() {
         voiceHandler.removeCallbacks(trafficCheck);
-        if (navigationEngine.isNavigating() && activeDestination != null) {
-            voiceHandler.postDelayed(trafficCheck, TRAFFIC_CHECK_INTERVAL_MS);
-        }
+        // Version 1 keeps the active route until confirmed off-route navigation requests a reroute.
+        // This avoids periodic paid route requests while GPS and local route progress continue normally.
     }
 
     /**
@@ -2645,9 +2649,8 @@ public class MainActivity extends Activity {
 
     private void scheduleTrafficIncidentCheck() {
         voiceHandler.removeCallbacks(trafficIncidentCheck);
-        if (navigationEngine.isNavigating() && activeDestination != null && trafficIncidentProvider.hasKey()) {
-            voiceHandler.postDelayed(trafficIncidentCheck, TRAFFIC_INCIDENT_CHECK_INTERVAL_MS);
-        }
+        // A live incident snapshot is fetched once for a newly calculated route. Repeating this
+        // request every few minutes adds key usage without changing turn-by-turn GPS guidance.
     }
 
     /** Live point traffic-incident counterpart to checkRouteHazards/checkRouteSafetyAlerts: same

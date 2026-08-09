@@ -48,10 +48,10 @@ import com.carto.styles.MarkerStyleBuilder;
 import com.carto.utils.BitmapUtils;
 import com.google.android.material.card.MaterialCardView;
 
-import org.neshan.common.model.LatLng;
-import org.neshan.mapsdk.MapView;
-import org.neshan.mapsdk.model.Marker;
-import org.neshan.mapsdk.model.Polyline;
+import ai.drivemate.map.LatLng;
+import ai.drivemate.map.Marker;
+import ai.drivemate.map.OsmMapView;
+import ai.drivemate.map.Polyline;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -79,6 +79,7 @@ import ai.drivemate.routing.NavigationEngine;
 import ai.drivemate.traffic.TrafficIncidentProvider;
 import ai.drivemate.routing.NeshanRoutingProvider;
 import ai.drivemate.routing.OpenRouteServiceRoutingProvider;
+import ai.drivemate.routing.TomTomRoutingProvider;
 import ai.drivemate.routing.OverpassPoiProvider;
 import ai.drivemate.routing.PlaceSearchRepository;
 import ai.drivemate.routing.PoiCategory;
@@ -120,7 +121,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     private static final double DEFAULT_LATITUDE = 35.7219;
     private static final double DEFAULT_LONGITUDE = 51.3347;
-    private MapView map;
+    private OsmMapView map;
     private Marker currentMarker;
     private Marker vehicleMarker;
     private Marker destinationMarker;
@@ -273,10 +274,11 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         String openRouteServiceKey = getIntent().getStringExtra(EXTRA_OPENROUTESERVICE_KEY);
         NeshanRoutingProvider neshan = new NeshanRoutingProvider(neshanKey);
         MapIrRoutingProvider mapIr = new MapIrRoutingProvider(mapIrKey);
+        TomTomRoutingProvider tomTom = new TomTomRoutingProvider(tomtomKey);
+        OpenRouteServiceRoutingProvider openRouteService = new OpenRouteServiceRoutingProvider(openRouteServiceKey);
         placeSearchRepository = new PlaceSearchRepository(neshan, mapIr, tomtomKey);
         trafficIncidentProvider = new TrafficIncidentProvider(tomtomKey);
-        routeRepository = new RouteRepository(neshan, mapIr,
-                new OpenRouteServiceRoutingProvider(openRouteServiceKey));
+        routeRepository = new RouteRepository(tomTom, openRouteService, neshan);
 
         destinationInfoContainer = findViewById(R.id.mapDestinationInfo);
         mapRoutePanel = findViewById(R.id.mapRoutePanel);
@@ -395,12 +397,12 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     private void initializeMap() {
-        if (getResources().getIdentifier("neshan", "raw", getPackageName()) == 0) {
+        if (false) {
             routeText.setText("اجزای لازم برای نمایش نقشه در این نسخه آماده نیست.");
             return;
         }
         try {
-            map = new MapView(this);
+            map = new OsmMapView(this);
             ((FrameLayout) findViewById(R.id.mapContainer)).addView(map,
                     new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
             map.moveCamera(new LatLng(originLatitude, originLongitude), 0f);
@@ -1574,7 +1576,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             ArrayList<LatLng> points = routePoints(route);
             if (points.size() < 2) continue;
             boolean isSelected = route == selectedRoute;
-            Polyline polyline = new Polyline(points, isSelected ? routeLineStyle() : alternateRouteLineStyle());
+            Polyline polyline = new Polyline(points, isSelected);
             map.addPolyline(polyline);
             if (isSelected) routePolyline = polyline; else alternateRoutePolylines.add(polyline);
         }
@@ -1851,9 +1853,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
      *  MainActivity's scheduleTrafficIncidentCheck. */
     private void scheduleTrafficIncidentRefresh() {
         trafficIncidentHandler.removeCallbacks(trafficIncidentRefresh);
-        if (navigationEngine.isNavigating() && trafficIncidentProvider != null && trafficIncidentProvider.hasKey()) {
-            trafficIncidentHandler.postDelayed(trafficIncidentRefresh, TRAFFIC_INCIDENT_REFRESH_MS);
-        }
+        // The map uses the one route-scoped incident snapshot already loaded above. Periodic
+        // refreshes would consume a provider key without affecting local navigation progress.
     }
 
     private void clearTrafficIncidentMarkers() {

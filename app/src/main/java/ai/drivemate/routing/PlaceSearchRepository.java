@@ -61,7 +61,10 @@ public class PlaceSearchRepository {
                 return;
             }
 
-            // Geocoding handles villages and full addresses that nearby POI search can rank poorly.
+            // Free nationwide search is first; paid providers are reserved for sparse OSM results.
+            try { addUnique(results, nominatim.search(term, latitude, longitude)); }
+            catch (Exception exception) { failures.add("OpenStreetMap (Nominatim) search: " + messageOf(exception)); }
+            if (results.size() < 3) {
             try { addUnique(results, searchNeshanGeocoding(term)); }
             catch (Exception exception) { failures.add("Neshan geocoding: " + messageOf(exception)); }
             try { addUnique(results, searchNeshan(term, latitude, longitude)); }
@@ -94,6 +97,7 @@ public class PlaceSearchRepository {
                 }
             }
 
+            }
             rank(results, term, latitude, longitude);
             results = keepBestMatchTier(results, term);
             if (!results.isEmpty()) success.onSuccess(results.subList(0, Math.min(12, results.size())));

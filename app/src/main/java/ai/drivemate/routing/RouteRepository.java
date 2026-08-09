@@ -45,6 +45,10 @@ public class RouteRepository {
                 if (routes == null || routes.isEmpty()) throw new IllegalStateException("Primary provider returned no routes.");
                 successCallback.onSuccess(routes);
             } catch (Exception primaryError) {
+                if (!isConfigured(fallback)) {
+                    reportFailure(primaryError, null, null, errorCallback);
+                    return;
+                }
                 try {
                     List<RouteResult> routes = fallback.routes(originLat, originLng, destinationLat, destinationLng);
                     if (routes == null || routes.isEmpty()) throw new IllegalStateException("Fallback provider returned no routes.");
@@ -93,6 +97,10 @@ public class RouteRepository {
                 if (routes == null || routes.isEmpty()) throw new IllegalStateException("Primary provider returned no route.");
                 successCallback.onSuccess(routes);
             } catch (Exception primaryError) {
+                if (!isConfigured(fallback)) {
+                    reportFailure(primaryError, null, null, errorCallback);
+                    return;
+                }
                 try {
                     List<RouteResult> routes = fallback.routesWithWaypoints(originLat, originLng, waypoints, destinationLat, destinationLng);
                     if (routes == null || routes.isEmpty()) throw new IllegalStateException("Fallback provider returned no route.");
@@ -118,6 +126,7 @@ public class RouteRepository {
         if (provider == null) return false;
         if (provider instanceof NeshanRoutingProvider) return ((NeshanRoutingProvider) provider).isConfigured();
         if (provider instanceof MapIrRoutingProvider) return ((MapIrRoutingProvider) provider).isConfigured();
+        if (provider instanceof TomTomRoutingProvider) return ((TomTomRoutingProvider) provider).isConfigured();
         if (provider instanceof OpenRouteServiceRoutingProvider) return ((OpenRouteServiceRoutingProvider) provider).isConfigured();
         return true;
     }
