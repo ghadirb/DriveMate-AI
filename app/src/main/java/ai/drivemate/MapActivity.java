@@ -89,6 +89,7 @@ import ai.drivemate.settings.NightModeManager;
 import ai.drivemate.storage.PlaceStore;
 import ai.drivemate.storage.TripStore;
 import ai.drivemate.model.TripRecord;
+import ai.drivemate.ai.RuntimeKeys;
 
 /** Map UI is isolated from the driving activity; it returns a selected destination to the existing engine. */
 public class MapActivity extends Activity implements LocationListener, NavigationEngine.Listener {
@@ -122,6 +123,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private static final double DEFAULT_LATITUDE = 35.7219;
     private static final double DEFAULT_LONGITUDE = 51.3347;
     private OsmMapView map;
+    private NeshanRoutingProvider neshanRoutingProvider;
+    private MapIrRoutingProvider mapIrRoutingProvider;
+    private TomTomRoutingProvider tomTomRoutingProvider;
+    private OpenRouteServiceRoutingProvider openRouteServiceRoutingProvider;
     private Marker currentMarker;
     private Marker vehicleMarker;
     private Marker destinationMarker;
@@ -272,13 +277,13 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         String mapIrKey = getIntent().getStringExtra(EXTRA_MAPIR_KEY);
         String tomtomKey = getIntent().getStringExtra(EXTRA_TOMTOM_KEY);
         String openRouteServiceKey = getIntent().getStringExtra(EXTRA_OPENROUTESERVICE_KEY);
-        NeshanRoutingProvider neshan = new NeshanRoutingProvider(neshanKey);
-        MapIrRoutingProvider mapIr = new MapIrRoutingProvider(mapIrKey);
-        TomTomRoutingProvider tomTom = new TomTomRoutingProvider(tomtomKey);
-        OpenRouteServiceRoutingProvider openRouteService = new OpenRouteServiceRoutingProvider(openRouteServiceKey);
-        placeSearchRepository = new PlaceSearchRepository(neshan, mapIr, tomtomKey);
+        neshanRoutingProvider = new NeshanRoutingProvider(neshanKey);
+        mapIrRoutingProvider = new MapIrRoutingProvider(mapIrKey);
+        tomTomRoutingProvider = new TomTomRoutingProvider(tomtomKey);
+        openRouteServiceRoutingProvider = new OpenRouteServiceRoutingProvider(openRouteServiceKey);
+        placeSearchRepository = new PlaceSearchRepository(neshanRoutingProvider, mapIrRoutingProvider, tomtomKey);
         trafficIncidentProvider = new TrafficIncidentProvider(tomtomKey);
-        routeRepository = new RouteRepository(tomTom, openRouteService, neshan);
+        routeRepository = new RouteRepository(tomTomRoutingProvider, openRouteServiceRoutingProvider, neshanRoutingProvider);
 
         destinationInfoContainer = findViewById(R.id.mapDestinationInfo);
         mapRoutePanel = findViewById(R.id.mapRoutePanel);
@@ -305,6 +310,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         wireControls();
         restorePoiLayerPreferences();
         initializeMap();
+        loadRemoteRoutingConfig();
         if (map != null && !enabledPoiLayers.isEmpty()) refreshPoiLayers();
         if (map != null && isSpeedLimitLayerEnabled() && !navigationMode) loadNearbySpeedLimits();
         if (navigationMode) {
@@ -387,6 +393,25 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             @Override public void afterTextChanged(Editable value) { }
         });
         refreshSpeedLimitButton();
+    }
+
+    /** Refreshes routing credentials and provider switches without relying on APK build values. */
+    private void loadRemoteRoutingConfig() {
+        new Thread(() -> {
+            RuntimeKeys keys = RuntimeKeys.fetchDefault(BuildConfig.KEYS_DECRYPTION_SECRET);
+            neshanRoutingProvider.setApiKey(keys.get("NESHAN_API_KEY"));
+            mapIrRoutingProvider.setApiKey(keys.get("MAPIR_API_KEY"));
+            tomTomRoutingProvider.setApiKey(keys.get("TOMTOM_API_KEY"));
+            openRouteServiceRoutingProvider.setApiKey(keys.get("OPENROUTESERVICE_API_KEY"));
+            tomTomRoutingProvider.setEnabled(keys.providerEnabled("TOMTOM", true));
+            openRouteServiceRoutingProvider.setEnabled(keys.providerEnabled("OPENROUTESERVICE", true));
+            neshanRoutingProvider.setEnabled(keys.providerEnabled("NESHAN", true));
+            mapIrRoutingProvider.setEnabled(keys.providerEnabled("MAPIR", true));
+            placeSearchRepository.setTomTomApiKey(keys.get("TOMTOM_API_KEY"));
+            placeSearchRepository.setTomTomEnabled(keys.providerEnabled("TOMTOM", true));
+            trafficIncidentProvider.setApiKey(keys.get("TOMTOM_API_KEY"));
+            trafficIncidentProvider.setEnabled(keys.providerEnabled("TOMTOM", true));
+        }).start();
     }
 
     private void returnToMainTab(String tab) {

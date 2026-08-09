@@ -23,7 +23,7 @@ public final class OsmMapView extends org.osmdroid.views.MapView {
         getController().animateTo(new org.osmdroid.util.GeoPoint(point.getLatitude(), point.getLongitude()));
     }
 
-    public void setZoom(float zoom, float ignoredDuration) { setZoomLevelDouble(zoom); }
+    public void setZoom(float zoom, float ignoredDuration) { getController().setZoom(Math.round(zoom)); }
 
     public void setOnMapLongClickListener(LongClickListener listener) {
         getOverlays().add(new MapEventsOverlay(new MapEventsReceiver() {

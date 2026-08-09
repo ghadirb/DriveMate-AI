@@ -27,10 +27,6 @@ if (localProps.exists()) {
     localProps.withInputStream { props.load(it) }
 }
 
-def neshanApiKey = props.getProperty("NESHAN_API_KEY", System.getenv("NESHAN_API_KEY") ?: "")
-def mapIrApiKey = props.getProperty("MAPIR_API_KEY", System.getenv("MAPIR_API_KEY") ?: "")
-def tomtomApiKey = props.getProperty("TOMTOM_API_KEY", System.getenv("TOMTOM_API_KEY") ?: "")
-def openRouteServiceApiKey = props.getProperty("OPENROUTESERVICE_API_KEY", System.getenv("OPENROUTESERVICE_API_KEY") ?: props.getProperty("HEIGIT_API_KEY", System.getenv("HEIGIT_API_KEY") ?: ""))
 def aiApiKey = props.getProperty("AI_API_KEY", System.getenv("AI_API_KEY") ?: "")
 def openWeatherMapApiKey = props.getProperty("OPENWEATHERMAP_API_KEY", System.getenv("OPENWEATHERMAP_API_KEY") ?: "")
 // The existing encrypted payload was created with this password. Override it with a GitHub secret when re-encrypting keys.
@@ -58,10 +54,6 @@ android {
         versionCode 1
         versionName "0.1.0"
 
-        buildConfigField "String", "NESHAN_API_KEY", "\"${neshanApiKey}\""
-        buildConfigField "String", "MAPIR_API_KEY", "\"${mapIrApiKey}\""
-        buildConfigField "String", "TOMTOM_API_KEY", "\"${tomtomApiKey}\""
-        buildConfigField "String", "OPENROUTESERVICE_API_KEY", "\"${openRouteServiceApiKey}\""
         buildConfigField "String", "AI_API_KEY", "\"${aiApiKey}\""
         buildConfigField "String", "OPENWEATHERMAP_API_KEY", "\"${openWeatherMapApiKey}\""
         buildConfigField "String", "KEYS_DECRYPTION_SECRET", "\"${keysDecryptSecret}\""

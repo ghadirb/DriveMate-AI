@@ -39,6 +39,9 @@ public class PlaceSearchRepository {
         this.nominatim = new NominatimSearchProvider();
     }
 
+    public void setTomTomApiKey(String apiKey) { tomtom.setApiKey(apiKey); }
+    public void setTomTomEnabled(boolean enabled) { tomtom.setEnabled(enabled); }
+
     public void search(String term, double latitude, double longitude, SuccessCallback success, ErrorCallback error) {
         searchAll(term, latitude, longitude, places -> success.onSuccess(places.get(0)), error);
     }

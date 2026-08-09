@@ -14,6 +14,7 @@ import ai.drivemate.model.RouteStep;
 /** TomTom route adapter. It keeps the provider response independent from the map renderer. */
 public final class TomTomRoutingProvider implements RoutingProvider {
     private String apiKey = "";
+    private boolean enabled = true;
 
     public TomTomRoutingProvider(String apiKey) {
         setApiKey(apiKey);
@@ -24,8 +25,10 @@ public final class TomTomRoutingProvider implements RoutingProvider {
     }
 
     public boolean isConfigured() {
-        return apiKey != null && apiKey.length() >= 20;
+        return enabled && apiKey != null && apiKey.length() >= 20;
     }
+
+    public void setEnabled(boolean enabled) { this.enabled = enabled; }
 
     @Override public String name() {
         return "TomTom";

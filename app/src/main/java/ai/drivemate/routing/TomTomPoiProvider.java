@@ -13,15 +13,20 @@ import ai.drivemate.model.SavedPlace;
 
 /** Optional POI fallback. It is used only after the Iranian providers return too few local results. */
 final class TomTomPoiProvider {
-    private final String apiKey;
+    private String apiKey;
+    private boolean enabled = true;
 
     TomTomPoiProvider(String apiKey) {
-        this.apiKey = apiKey == null ? "" : apiKey.trim();
+        setApiKey(apiKey);
     }
 
+    void setApiKey(String value) { apiKey = value == null ? "" : value.trim(); }
+
     boolean isConfigured() {
-        return apiKey.length() >= 20;
+        return enabled && apiKey.length() >= 20;
     }
+
+    void setEnabled(boolean enabled) { this.enabled = enabled; }
 
     List<SavedPlace> searchNearby(String term, double latitude, double longitude) throws Exception {
         if (!isConfigured()) return Collections.emptyList();

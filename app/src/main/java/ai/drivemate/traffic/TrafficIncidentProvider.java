@@ -20,15 +20,20 @@ import ai.drivemate.routing.RoutingHttp;
  * is only for a specific, driver-facing "something is here" point warning.
  */
 public final class TrafficIncidentProvider {
-    private final String apiKey;
+    private String apiKey;
+    private boolean enabled = true;
 
     public TrafficIncidentProvider(String apiKey) {
-        this.apiKey = apiKey == null ? "" : apiKey.trim();
+        setApiKey(apiKey);
     }
 
+    public void setApiKey(String value) { apiKey = value == null ? "" : value.trim(); }
+
     public boolean hasKey() {
-        return apiKey.length() >= 20;
+        return enabled && apiKey.length() >= 20;
     }
+
+    public void setEnabled(boolean enabled) { this.enabled = enabled; }
 
     /** Fetches once for the given route geometry; the caller decides how often to poll (see
      *  MainActivity's traffic-incident check cadence) so this never runs on every GPS sample. */

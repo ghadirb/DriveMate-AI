@@ -167,7 +167,7 @@ public class MainActivity extends Activity {
      *  active route; disabled cleanly if no key is configured (see TrafficIncidentProvider.hasKey).
      *  Refreshed periodically (not just once per route) since these change while a live incident
      *  clears or a new one appears - unlike the mostly-static OSM hazard/safety-alert sets above. */
-    private final TrafficIncidentProvider trafficIncidentProvider = new TrafficIncidentProvider(BuildConfig.TOMTOM_API_KEY);
+    private final TrafficIncidentProvider trafficIncidentProvider = new TrafficIncidentProvider("");
     private List<TrafficIncident> activeRouteTrafficIncidents = new ArrayList<>();
     /** Keyed by the provider's own incident id (not array index) since this list is periodically
      *  refreshed rather than fixed for the whole trip. */
@@ -279,13 +279,13 @@ public class MainActivity extends Activity {
         voicePlayer = new VoiceGuidancePlayer(this);
         locationTracker = new DeviceLocationTracker(this);
         offlineRoadSafetyProvider = new OfflineRoadSafetyProvider(this);
-        neshanRoutingProvider = new NeshanRoutingProvider(BuildConfig.NESHAN_API_KEY);
-        mapIrRoutingProvider = new MapIrRoutingProvider(BuildConfig.MAPIR_API_KEY);
-        openRouteServiceRoutingProvider = new OpenRouteServiceRoutingProvider(BuildConfig.OPENROUTESERVICE_API_KEY);
-        tomTomRoutingProvider = new TomTomRoutingProvider(BuildConfig.TOMTOM_API_KEY);
+        neshanRoutingProvider = new NeshanRoutingProvider("");
+        mapIrRoutingProvider = new MapIrRoutingProvider("");
+        openRouteServiceRoutingProvider = new OpenRouteServiceRoutingProvider("");
+        tomTomRoutingProvider = new TomTomRoutingProvider("");
         routeRepository = new RouteRepository(tomTomRoutingProvider, openRouteServiceRoutingProvider, neshanRoutingProvider);
         placeSearchRepository = new PlaceSearchRepository(neshanRoutingProvider, mapIrRoutingProvider,
-                BuildConfig.TOMTOM_API_KEY);
+                "");
         commandParser = new VoiceCommandParser();
         aiAssistant = new AiAssistant(BuildConfig.AI_API_KEY);
         intelligenceCoordinator = new DrivingIntelligenceCoordinator(aiAssistant);
@@ -501,10 +501,10 @@ public class MainActivity extends Activity {
         }
         // The encrypted runtime payload may contain only AI keys. Keep routing keys injected
         // by GitHub Actions available to the map as a fallback.
-        intent.putExtra(MapActivity.EXTRA_NESHAN_KEY, routingKey("NESHAN_API_KEY", BuildConfig.NESHAN_API_KEY));
-        intent.putExtra(MapActivity.EXTRA_MAPIR_KEY, routingKey("MAPIR_API_KEY", BuildConfig.MAPIR_API_KEY));
-        intent.putExtra(MapActivity.EXTRA_TOMTOM_KEY, routingKey("TOMTOM_API_KEY", BuildConfig.TOMTOM_API_KEY));
-        intent.putExtra(MapActivity.EXTRA_OPENROUTESERVICE_KEY, routingKey("OPENROUTESERVICE_API_KEY", BuildConfig.OPENROUTESERVICE_API_KEY));
+        intent.putExtra(MapActivity.EXTRA_NESHAN_KEY, routingKey("NESHAN_API_KEY"));
+        intent.putExtra(MapActivity.EXTRA_MAPIR_KEY, routingKey("MAPIR_API_KEY"));
+        intent.putExtra(MapActivity.EXTRA_TOMTOM_KEY, routingKey("TOMTOM_API_KEY"));
+        intent.putExtra(MapActivity.EXTRA_OPENROUTESERVICE_KEY, routingKey("OPENROUTESERVICE_API_KEY"));
         startActivityForResult(intent, REQ_MAP);
     }
 
@@ -523,10 +523,10 @@ public class MainActivity extends Activity {
             intent.putExtra(MapActivity.EXTRA_ORIGIN_LATITUDE, location.getLatitude());
             intent.putExtra(MapActivity.EXTRA_ORIGIN_LONGITUDE, location.getLongitude());
         }
-        intent.putExtra(MapActivity.EXTRA_NESHAN_KEY, routingKey("NESHAN_API_KEY", BuildConfig.NESHAN_API_KEY));
-        intent.putExtra(MapActivity.EXTRA_MAPIR_KEY, routingKey("MAPIR_API_KEY", BuildConfig.MAPIR_API_KEY));
-        intent.putExtra(MapActivity.EXTRA_TOMTOM_KEY, routingKey("TOMTOM_API_KEY", BuildConfig.TOMTOM_API_KEY));
-        intent.putExtra(MapActivity.EXTRA_OPENROUTESERVICE_KEY, routingKey("OPENROUTESERVICE_API_KEY", BuildConfig.OPENROUTESERVICE_API_KEY));
+        intent.putExtra(MapActivity.EXTRA_NESHAN_KEY, routingKey("NESHAN_API_KEY"));
+        intent.putExtra(MapActivity.EXTRA_MAPIR_KEY, routingKey("MAPIR_API_KEY"));
+        intent.putExtra(MapActivity.EXTRA_TOMTOM_KEY, routingKey("TOMTOM_API_KEY"));
+        intent.putExtra(MapActivity.EXTRA_OPENROUTESERVICE_KEY, routingKey("OPENROUTESERVICE_API_KEY"));
         intent.putExtra(MapActivity.EXTRA_NAVIGATION_MODE, true);
         intent.putExtra(MapActivity.EXTRA_DESTINATION_LATITUDE, destination.latitude);
         intent.putExtra(MapActivity.EXTRA_DESTINATION_LONGITUDE, destination.longitude);
@@ -558,9 +558,9 @@ public class MainActivity extends Activity {
         return result;
     }
 
-    private String routingKey(String name, String buildConfigFallback) {
+    private String routingKey(String name) {
         String runtimeValue = runtimeKeys == null ? null : runtimeKeys.get(name);
-        return runtimeValue == null || runtimeValue.trim().isEmpty() ? buildConfigFallback : runtimeValue;
+        return runtimeValue == null ? "" : runtimeValue;
     }
 
     private void showBackupDialog() {
@@ -1450,16 +1450,21 @@ public class MainActivity extends Activity {
 
     private void loadRuntimeKeys() {
         new Thread(() -> {
-            runtimeKeys = RuntimeKeys.fetch(new String[]{
-                    "https://abrehamrahi.ir/o/public/eUFcsXOX",
-                    "https://gist.githubusercontent.com/ghadirb/626a804df3009e49045a2948dad89fe5/raw/c93c06d1b2f38c65ee30f092c134a89998326d12/keys.txt"
-            }, BuildConfig.KEYS_DECRYPTION_SECRET);
+            runtimeKeys = RuntimeKeys.fetchDefault(BuildConfig.KEYS_DECRYPTION_SECRET);
             aiAssistant.setRuntimeKeys(runtimeKeys);
             onlineSpeechClient.setRuntimeKeys(runtimeKeys);
             neshanRoutingProvider.setApiKey(runtimeKeys.get("NESHAN_API_KEY"));
             mapIrRoutingProvider.setApiKey(runtimeKeys.get("MAPIR_API_KEY"));
             tomTomRoutingProvider.setApiKey(runtimeKeys.get("TOMTOM_API_KEY"));
             openRouteServiceRoutingProvider.setApiKey(runtimeKeys.get("OPENROUTESERVICE_API_KEY"));
+            tomTomRoutingProvider.setEnabled(runtimeKeys.providerEnabled("TOMTOM", true));
+            openRouteServiceRoutingProvider.setEnabled(runtimeKeys.providerEnabled("OPENROUTESERVICE", true));
+            neshanRoutingProvider.setEnabled(runtimeKeys.providerEnabled("NESHAN", true));
+            mapIrRoutingProvider.setEnabled(runtimeKeys.providerEnabled("MAPIR", true));
+            placeSearchRepository.setTomTomApiKey(runtimeKeys.get("TOMTOM_API_KEY"));
+            placeSearchRepository.setTomTomEnabled(runtimeKeys.providerEnabled("TOMTOM", true));
+            trafficIncidentProvider.setApiKey(runtimeKeys.get("TOMTOM_API_KEY"));
+            trafficIncidentProvider.setEnabled(runtimeKeys.providerEnabled("TOMTOM", true));
             StringBuilder found = new StringBuilder();
             for (String name : new String[]{"GAPGPT_API_KEY", "LIARA_API_KEY", "AI_API_KEY", "TOMTOM_API_KEY", "OPENROUTESERVICE_API_KEY", "NESHAN_API_KEY", "MAPIR_API_KEY"}) {
                 if (runtimeKeys.has(name)) found.append(name).append(' ');

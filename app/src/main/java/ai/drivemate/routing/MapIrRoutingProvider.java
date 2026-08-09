@@ -13,6 +13,7 @@ import ai.drivemate.model.SpeedLimitPoint;
 
 public class MapIrRoutingProvider implements RoutingProvider {
     private String apiKey;
+    private boolean enabled = true;
 
     public MapIrRoutingProvider(String apiKey) { this.apiKey = apiKey; }
 
@@ -20,8 +21,9 @@ public class MapIrRoutingProvider implements RoutingProvider {
         if (apiKey != null && !apiKey.trim().isEmpty()) this.apiKey = apiKey.trim();
     }
 
-    String apiKey() { return apiKey == null || apiKey.trim().isEmpty() ? null : apiKey; }
+    String apiKey() { return !enabled || apiKey == null || apiKey.trim().isEmpty() ? null : apiKey; }
     public boolean isConfigured() { return apiKey() != null; }
+    public void setEnabled(boolean enabled) { this.enabled = enabled; }
 
     @Override public String name() { return "map.ir"; }
 
