@@ -2,6 +2,7 @@ package ai.drivemate.routing;
 
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -86,15 +87,22 @@ public class RouteRepository {
         new Thread(() -> {
             Exception lastError = null;
             for (RoutingProvider provider : providers) {
-                if (!isConfigured(provider)) continue;
+                if (!isConfigured(provider)) {
+                    Log.d("DriveMateRoute", "skip provider=" + provider.name() + " (not configured)");
+                    continue;
+                }
                 try {
+                    Log.i("DriveMateRoute", "request provider=" + provider.name());
                     List<RouteResult> routes = request.run(provider);
                     if (routes == null || routes.isEmpty()) {
                         throw new IllegalStateException(provider.name() + " returned no routes.");
                     }
+                    Log.i("DriveMateRoute", "success provider=" + provider.name()
+                            + " alternatives=" + routes.size());
                     successCallback.onSuccess(routes);
                     return;
                 } catch (Exception error) {
+                    Log.w("DriveMateRoute", "failed provider=" + provider.name(), error);
                     lastError = error;
                 }
             }

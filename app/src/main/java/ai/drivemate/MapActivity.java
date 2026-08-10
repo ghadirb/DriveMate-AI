@@ -2595,6 +2595,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         maybeShowPendingTripReport();
         if (NightModeManager.refreshIfChanged(this)) return;
         NightModeManager.applyWindowBrightness(this);
+        if (map != null) map.onResume();
         // Some native map SDK builds tear down and rebuild their rendering surface across an
         // onPause/onResume cycle (e.g. leaving to another app and coming back) without telling the
         // app, silently dropping every previously-added marker even though this activity instance
@@ -2647,6 +2648,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             } catch (SecurityException ignored) {
             }
         }
+        if (map != null) map.onPause();
         super.onPause();
     }
 
@@ -2672,10 +2674,22 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     @Override protected void onDestroy() {
         poiExpansionHandler.removeCallbacksAndMessages(null);
         trafficIncidentHandler.removeCallbacksAndMessages(null);
+        searchHandler.removeCallbacksAndMessages(null);
+        if (locationManager != null) {
+            try {
+                locationManager.removeUpdates(this);
+            } catch (SecurityException ignored) {
+            }
+        }
+        if (map != null) {
+            map.onDetach();
+            map = null;
+        }
         super.onDestroy();
     }
 
     @Override public void onLocationChanged(Location location) {
+        if (isFinishing() || isDestroyed()) return;
         Location accepted = mapLocationFilter.filter(location);
         if (accepted == null) return;
         gpsWarningActive = false;
@@ -2687,6 +2701,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             hasHeading = true;
         }
         runOnUiThread(() -> {
+            if (isFinishing() || isDestroyed() || map == null || !map.isReadyForOverlays()) return;
             showCurrentMarker();
             if (selectedRoute != null) updateRoadSpeedLimit(accepted.getLatitude(), accepted.getLongitude());
             if (navigationMode && navigationEngine.isNavigating()) {

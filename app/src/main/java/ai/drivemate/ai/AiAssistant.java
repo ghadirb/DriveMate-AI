@@ -85,7 +85,12 @@ public class AiAssistant {
             try (BufferedReader r = new BufferedReader(new InputStreamReader(code < 300 ? c.getInputStream() : c.getErrorStream(), StandardCharsets.UTF_8))) {
                 String line; while ((line = r.readLine()) != null) sb.append(line);
             }
-            if (code >= 300) throw new IllegalStateException("HTTP " + code);
+            if (code >= 300) {
+                String detail = sb.toString().trim();
+                if (detail.length() > 300) detail = detail.substring(0, 300);
+                throw new IllegalStateException("HTTP " + code
+                        + (detail.isEmpty() ? "" : ": " + detail));
+            }
             return new JSONObject(sb.toString()).getJSONArray("choices").getJSONObject(0).getJSONObject("message").optString("content", "پاسخی دریافت نشد.");
         } finally { c.disconnect(); }
     }
