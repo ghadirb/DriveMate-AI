@@ -90,6 +90,72 @@ public final class OsmMapView extends org.osmdroid.views.MapView {
             invalidate();
         }
     }
-    public void setBearing(float ignoredBearing, float ignoredDuration) { }
-    public void setTilt(float ignoredTilt, float ignoredDuration) { }
+    private float currentBearing;
+    private float currentTilt;
+    private android.animation.ValueAnimator bearingAnimator;
+    private android.animation.ValueAnimator tiltAnimator;
+
+    /** Rotates the tile layer so the given heading points up (osmdroid's native map rotation),
+     *  animating over the shortest angular path instead of always spinning forward through 360°. */
+    public void setBearing(float bearing, float durationSeconds) {
+        float target = ((bearing % 360f) + 360f) % 360f;
+        if (bearingAnimator != null) bearingAnimator.cancel();
+        float shortestDelta = ((target - currentBearing + 540f) % 360f) - 180f;
+        float animateTo = currentBearing + shortestDelta;
+        if (durationSeconds <= 0f) {
+            currentBearing = target;
+            setMapOrientation(currentBearing);
+            return;
+        }
+        bearingAnimator = android.animation.ValueAnimator.ofFloat(currentBearing, animateTo);
+        bearingAnimator.setDuration((long) (durationSeconds * 1000f));
+        bearingAnimator.setInterpolator(new android.view.animation.DecelerateInterpolator());
+        bearingAnimator.addUpdateListener(a -> {
+            float value = (float) a.getAnimatedValue();
+            currentBearing = ((value % 360f) + 360f) % 360f;
+            setMapOrientation(currentBearing);
+        });
+        bearingAnimator.start();
+    }
+
+    /** osmdroid renders a flat 2D plane with no true camera pitch, so a real perspective tilt is
+     *  faked with a standard Android trick: rotate the whole view around its bottom edge on the
+     *  X axis (the road ahead tips back "into" the screen the way a real 3D chase-cam would show
+     *  it) and scale it back up so the foreshortened plane still fully covers the container - the
+     *  same approach other 2D-tile navigation apps use when they don't have a true 3D map engine. */
+    public void setTilt(float tilt, float durationSeconds) {
+        float clamped = Math.max(0f, Math.min(58f, tilt));
+        if (getWidth() == 0 || getHeight() == 0) {
+            post(() -> setTilt(tilt, durationSeconds));
+            return;
+        }
+        setPivotX(getWidth() / 2f);
+        setPivotY(getHeight());
+        setCameraDistance(getContext().getResources().getDisplayMetrics().density * 14000f);
+        if (tiltAnimator != null) tiltAnimator.cancel();
+        if (durationSeconds <= 0f) {
+            applyTilt(clamped);
+            return;
+        }
+        tiltAnimator = android.animation.ValueAnimator.ofFloat(currentTilt, clamped);
+        tiltAnimator.setDuration((long) (durationSeconds * 1000f));
+        tiltAnimator.setInterpolator(new android.view.animation.DecelerateInterpolator());
+        tiltAnimator.addUpdateListener(a -> applyTilt((float) a.getAnimatedValue()));
+        tiltAnimator.start();
+    }
+
+    private void applyTilt(float degrees) {
+        currentTilt = degrees;
+        setRotationX(degrees);
+        double radians = Math.toRadians(degrees);
+        float compensation = (float) (1d / Math.max(0.62d, Math.cos(radians)));
+        setScaleX(compensation);
+        setScaleY(compensation);
+    }
+
+    @Override protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+        super.onSizeChanged(w, h, oldw, oldh);
+        setPivotX(w / 2f);
+        setPivotY(h);
+    }
 }
