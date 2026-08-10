@@ -60,7 +60,7 @@ public final class TomTomRoutingProvider implements RoutingProvider {
         String url = "https://api.tomtom.com/routing/1/calculateRoute/" + locations + "/json"
                 + "?key=" + URLEncoder.encode(apiKey, "UTF-8")
                 + "&traffic=true&routeType=fastest&travelMode=car&instructionsType=text"
-                + "&computeAlternativeRoutes=true&maxAlternatives=2&language=en-US";
+                + "&maxAlternatives=2&language=en-US";
         JSONObject body = RoutingHttp.getJson(url);
         JSONArray routes = body.optJSONArray("routes");
         if (routes == null || routes.length() == 0) throw new IllegalStateException("TomTom returned no route.");

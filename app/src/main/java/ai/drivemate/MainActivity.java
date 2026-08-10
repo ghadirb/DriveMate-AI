@@ -668,6 +668,7 @@ public class MainActivity extends Activity {
             }
             return;
         }
+        onlineSpeechClient.setTranscriptionHint(voiceTranscriptionHint());
         if (onlineSpeechClient.canUseOnlineSpeech() && onlineSpeechClient.startRecording()) {
             recordingOnlineSpeech = true;
             voicePlayer.announce("listening", "در حال گوش دادن هستم.");
@@ -723,6 +724,32 @@ public class MainActivity extends Activity {
         recordingLocalSpeech = false;
         voiceButton.setEnabled(true);
         voiceButton.setText("مقصد را بگویید");
+    }
+
+    /**
+     * Names already saved by the driver are the most important vocabulary for destination
+     * recognition. Keep the prompt short so it remains an STT hint rather than a transcript.
+     */
+    private String voiceTranscriptionHint() {
+        StringBuilder hint = new StringBuilder(
+                "گفتار به زبان فارسی است و معمولاً نام مقصد، خیابان، مجتمع، پلاک یا شماره واحد را دارد.");
+        List<SavedPlace> places = placeStore == null ? java.util.Collections.emptyList() : placeStore.allPlaces();
+        int count = Math.min(20, places.size());
+        if (count > 0) hint.append(" نام‌های ذخیره‌شده: ");
+        for (int index = 0; index < count; index++) {
+            String name = places.get(index).name;
+            if (name == null || name.trim().isEmpty()) continue;
+            hint.append(name.trim()).append(index == count - 1 ? "." : "، ");
+        }
+        return hint.toString();
+    }
+
+    /** The retry action must actually start a fresh recording, not merely show a prompt. */
+    private void retryVoiceDestination() {
+        onlineSpeechClient.stopPlayback();
+        voicePlayer.interrupt();
+        setStatus("نام مقصد را دوباره بگویید.");
+        voiceHandler.postDelayed(this::toggleVoiceInput, 250L);
     }
 
     private void handleVoiceText(String text) {
@@ -1470,8 +1497,7 @@ public class MainActivity extends Activity {
                 .setMessage("شنیدم: «" + spokenTerm + "»")
                 .setItems(labels, (dialog, which) -> startNavigation(places.get(which)))
                 .setNegativeButton("دوباره می‌گویم", (dialog, which) -> {
-                    setStatus("نام مقصد را دوباره بگویید.");
-                    speakShort("نام مقصد را دوباره بگویید.");
+                    retryVoiceDestination();
                 })
                 .show();
     }

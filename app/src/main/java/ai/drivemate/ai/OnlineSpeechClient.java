@@ -31,6 +31,7 @@ public class OnlineSpeechClient {
     private File recording;
     private MediaPlayer player;
     private volatile String lastTtsProvider = "";
+    private volatile String transcriptionHint = "";
     /** Bumped by stopPlayback() so a speak() request still synthesizing on its background thread
      *  (the network round-trip can take a couple of seconds) can tell, once it returns, that it
      *  was superseded by a stop/mode-switch/newer announcement in the meantime and must not play
@@ -46,6 +47,11 @@ public class OnlineSpeechClient {
     }
 
     public void setRuntimeKeys(RuntimeKeys keys) { if (keys != null) this.keys = keys; }
+    /** Optional Persian vocabulary that helps the recognizer preserve saved destination names. */
+    public void setTranscriptionHint(String value) {
+        String normalized = value == null ? "" : value.trim();
+        transcriptionHint = normalized.length() > 900 ? normalized.substring(0, 900) : normalized;
+    }
     public boolean canUseOnlineSpeech() { return gapKey() != null || liaraKey() != null; }
     /** TTS currently uses the documented GapGPT audio endpoint; Liara is STT fallback only. */
     public boolean canUseOnlineTts() { return gapKey() != null; }
@@ -55,7 +61,7 @@ public class OnlineSpeechClient {
         try {
             recording = new File(context.getCacheDir(), "voice-command.m4a");
             recorder = new MediaRecorder();
-            recorder.setAudioSource(MediaRecorder.AudioSource.MIC);
+            recorder.setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION);
             recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
             recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
             recorder.setAudioEncodingBitRate(128000);
@@ -270,9 +276,11 @@ public class OnlineSpeechClient {
     private String transcribeWithFallback(File audio) throws Exception {
         Exception gapError = null;
         if (gapKey() != null) {
-            try { return transcribeGapGpt(audio, "whisper-1"); }
+            try { return transcribeGapGpt(audio, "whisper-1", true); }
             catch (Exception first) {
-                gapError = first;
+                Log.w(TAG, "GapGPT STT hint request failed; retrying documented basic request", first);
+                try { return transcribeGapGpt(audio, "whisper-1", false); }
+                catch (Exception second) { gapError = second; }
             }
         }
         if (liaraKey() != null) return transcribeLiara(audio);
@@ -280,7 +288,7 @@ public class OnlineSpeechClient {
         throw new IllegalStateException("No online speech provider key");
     }
 
-    private String transcribeGapGpt(File audio, String model) throws Exception {
+    private String transcribeGapGpt(File audio, String model, boolean includeRecognitionHints) throws Exception {
         String apiKey = gapKey();
         if (apiKey == null) throw new IllegalStateException("No GapGPT key");
         String boundary = "----DriveMate" + UUID.randomUUID();
@@ -289,6 +297,10 @@ public class OnlineSpeechClient {
         connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
         try (OutputStream out = connection.getOutputStream()) {
             writeField(out, boundary, "model", model);
+            if (includeRecognitionHints) {
+                writeField(out, boundary, "language", "fa");
+                if (!transcriptionHint.isEmpty()) writeField(out, boundary, "prompt", transcriptionHint);
+            }
             out.write(("--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"voice.m4a\"\r\nContent-Type: audio/mp4\r\n\r\n").getBytes(StandardCharsets.UTF_8));
             try (FileInputStream input = new FileInputStream(audio)) { byte[] buffer = new byte[8192]; int count; while ((count = input.read(buffer)) != -1) out.write(buffer, 0, count); }
             out.write(("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
@@ -299,6 +311,8 @@ public class OnlineSpeechClient {
             if (code >= 300) throw new IllegalStateException("GapGPT HTTP " + code);
             String text = new JSONObject(response).optString("text").trim();
             if (text.isEmpty()) throw new IllegalStateException("GapGPT پاسخ خالی داد");
+            Log.i(TAG, "STT provider=GapGPT model=" + model + " hints=" + includeRecognitionHints
+                    + " textLength=" + text.length());
             return text;
         } finally { connection.disconnect(); }
     }
