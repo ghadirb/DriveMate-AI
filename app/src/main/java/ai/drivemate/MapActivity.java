@@ -1249,6 +1249,12 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         routeText.setText("در حال آماده‌سازی مسیرهای پیشنهادی...");
         if (routeOptionsScroll != null) routeOptionsScroll.setVisibility(View.GONE);
         showDestinationMarker(place);
+        RouteResult cached = navigationMode ? RouteCache.get(place.latitude, place.longitude) : null;
+        if (cached != null) {
+            Log.i("DriveMateMapRoute", "showing cached route provider=" + cached.providerName
+                    + " geometry=" + cached.geometry.size());
+            showRouteOptions(java.util.Collections.singletonList(cached));
+        }
         if (routeWaypoints.isEmpty()) {
             routeRepository.getRoutes(originLatitude, originLongitude, place.latitude, place.longitude,
                     routes -> runOnUiThread(() -> showRouteOptions(routes)),
@@ -1500,7 +1506,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             RouteCache.store(selectedRoute, destination.latitude, destination.longitude);
         }
         showRoutePreview(selectedRoute);
-        if (navigationMode) startTurnByTurn(selectedRoute);
+        if (navigationMode) {
+            centerOnSelectedRoute();
+            startTurnByTurn(selectedRoute);
+        }
         else renderRouteChips();
     }
 
@@ -1605,6 +1614,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                 ? java.util.Collections.singletonList(selectedRoute) : routeOptions;
         for (RouteResult route : routesToDraw) {
             ArrayList<LatLng> points = routePoints(route);
+            Log.i("DriveMateMapRoute", "draw provider=" + route.providerName + " geometry="
+                    + route.geometry.size() + " drawPoints=" + points.size()
+                    + " selected=" + (route == selectedRoute));
             if (points.size() < 2) continue;
             boolean isSelected = route == selectedRoute;
             Polyline polyline = new Polyline(points, isSelected);
