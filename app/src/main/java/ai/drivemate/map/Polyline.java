@@ -22,8 +22,11 @@ public final class Polyline {
             ArrayList<org.osmdroid.util.GeoPoint> geoPoints = new ArrayList<>();
             for (LatLng point : points) geoPoints.add(new org.osmdroid.util.GeoPoint(point.getLatitude(), point.getLongitude()));
             overlay.setPoints(geoPoints);
-            overlay.getOutlinePaint().setColor(primary ? Color.rgb(17, 107, 135) : Color.rgb(117, 117, 117));
-            overlay.getOutlinePaint().setStrokeWidth(primary ? 12f : 7f);
+            overlay.getOutlinePaint().setColor(primary ? Color.rgb(0, 94, 255) : Color.rgb(90, 90, 90));
+            overlay.getOutlinePaint().setStrokeWidth(primary ? 20f : 9f);
+            overlay.getOutlinePaint().setAntiAlias(true);
+            overlay.getOutlinePaint().setStrokeCap(android.graphics.Paint.Cap.ROUND);
+            overlay.getOutlinePaint().setStrokeJoin(android.graphics.Paint.Join.ROUND);
         }
         return overlay;
     }
