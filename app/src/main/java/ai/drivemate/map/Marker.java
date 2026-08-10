@@ -20,8 +20,10 @@ public final class Marker {
         if (overlay == null) {
             overlay = new org.osmdroid.views.overlay.Marker(map);
             overlay.setPosition(new org.osmdroid.util.GeoPoint(position.getLatitude(), position.getLongitude()));
+            boolean centered = style != null && style.centered;
             overlay.setAnchor(org.osmdroid.views.overlay.Marker.ANCHOR_CENTER,
-                    org.osmdroid.views.overlay.Marker.ANCHOR_BOTTOM);
+                    centered ? org.osmdroid.views.overlay.Marker.ANCHOR_CENTER
+                             : org.osmdroid.views.overlay.Marker.ANCHOR_BOTTOM);
             overlay.setInfoWindow(null);
             overlay.setPanToView(false);
             if (style != null && style.bitmap != null) {

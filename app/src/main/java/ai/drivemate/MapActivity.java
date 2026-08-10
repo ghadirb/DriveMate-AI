@@ -2628,23 +2628,63 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     private MarkerStyle vehicleMarkerStyle(float bearing) {
-        Bitmap bitmap = Bitmap.createBitmap(96, 96, Bitmap.Config.ARGB_8888);
+        int size = 148;
+        float center = size / 2f;
+        Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
-        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        canvas.rotate(bearing, 48f, 48f);
+        canvas.rotate(bearing, center, center);
+
+        // Soft translucent halo so the arrow stays readable over both light and dark basemap
+        // tiles, and gives the marker a bit of visual weight/presence instead of a bare shape.
+        Paint halo = new Paint(Paint.ANTI_ALIAS_FLAG);
+        halo.setColor(0x2fffffff);
+        canvas.drawCircle(center, center, size * 0.44f, halo);
+        Paint haloRing = new Paint(Paint.ANTI_ALIAS_FLAG);
+        haloRing.setStyle(Paint.Style.STROKE);
+        haloRing.setStrokeWidth(size * 0.02f);
+        haloRing.setColor(0x52ffffff);
+        canvas.drawCircle(center, center, size * 0.44f, haloRing);
+
+        // A rounded chevron/paper-airplane silhouette (smooth bezier curves) instead of the
+        // previous flat 4-point diamond, drawn symmetrically around the bitmap's true center so
+        // it stays put on the GPS point (not the bottom-tip) as it rotates with bearing.
+        float tipY = size * 0.16f;
+        float shoulderY = size * 0.74f;
+        float shoulderX = size * 0.29f;
+        float notchY = size * 0.55f;
         Path arrow = new Path();
-        arrow.moveTo(48f, 8f);
-        arrow.lineTo(76f, 76f);
-        arrow.lineTo(48f, 62f);
-        arrow.lineTo(20f, 76f);
+        arrow.moveTo(center, tipY);
+        arrow.quadTo(center + shoulderX * 1.05f, shoulderY * 0.8f, center + shoulderX, shoulderY);
+        arrow.quadTo(center, notchY, center - shoulderX, shoulderY);
+        arrow.quadTo(center - shoulderX * 1.05f, shoulderY * 0.8f, center, tipY);
         arrow.close();
-        paint.setColor(0xff176b87);
-        canvas.drawPath(arrow, paint);
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(4f);
-        paint.setColor(0xffffffff);
-        canvas.drawPath(arrow, paint);
-        return new MarkerStyle(bitmap);
+
+        Paint shadow = new Paint(Paint.ANTI_ALIAS_FLAG);
+        shadow.setColor(0x552b2b2b);
+        shadow.setMaskFilter(new android.graphics.BlurMaskFilter(size * 0.045f, android.graphics.BlurMaskFilter.Blur.NORMAL));
+        canvas.save();
+        canvas.translate(0f, size * 0.025f);
+        canvas.drawPath(arrow, shadow);
+        canvas.restore();
+
+        Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+        fill.setShader(new android.graphics.LinearGradient(center, tipY, center, shoulderY,
+                0xff35a7e8, 0xff0d4e78, android.graphics.Shader.TileMode.CLAMP));
+        canvas.drawPath(arrow, fill);
+
+        Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
+        stroke.setStyle(Paint.Style.STROKE);
+        stroke.setStrokeWidth(size * 0.042f);
+        stroke.setStrokeJoin(Paint.Join.ROUND);
+        stroke.setColor(0xffffffff);
+        canvas.drawPath(arrow, stroke);
+
+        // A small glossy highlight near the nose for a subtle 3D pop.
+        Paint highlight = new Paint(Paint.ANTI_ALIAS_FLAG);
+        highlight.setColor(0x6bffffff);
+        canvas.drawCircle(center, tipY + size * 0.15f, size * 0.045f, highlight);
+
+        return new MarkerStyle(bitmap, true);
     }
 
     @Override protected void onResume() {
