@@ -69,7 +69,17 @@ public final class TomTomRoutingProvider implements RoutingProvider {
         ArrayList<RouteResult> results = new ArrayList<>();
         for (int index = 0; index < routes.length() && index < 3; index++) {
             JSONObject route = routes.optJSONObject(index);
-            if (route != null) results.add(parseRoute(route, waypoints, destinationLat, destinationLng));
+            if (route == null) continue;
+            try {
+                results.add(parseRoute(route, waypoints, destinationLat, destinationLng));
+            } catch (RuntimeException parseError) {
+                // One malformed alternate (an unexpected field shape, a missing section) must not
+                // cost every other route in the response - this used to throw out of the whole
+                // loop, discarding a perfectly good primary route (and any other alternatives)
+                // just because route index 1 or 2 didn't parse, which looked like "TomTom only
+                // ever shows one route" even when the API had actually returned several.
+                android.util.Log.w("TomTomRoutingProvider", "Skipping unparsable route at index " + index, parseError);
+            }
         }
         if (results.isEmpty()) throw new IllegalStateException("TomTom returned an invalid route.");
         return results;

@@ -441,8 +441,16 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             map = new OsmMapView(this);
             ((FrameLayout) findViewById(R.id.mapContainer)).addView(map,
                     new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-            map.moveCamera(new LatLng(originLatitude, originLongitude), 0f);
-            map.setZoom(14f, 0f);
+            LatLng initialCenter = new LatLng(originLatitude, originLongitude);
+            // osmdroid computes the camera/projection from the view's actual pixel size; calling
+            // moveCamera/setZoom here, in the same pass that just added the view to its parent,
+            // can run before that view has been measured and laid out (still zero-sized), which
+            // has left the map centered on an undefined area until something else happened to
+            // force a redraw. Posting waits for layout to finish first.
+            map.post(() -> {
+                map.moveCamera(initialCenter, 0f);
+                map.setZoom(14f, 0f);
+            });
             showCurrentMarker();
             map.setOnMapLongClickListener(point -> {
                 final double latitude = point.getLatitude();
@@ -1506,8 +1514,12 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             RouteCache.store(selectedRoute, destination.latitude, destination.longitude);
         }
         showRoutePreview(selectedRoute);
+        // Previously this only ran in navigationMode, so choosing a destination while just
+        // browsing the map (before tapping "start") left the camera exactly where it was - if the
+        // destination was outside the current viewport, the marker/route were drawn correctly but
+        // invisible, which looked like "the destination wasn't shown" or "showed somewhere else".
+        centerOnSelectedRoute();
         if (navigationMode) {
-            centerOnSelectedRoute();
             startTurnByTurn(selectedRoute);
         }
         else renderRouteChips();
