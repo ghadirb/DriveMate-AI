@@ -4,6 +4,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 
 import ai.drivemate.model.RoutePoint;
@@ -20,6 +21,8 @@ import ai.drivemate.routing.RoutingHttp;
  * is only for a specific, driver-facing "something is here" point warning.
  */
 public final class TrafficIncidentProvider {
+    private static final double MAX_BBOX_AREA_KM2 = 9_000d;
+    private static final double BBOX_PADDING_DEGREES = 0.02d;
     private String apiKey;
     private boolean enabled = true;
 
@@ -38,18 +41,44 @@ public final class TrafficIncidentProvider {
     /** Fetches once for the given route geometry; the caller decides how often to poll (see
      *  MainActivity's traffic-incident check cadence) so this never runs on every GPS sample. */
     public List<TrafficIncident> incidentsNear(List<RoutePoint> geometry) throws Exception {
-        ArrayList<TrafficIncident> results = new ArrayList<>();
-        if (!hasKey() || geometry == null || geometry.isEmpty()) return results;
-        double minLat = Double.MAX_VALUE, maxLat = -Double.MAX_VALUE, minLng = Double.MAX_VALUE, maxLng = -Double.MAX_VALUE;
-        for (RoutePoint point : geometry) {
-            minLat = Math.min(minLat, point.latitude);
-            maxLat = Math.max(maxLat, point.latitude);
-            minLng = Math.min(minLng, point.longitude);
-            maxLng = Math.max(maxLng, point.longitude);
+        LinkedHashMap<String, TrafficIncident> results = new LinkedHashMap<>();
+        if (!hasKey() || geometry == null || geometry.isEmpty()) return new ArrayList<>();
+        for (BoundingBox bbox : routeBoundingBoxes(geometry)) {
+            for (TrafficIncident incident : incidentsIn(bbox)) {
+                results.put(incident.id, incident);
+            }
         }
-        // ~2km buffer so an incident just off the bounding box edge (e.g. near a bend) is not missed.
-        double pad = 0.02d;
-        String bbox = (minLng - pad) + "," + (minLat - pad) + "," + (maxLng + pad) + "," + (maxLat + pad);
+        return new ArrayList<>(results.values());
+    }
+
+    /** TomTom rejects bboxes larger than 10,000 km². Long routes are therefore split into
+     * consecutive, overlapping windows rather than losing all live incident data. */
+    private List<BoundingBox> routeBoundingBoxes(List<RoutePoint> geometry) {
+        ArrayList<BoundingBox> windows = new ArrayList<>();
+        BoundingBox current = null;
+        RoutePoint previous = null;
+        for (RoutePoint point : geometry) {
+            BoundingBox candidate = current == null ? BoundingBox.from(point) : current.including(point);
+            if (current != null && candidate.areaKm2WithPadding() > MAX_BBOX_AREA_KM2) {
+                windows.add(current);
+                BoundingBox overlapping = BoundingBox.from(previous == null ? point : previous).including(point);
+                // A malformed geometry can contain one very large jump. A bbox covering both
+                // endpoints would still be rejected, so keep the new point's local window valid.
+                current = overlapping.areaKm2WithPadding() <= MAX_BBOX_AREA_KM2
+                        ? overlapping : BoundingBox.from(point);
+            } else {
+                current = candidate;
+            }
+            previous = point;
+        }
+        if (current != null) windows.add(current);
+        return windows;
+    }
+
+    private List<TrafficIncident> incidentsIn(BoundingBox bounds) throws Exception {
+        ArrayList<TrafficIncident> results = new ArrayList<>();
+        String bbox = (bounds.minLng - BBOX_PADDING_DEGREES) + "," + (bounds.minLat - BBOX_PADDING_DEGREES)
+                + "," + (bounds.maxLng + BBOX_PADDING_DEGREES) + "," + (bounds.maxLat + BBOX_PADDING_DEGREES);
         String fields = "{incidents{type,geometry{type,coordinates},properties{iconCategory,events{description,code},delay,id}}}";
         String url = "https://api.tomtom.com/traffic/services/5/incidentDetails"
                 + "?key=" + apiKey
@@ -82,6 +111,37 @@ public final class TrafficIncidentProvider {
             results.add(new TrafficIncident(id, type, point[0], point[1], description, properties.optInt("delay", 0)));
         }
         return results;
+    }
+
+    private static final class BoundingBox {
+        final double minLat;
+        final double maxLat;
+        final double minLng;
+        final double maxLng;
+
+        private BoundingBox(double minLat, double maxLat, double minLng, double maxLng) {
+            this.minLat = minLat;
+            this.maxLat = maxLat;
+            this.minLng = minLng;
+            this.maxLng = maxLng;
+        }
+
+        static BoundingBox from(RoutePoint point) {
+            return new BoundingBox(point.latitude, point.latitude, point.longitude, point.longitude);
+        }
+
+        BoundingBox including(RoutePoint point) {
+            return new BoundingBox(Math.min(minLat, point.latitude), Math.max(maxLat, point.latitude),
+                    Math.min(minLng, point.longitude), Math.max(maxLng, point.longitude));
+        }
+
+        double areaKm2WithPadding() {
+            double latitudeSpanKm = (maxLat - minLat + 2d * BBOX_PADDING_DEGREES) * 111.32d;
+            double centerLatitude = (minLat + maxLat) / 2d;
+            double longitudeSpanKm = (maxLng - minLng + 2d * BBOX_PADDING_DEGREES)
+                    * 111.32d * Math.cos(Math.toRadians(centerLatitude));
+            return Math.max(0d, latitudeSpanKm * longitudeSpanKm);
+        }
     }
 
     /** TomTom's documented iconCategory codes: 1 accident, 6 road closed, 8 roadworks,

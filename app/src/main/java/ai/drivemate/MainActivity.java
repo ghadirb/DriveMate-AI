@@ -283,8 +283,8 @@ public class MainActivity extends Activity {
         mapIrRoutingProvider = new MapIrRoutingProvider("");
         openRouteServiceRoutingProvider = new OpenRouteServiceRoutingProvider("");
         tomTomRoutingProvider = new TomTomRoutingProvider("");
-        routeRepository = new RouteRepository(tomTomRoutingProvider, openRouteServiceRoutingProvider,
-                neshanRoutingProvider, mapIrRoutingProvider);
+        routeRepository = new RouteRepository(tomTomRoutingProvider, mapIrRoutingProvider,
+                neshanRoutingProvider, openRouteServiceRoutingProvider);
         placeSearchRepository = new PlaceSearchRepository(neshanRoutingProvider, mapIrRoutingProvider,
                 "");
         commandParser = new VoiceCommandParser();
@@ -1443,10 +1443,37 @@ public class MainActivity extends Activity {
         Location location = locationTracker.getLastLocation();
         if (location == null) { setStatus("برای پیدا کردن مقصد، GPS باید آماده باشد."); return; }
         if (term.isEmpty()) { speakShort("نام مقصد را دوباره بگویید."); return; }
-        setStatus("در حال پیدا کردن " + term + "...");
-        placeSearchRepository.search(term, location.getLatitude(), location.getLongitude(),
-                place -> runOnUiThread(() -> startNavigation(place)),
+        setStatus("در حال پیدا کردن مقصد «" + term + "»...");
+        placeSearchRepository.searchAll(term, location.getLatitude(), location.getLongitude(),
+                places -> runOnUiThread(() -> showVoiceDestinationChoices(term, places)),
                 error -> runOnUiThread(() -> { setStatus(error); speakShort("مقصد پیدا نشد. نام آن را دوباره بگویید."); }));
+    }
+
+    /** Speech recognition and place search can each be imperfect. Never start a trip to the
+     * first fuzzy search result: let the driver explicitly select the intended destination. */
+    private void showVoiceDestinationChoices(String spokenTerm, List<SavedPlace> places) {
+        if (places == null || places.isEmpty()) {
+            setStatus("برای «" + spokenTerm + "» مقصدی پیدا نشد.");
+            speakShort("مقصد پیدا نشد. نام آن را دوباره بگویید.");
+            return;
+        }
+        int count = Math.min(5, places.size());
+        String[] labels = new String[count];
+        for (int index = 0; index < count; index++) {
+            SavedPlace place = places.get(index);
+            String address = place.address == null ? "" : place.address.trim();
+            labels[index] = address.isEmpty() ? place.name : place.name + "\n" + address;
+        }
+        setStatus("مقصدهای پیدا شده برای «" + spokenTerm + "» را بررسی کنید.");
+        new AlertDialog.Builder(this)
+                .setTitle("کدام مقصد مدنظر شماست؟")
+                .setMessage("شنیدم: «" + spokenTerm + "»")
+                .setItems(labels, (dialog, which) -> startNavigation(places.get(which)))
+                .setNegativeButton("دوباره می‌گویم", (dialog, which) -> {
+                    setStatus("نام مقصد را دوباره بگویید.");
+                    speakShort("نام مقصد را دوباره بگویید.");
+                })
+                .show();
     }
 
     private void loadRuntimeKeys() {
@@ -1466,6 +1493,10 @@ public class MainActivity extends Activity {
             placeSearchRepository.setTomTomEnabled(runtimeKeys.providerEnabled("TOMTOM", true));
             trafficIncidentProvider.setApiKey(runtimeKeys.get("TOMTOM_API_KEY"));
             trafficIncidentProvider.setEnabled(runtimeKeys.providerEnabled("TOMTOM", true));
+            android.util.Log.i("DriveMateKeys", "routing configured: TomTom="
+                    + tomTomRoutingProvider.isConfigured() + ", map.ir=" + mapIrRoutingProvider.isConfigured()
+                    + ", Neshan=" + neshanRoutingProvider.isConfigured() + ", ORS="
+                    + openRouteServiceRoutingProvider.isConfigured());
             StringBuilder found = new StringBuilder();
             for (String name : new String[]{"GAPGPT_API_KEY", "LIARA_API_KEY", "AI_API_KEY", "TOMTOM_API_KEY", "OPENROUTESERVICE_API_KEY", "NESHAN_API_KEY", "MAPIR_API_KEY"}) {
                 if (runtimeKeys.has(name)) found.append(name).append(' ');

@@ -281,8 +281,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         openRouteServiceRoutingProvider = new OpenRouteServiceRoutingProvider(openRouteServiceKey);
         placeSearchRepository = new PlaceSearchRepository(neshanRoutingProvider, mapIrRoutingProvider, tomtomKey);
         trafficIncidentProvider = new TrafficIncidentProvider(tomtomKey);
-        routeRepository = new RouteRepository(tomTomRoutingProvider, openRouteServiceRoutingProvider,
-                neshanRoutingProvider, mapIrRoutingProvider);
+        routeRepository = new RouteRepository(tomTomRoutingProvider, mapIrRoutingProvider,
+                neshanRoutingProvider, openRouteServiceRoutingProvider);
 
         destinationInfoContainer = findViewById(R.id.mapDestinationInfo);
         mapRoutePanel = findViewById(R.id.mapRoutePanel);
@@ -410,6 +410,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             placeSearchRepository.setTomTomEnabled(keys.providerEnabled("TOMTOM", true));
             trafficIncidentProvider.setApiKey(keys.get("TOMTOM_API_KEY"));
             trafficIncidentProvider.setEnabled(keys.providerEnabled("TOMTOM", true));
+            Log.i("DriveMateKeys", "map routing configured: TomTom=" + tomTomRoutingProvider.isConfigured()
+                    + ", map.ir=" + mapIrRoutingProvider.isConfigured() + ", Neshan="
+                    + neshanRoutingProvider.isConfigured() + ", ORS="
+                    + openRouteServiceRoutingProvider.isConfigured());
             runOnUiThread(() -> {
                 remoteRoutingConfigLoading = false;
                 if (pendingRouteDestination != null) {
@@ -1460,8 +1464,6 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         if (destinationMarker != null) map.removeMarker(destinationMarker);
         destinationMarker = new Marker(new LatLng(place.latitude, place.longitude), markerStyle(0xff176b87));
         map.addMarker(destinationMarker);
-        map.moveCamera(destinationMarker.getLatLng(), 0.25f);
-        map.setZoom(15f, 0.25f);
     }
 
     private void selectDestination(SavedPlace place) {
@@ -1477,8 +1479,6 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             if (destinationMarker != null) map.removeMarker(destinationMarker);
             destinationMarker = new Marker(new LatLng(place.latitude, place.longitude), markerStyle(0xff176b87));
             map.addMarker(destinationMarker);
-            map.moveCamera(destinationMarker.getLatLng(), 0.25f);
-            map.setZoom(15f, 0.25f);
         }
         routeRepository.getRoute(originLatitude, originLongitude, place.latitude, place.longitude,
                 route -> runOnUiThread(() -> showRoutePreview(route)),
@@ -1589,10 +1589,6 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         loadRouteSpeedLimits(route);
         loadRouteTrafficIncidents(route);
         drawAllRoutes();
-        if (map != null && !navigationMode) {
-            map.moveCamera(new LatLng(originLatitude, originLongitude), 0.25f);
-            map.setZoom(12.5f, 0.25f);
-        }
     }
 
     /** Draws every fetched alternative on the map at once (selected route prominent, the rest
