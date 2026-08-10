@@ -109,6 +109,7 @@ public final class TomTomRoutingProvider implements RoutingProvider {
             }
         }
         logGeometry(originLat, originLng, destinationLat, destinationLng, geometry);
+        validateGeometry(geometry, distance, originLat, originLng, destinationLat, destinationLng);
         JSONObject guidance = route.optJSONObject("guidance");
         JSONArray instructions = guidance == null ? null : guidance.optJSONArray("instructions");
         int previousRouteOffset = 0;
@@ -149,7 +150,7 @@ public final class TomTomRoutingProvider implements RoutingProvider {
     private static void logRawResponse(JSONObject body) {
         String raw = body == null ? "" : body.toString();
         int maximumLogLength = 12_000;
-        Log.d(TAG, "raw Calculate Route response chars=" + raw.length() + " payload="
+        Log.i(TAG, "raw Calculate Route response chars=" + raw.length() + " payload="
                 + (raw.length() <= maximumLogLength ? raw : raw.substring(0, maximumLogLength) + "...[truncated]"));
     }
 
@@ -176,6 +177,58 @@ public final class TomTomRoutingProvider implements RoutingProvider {
         return !Double.isNaN(latitude) && !Double.isNaN(longitude)
                 && !Double.isInfinite(latitude) && !Double.isInfinite(longitude)
                 && latitude >= -90d && latitude <= 90d && longitude >= -180d && longitude <= 180d;
+    }
+
+    private static void validateGeometry(List<RoutePoint> geometry, int routeDistanceMeters,
+                                         double originLat, double originLng,
+                                         double destinationLat, double destinationLng) {
+        if (geometry.size() < 2) {
+            throw new IllegalStateException("TomTom route geometry has fewer than two points.");
+        }
+        RoutePoint first = geometry.get(0);
+        RoutePoint last = geometry.get(geometry.size() - 1);
+        double originGapMeters = distanceMeters(originLat, originLng, first.latitude, first.longitude);
+        double destinationGapMeters = distanceMeters(destinationLat, destinationLng, last.latitude, last.longitude);
+        double geometryDistanceMeters = 0d;
+        double longestSegmentMeters = 0d;
+        for (int index = 1; index < geometry.size(); index++) {
+            RoutePoint previous = geometry.get(index - 1);
+            RoutePoint current = geometry.get(index);
+            double segmentMeters = distanceMeters(previous.latitude, previous.longitude,
+                    current.latitude, current.longitude);
+            geometryDistanceMeters += segmentMeters;
+            longestSegmentMeters = Math.max(longestSegmentMeters, segmentMeters);
+        }
+        Log.i(TAG, "geometry validation points=" + geometry.size()
+                + " routeMeters=" + routeDistanceMeters
+                + " geometryMeters=" + Math.round(geometryDistanceMeters)
+                + " longestSegmentMeters=" + Math.round(longestSegmentMeters)
+                + " originGapMeters=" + Math.round(originGapMeters)
+                + " destinationGapMeters=" + Math.round(destinationGapMeters));
+        if (originGapMeters > 2_000d || destinationGapMeters > 2_000d) {
+            throw new IllegalStateException("TomTom route geometry endpoints do not match the requested route.");
+        }
+        if (routeDistanceMeters > 1_000 && (geometryDistanceMeters < routeDistanceMeters * 0.45d
+                || geometryDistanceMeters > routeDistanceMeters * 2.5d)) {
+            throw new IllegalStateException("TomTom route geometry length does not match the route summary.");
+        }
+        int minimumPoints = Math.min(12, Math.max(2, (int) Math.ceil(routeDistanceMeters / 750d) + 1));
+        if (routeDistanceMeters > 1_500 && geometry.size() < minimumPoints
+                && longestSegmentMeters > 900d) {
+            throw new IllegalStateException("TomTom route geometry is too sparse to render reliably.");
+        }
+    }
+
+    private static double distanceMeters(double firstLatitude, double firstLongitude,
+                                         double secondLatitude, double secondLongitude) {
+        double latitudeRadians = Math.toRadians(secondLatitude - firstLatitude);
+        double longitudeRadians = Math.toRadians(secondLongitude - firstLongitude);
+        double firstLatitudeRadians = Math.toRadians(firstLatitude);
+        double secondLatitudeRadians = Math.toRadians(secondLatitude);
+        double value = Math.sin(latitudeRadians / 2d) * Math.sin(latitudeRadians / 2d)
+                + Math.cos(firstLatitudeRadians) * Math.cos(secondLatitudeRadians)
+                * Math.sin(longitudeRadians / 2d) * Math.sin(longitudeRadians / 2d);
+        return 6_371_000d * 2d * Math.atan2(Math.sqrt(value), Math.sqrt(1d - value));
     }
 
     private static String persianInstruction(JSONObject instruction, int announcementDistanceMeters, String routeRoadName) {

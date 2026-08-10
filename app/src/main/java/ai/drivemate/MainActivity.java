@@ -283,10 +283,9 @@ public class MainActivity extends Activity {
         mapIrRoutingProvider = new MapIrRoutingProvider("");
         openRouteServiceRoutingProvider = new OpenRouteServiceRoutingProvider("");
         tomTomRoutingProvider = new TomTomRoutingProvider("");
-        routeRepository = new RouteRepository(tomTomRoutingProvider, mapIrRoutingProvider,
-                neshanRoutingProvider, openRouteServiceRoutingProvider);
-        placeSearchRepository = new PlaceSearchRepository(neshanRoutingProvider, mapIrRoutingProvider,
-                "");
+        routeRepository = new RouteRepository(mapIrRoutingProvider, neshanRoutingProvider,
+                openRouteServiceRoutingProvider, tomTomRoutingProvider);
+        placeSearchRepository = new PlaceSearchRepository(neshanRoutingProvider, "");
         commandParser = new VoiceCommandParser();
         aiAssistant = new AiAssistant(BuildConfig.AI_API_KEY);
         intelligenceCoordinator = new DrivingIntelligenceCoordinator(aiAssistant);
@@ -1517,8 +1516,7 @@ public class MainActivity extends Activity {
             mapIrRoutingProvider.setEnabled(runtimeKeys.providerEnabled("MAPIR", true));
             placeSearchRepository.setTomTomApiKey(runtimeKeys.get("TOMTOM_API_KEY"));
             placeSearchRepository.setTomTomEnabled(runtimeKeys.providerEnabled("TOMTOM", true));
-            trafficIncidentProvider.setApiKey(runtimeKeys.get("TOMTOM_API_KEY"));
-            trafficIncidentProvider.setEnabled(runtimeKeys.providerEnabled("TOMTOM", true));
+            trafficIncidentProvider.setEnabled(false);
             android.util.Log.i("DriveMateKeys", "routing configured: TomTom="
                     + tomTomRoutingProvider.isConfigured() + ", map.ir=" + mapIrRoutingProvider.isConfigured()
                     + ", Neshan=" + neshanRoutingProvider.isConfigured() + ", ORS="
@@ -2363,9 +2361,15 @@ public class MainActivity extends Activity {
         final SavedPlace destination = activeDestination;
         final int priorEtaSeconds = lastTrafficEtaSeconds;
         final long priorEtaMeasuredAt = lastTrafficEtaMeasuredAt;
-        routeRepository.getRoute(location.getLatitude(), location.getLongitude(), activeWaypoints,
-                destination.latitude, destination.longitude,
-                route -> runOnUiThread(() -> {
+        if (!neshanRoutingProvider.isConfigured()) {
+            scheduleTrafficCheck();
+            return;
+        }
+        new Thread(() -> {
+            try {
+                RouteResult route = neshanRoutingProvider.routeWithWaypoints(location.getLatitude(),
+                        location.getLongitude(), activeWaypoints, destination.latitude, destination.longitude);
+                runOnUiThread(() -> {
                     if (!navigationEngine.isNavigating() || activeDestination != destination) return;
                     long now = System.currentTimeMillis();
                     int elapsedSeconds = priorEtaMeasuredAt == 0L ? 0 : (int) ((now - priorEtaMeasuredAt) / 1000L);
@@ -2377,9 +2381,16 @@ public class MainActivity extends Activity {
                             && gainSeconds * 100 >= expectedRemaining * 12;
                     lastTrafficEtaSeconds = route.durationSeconds;
                     lastTrafficEtaMeasuredAt = now;
-                    if (materiallyFaster) replaceRouteForTraffic(route, destination, gainSeconds);
-                    else scheduleTrafficCheck();
-                }), error -> runOnUiThread(this::scheduleTrafficCheck));
+                    if (materiallyFaster) {
+                        setStatus("برآورد ترافیک نشان: مسیر فعلی حدود "
+                                + Math.max(1, gainSeconds / 60) + " دقیقه زمان بیشتری دارد.");
+                    }
+                    scheduleTrafficCheck();
+                });
+            } catch (Exception error) {
+                runOnUiThread(this::scheduleTrafficCheck);
+            }
+        }).start();
     }
 
     private void replaceRouteForTraffic(RouteResult route, SavedPlace destination, int gainSeconds) {

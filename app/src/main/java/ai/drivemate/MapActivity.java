@@ -281,10 +281,11 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         mapIrRoutingProvider = new MapIrRoutingProvider(mapIrKey);
         tomTomRoutingProvider = new TomTomRoutingProvider(tomtomKey);
         openRouteServiceRoutingProvider = new OpenRouteServiceRoutingProvider(openRouteServiceKey);
-        placeSearchRepository = new PlaceSearchRepository(neshanRoutingProvider, mapIrRoutingProvider, tomtomKey);
+        placeSearchRepository = new PlaceSearchRepository(neshanRoutingProvider, tomtomKey);
         trafficIncidentProvider = new TrafficIncidentProvider(tomtomKey);
-        routeRepository = new RouteRepository(tomTomRoutingProvider, mapIrRoutingProvider,
-                neshanRoutingProvider, openRouteServiceRoutingProvider);
+        trafficIncidentProvider.setEnabled(false);
+        routeRepository = new RouteRepository(mapIrRoutingProvider, neshanRoutingProvider,
+                openRouteServiceRoutingProvider, tomTomRoutingProvider);
 
         destinationInfoContainer = findViewById(R.id.mapDestinationInfo);
         mapRoutePanel = findViewById(R.id.mapRoutePanel);
@@ -410,8 +411,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             mapIrRoutingProvider.setEnabled(keys.providerEnabled("MAPIR", true));
             placeSearchRepository.setTomTomApiKey(keys.get("TOMTOM_API_KEY"));
             placeSearchRepository.setTomTomEnabled(keys.providerEnabled("TOMTOM", true));
-            trafficIncidentProvider.setApiKey(keys.get("TOMTOM_API_KEY"));
-            trafficIncidentProvider.setEnabled(keys.providerEnabled("TOMTOM", true));
+            trafficIncidentProvider.setEnabled(false);
             Log.i("DriveMateKeys", "map routing configured: TomTom=" + tomTomRoutingProvider.isConfigured()
                     + ", map.ir=" + mapIrRoutingProvider.isConfigured() + ", Neshan="
                     + neshanRoutingProvider.isConfigured() + ", ORS="

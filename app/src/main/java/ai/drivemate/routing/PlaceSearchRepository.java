@@ -22,18 +22,12 @@ public class PlaceSearchRepository {
     public interface ErrorCallback { void onError(String message); }
 
     private final NeshanRoutingProvider neshan;
-    private final MapIrRoutingProvider mapir;
     private final TomTomPoiProvider tomtom;
     private final OverpassPoiProvider overpass;
     private final NominatimSearchProvider nominatim;
 
-    public PlaceSearchRepository(NeshanRoutingProvider neshan, MapIrRoutingProvider mapir) {
-        this(neshan, mapir, "");
-    }
-
-    public PlaceSearchRepository(NeshanRoutingProvider neshan, MapIrRoutingProvider mapir, String tomtomApiKey) {
+    public PlaceSearchRepository(NeshanRoutingProvider neshan, String tomtomApiKey) {
         this.neshan = neshan;
-        this.mapir = mapir;
         this.tomtom = new TomTomPoiProvider(tomtomApiKey);
         this.overpass = new OverpassPoiProvider();
         this.nominatim = new NominatimSearchProvider();
@@ -67,39 +61,25 @@ public class PlaceSearchRepository {
             // Free nationwide search is first; paid providers are reserved for sparse OSM results.
             try { addUnique(results, nominatim.search(term, latitude, longitude)); }
             catch (Exception exception) { failures.add("OpenStreetMap (Nominatim) search: " + messageOf(exception)); }
-            if (results.size() < 3) {
-            try { addUnique(results, searchNeshanGeocoding(term)); }
-            catch (Exception exception) { failures.add("Neshan geocoding: " + messageOf(exception)); }
-            try { addUnique(results, searchNeshan(term, latitude, longitude)); }
-            catch (Exception exception) { failures.add("Neshan search: " + messageOf(exception)); }
-            // The nearby-search endpoint can hide a distant Iranian village behind a local fuzzy result.
-            try { addUnique(results, searchNeshan(term, 32.4279d, 53.6880d)); }
-            catch (Exception exception) { failures.add("Neshan Iran-wide search: " + messageOf(exception)); }
-            // map.ir /search/v2 performs a full address/place search; autocomplete is retained
-            // only for live typing suggestions because it intentionally favors fuzzy prefixes.
-            try { addUnique(results, searchMapIrExact(term)); }
-            catch (Exception exception) { failures.add("map.ir search: " + messageOf(exception)); }
-            try { addUnique(results, searchMapIrAutocomplete(term, latitude, longitude)); }
-            catch (Exception exception) { failures.add("map.ir autocomplete: " + messageOf(exception)); }
-            // Neshan/map.ir are business-registration indexes and are documented to be denser in
-            // some provinces (e.g. Tehran/central-west) than others (e.g. Mashhad/the northeast).
-            // Nominatim (OpenStreetMap) indexes every named place/address nationwide with no such
-            // regional bias and needs no API key, so it always runs for a general text search
-            // instead of only when the commercial results are already thin.
-            try { addUnique(results, nominatim.search(term, latitude, longitude)); }
-            catch (Exception exception) { failures.add("OpenStreetMap (Nominatim) search: " + messageOf(exception)); }
-            // A named business ("کبابی رضا") or a plain category word the isNearbyPoiQuery keyword
-            // list does not happen to cover can still be a POI lookup rather than an address lookup;
-            // only spend the extra Overpass/TomTom calls when the above providers came back thin.
             if (results.size() < 5) {
                 try { addUnique(results, overpass.searchNearby(term, latitude, longitude)); }
                 catch (Exception exception) { failures.add("OpenStreetMap nearby: " + messageOf(exception)); }
-                if (results.size() < 5 && tomtom.isConfigured()) {
-                    try { addUnique(results, tomtom.searchNearby(term, latitude, longitude)); }
-                    catch (Exception exception) { failures.add("TomTom nearby: " + messageOf(exception)); }
+            }
+            if (results.size() < 3) {
+                try { addUnique(results, searchNeshanGeocoding(term)); }
+                catch (Exception exception) { failures.add("Neshan geocoding: " + messageOf(exception)); }
+                if (results.size() < 3) {
+                    try { addUnique(results, searchNeshan(term, latitude, longitude)); }
+                    catch (Exception exception) { failures.add("Neshan search: " + messageOf(exception)); }
+                }
+                if (results.size() < 3) {
+                    try { addUnique(results, searchNeshan(term, 32.4279d, 53.6880d)); }
+                    catch (Exception exception) { failures.add("Neshan Iran-wide search: " + messageOf(exception)); }
                 }
             }
-
+            if (results.size() < 5 && tomtom.isConfigured()) {
+                try { addUnique(results, tomtom.searchNearby(term, latitude, longitude)); }
+                catch (Exception exception) { failures.add("TomTom nearby: " + messageOf(exception)); }
             }
             rank(results, term, latitude, longitude);
             results = keepBestMatchTier(results, term);
@@ -135,14 +115,8 @@ public class PlaceSearchRepository {
         mergeOutcome(results, failures, nominatimOutcome, "OpenStreetMap (Nominatim) nearby");
 
         if (results.size() < OSM_SUFFICIENT_RESULT_COUNT) {
-            ProviderOutcome neshanOutcome = new ProviderOutcome();
-            ProviderOutcome mapIrOutcome = new ProviderOutcome();
-            Thread neshanThread = runProvider(() -> searchNeshan(term, latitude, longitude), neshanOutcome);
-            Thread mapIrThread = runProvider(() -> searchMapIrNearby(term, latitude, longitude), mapIrOutcome);
-            joinQuietly(neshanThread);
-            joinQuietly(mapIrThread);
-            mergeOutcome(results, failures, neshanOutcome, "Neshan nearby");
-            mergeOutcome(results, failures, mapIrOutcome, "map.ir nearby");
+            try { addUnique(results, searchNeshan(term, latitude, longitude)); }
+            catch (Exception exception) { failures.add("Neshan nearby: " + messageOf(exception)); }
         }
         // TomTom is optional and only needed if the combined result set is still thin; kept
         // sequential and last since it is the least-often-needed provider (isConfigured() is
@@ -211,51 +185,6 @@ public class PlaceSearchRepository {
             if (location != null && isInIran(location.optDouble("y"), location.optDouble("x"))) {
                 results.add(place(item.optString("title", term), searchKind(item), location.optDouble("y"),
                         location.optDouble("x"), item.optString("address", term)));
-            }
-        }
-        return results;
-    }
-
-    private List<SavedPlace> searchMapIrExact(String term) throws Exception {
-        String key = mapir.apiKey();
-        if (key == null) throw new IllegalStateException("map.ir API key is not configured.");
-        JSONObject request = new JSONObject();
-        request.put("text", term);
-        request.put("select", "poi,city,roads,neighborhood,county,district,province,natural");
-        return mapIrPlaces(RoutingHttp.postJson("https://map.ir/search/v2", "x-api-key", key, request), term);
-    }
-
-    private List<SavedPlace> searchMapIrAutocomplete(String term, double latitude, double longitude) throws Exception {
-        String key = mapir.apiKey();
-        if (key == null) throw new IllegalStateException("map.ir API key is not configured.");
-        String url = "https://map.ir/search/v2/autocomplete?text=" + URLEncoder.encode(term, StandardCharsets.UTF_8.name())
-                + "&lat=" + latitude + "&lon=" + longitude;
-        return mapIrPlaces(RoutingHttp.getJson(url, "x-api-key", key), term);
-    }
-
-    private List<SavedPlace> searchMapIrNearby(String term, double latitude, double longitude) throws Exception {
-        String key = mapir.apiKey();
-        if (key == null) throw new IllegalStateException("map.ir API key is not configured.");
-        JSONObject request = new JSONObject();
-        request.put("text", term);
-        request.put("select", "nearby");
-        request.put("filter", "distance");
-        request.put("lat", latitude);
-        request.put("lon", longitude);
-        return mapIrPlaces(RoutingHttp.postJson("https://map.ir/search/v2", "x-api-key", key, request), term);
-    }
-
-    private List<SavedPlace> mapIrPlaces(JSONObject body, String term) {
-        JSONArray items = body.optJSONArray("value");
-        if (items == null) items = body.optJSONArray("items");
-        ArrayList<SavedPlace> results = new ArrayList<>();
-        if (items != null) for (int i = 0; i < items.length() && i < 12; i++) {
-            JSONObject item = items.optJSONObject(i);
-            JSONObject geom = item == null ? null : item.optJSONObject("geom");
-            JSONArray coordinates = geom == null ? null : geom.optJSONArray("coordinates");
-            if (coordinates != null && isInIran(coordinates.optDouble(1), coordinates.optDouble(0))) {
-                results.add(place(item.optString("title", term), searchKind(item), coordinates.optDouble(1),
-                        coordinates.optDouble(0), item.optString("address", term)));
             }
         }
         return results;
