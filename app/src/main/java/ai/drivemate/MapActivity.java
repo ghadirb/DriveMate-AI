@@ -128,6 +128,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private Marker currentMarker;
     private Marker vehicleMarker;
     private Marker destinationMarker;
+    private final List<Marker> tomTomGeometryDebugMarkers = new ArrayList<>();
     private Polyline routePolyline;
     private List<RouteResult> routeOptions = new ArrayList<>();
     private RouteResult selectedRoute;
@@ -143,6 +144,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private HorizontalScrollView routeOptionsScroll;
     private LinearLayout routeOptionsRow;
     private final List<Polyline> alternateRoutePolylines = new ArrayList<>();
+    private static final boolean TOMTOM_GEOMETRY_DEBUG_MARKERS_ENABLED = true;
     private SavedPlace destination;
     /** Intermediate stops the driver added on this screen, in visit order, between origin and
      *  the selected destination. Empty for a plain single-destination trip (the default). */
@@ -1508,6 +1510,14 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             routeOptionsScroll.setVisibility(View.GONE);
             return;
         }
+        StringBuilder routeSources = new StringBuilder();
+        for (int index = 0; index < routeOptions.size(); index++) {
+            RouteResult option = routeOptions.get(index);
+            if (index > 0) routeSources.append(" | ");
+            routeSources.append(index).append(':').append(option.providerName)
+                    .append(" geometry=").append(option.geometry.size());
+        }
+        Log.i("DriveMateMapRoute", "received route options " + routeSources);
         selectedRoute = routeOptions.get(navigationMode
                 ? Math.min(navigationRouteIndex, routeOptions.size() - 1) : 0);
         if (navigationMode && destination != null) {
@@ -1635,6 +1645,33 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             map.addPolyline(polyline);
             if (isSelected) routePolyline = polyline; else alternateRoutePolylines.add(polyline);
         }
+        drawTomTomGeometryDebugMarkers(selectedRoute);
+    }
+
+    private void drawTomTomGeometryDebugMarkers(RouteResult route) {
+        if (map == null) return;
+        for (Marker marker : tomTomGeometryDebugMarkers) map.removeMarker(marker);
+        tomTomGeometryDebugMarkers.clear();
+        if (!TOMTOM_GEOMETRY_DEBUG_MARKERS_ENABLED || route == null || !"TomTom".equals(route.providerName)) return;
+        addTomTomGeometryDebugMarker(originLatitude, originLongitude, 0xff2e8b57);
+        if (destination != null) addTomTomGeometryDebugMarker(destination.latitude, destination.longitude, 0xffd32f2f);
+        int size = route.geometry.size();
+        int[] sampleIndices = {0, size / 4, size / 2, (size * 3) / 4, size - 1};
+        int previous = -1;
+        for (int index : sampleIndices) {
+            if (index < 0 || index >= size || index == previous) continue;
+            RoutePoint point = route.geometry.get(index);
+            addTomTomGeometryDebugMarker(point.latitude, point.longitude, 0xffff9800);
+            previous = index;
+        }
+        Log.i("DriveMateTomTom", "map markers origin+destination+geometrySamples="
+                + tomTomGeometryDebugMarkers.size() + " geometry=" + size);
+    }
+
+    private void addTomTomGeometryDebugMarker(double latitude, double longitude, int color) {
+        Marker marker = new Marker(new LatLng(latitude, longitude), markerStyle(color));
+        tomTomGeometryDebugMarkers.add(marker);
+        map.addMarker(marker);
     }
 
     private ArrayList<LatLng> routePoints(RouteResult route) {

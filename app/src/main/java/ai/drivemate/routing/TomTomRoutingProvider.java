@@ -1,5 +1,7 @@
 package ai.drivemate.routing;
 
+import android.util.Log;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -13,6 +15,7 @@ import ai.drivemate.model.RouteStep;
 
 /** TomTom route adapter. It keeps the provider response independent from the map renderer. */
 public final class TomTomRoutingProvider implements RoutingProvider {
+    private static final String TAG = "DriveMateTomTom";
     private String apiKey = "";
     private boolean enabled = true;
 
@@ -64,6 +67,7 @@ public final class TomTomRoutingProvider implements RoutingProvider {
                 + "&maxAlternatives=2&alternativeType=anyRoute"
                 + "&sectionType=importantRoadStretch&language=en-US";
         JSONObject body = RoutingHttp.getJson(url);
+        logRawResponse(body);
         JSONArray routes = body.optJSONArray("routes");
         if (routes == null || routes.length() == 0) throw new IllegalStateException("TomTom returned no route.");
         ArrayList<RouteResult> results = new ArrayList<>();
@@ -71,6 +75,7 @@ public final class TomTomRoutingProvider implements RoutingProvider {
             JSONObject route = routes.optJSONObject(index);
             if (route == null) continue;
             try {
+<<<<<<< Updated upstream
                 results.add(parseRoute(route, waypoints, destinationLat, destinationLng));
             } catch (RuntimeException parseError) {
                 // One malformed alternate (an unexpected field shape, a missing section) must not
@@ -79,13 +84,18 @@ public final class TomTomRoutingProvider implements RoutingProvider {
                 // just because route index 1 or 2 didn't parse, which looked like "TomTom only
                 // ever shows one route" even when the API had actually returned several.
                 android.util.Log.w("TomTomRoutingProvider", "Skipping unparsable route at index " + index, parseError);
+=======
+                results.add(parseRoute(route, originLat, originLng, waypoints, destinationLat, destinationLng));
+            } catch (RuntimeException parseError) {
+                Log.w(TAG, "Skipping unparsable route at index " + index, parseError);
+>>>>>>> Stashed changes
             }
         }
         if (results.isEmpty()) throw new IllegalStateException("TomTom returned an invalid route.");
         return results;
     }
 
-    private RouteResult parseRoute(JSONObject route, List<RoutePoint> waypoints,
+    private RouteResult parseRoute(JSONObject route, double originLat, double originLng, List<RoutePoint> waypoints,
                                    double destinationLat, double destinationLng) {
         JSONObject summary = route.optJSONObject("summary");
         int distance = summary == null ? 0 : summary.optInt("lengthInMeters");
@@ -99,9 +109,17 @@ public final class TomTomRoutingProvider implements RoutingProvider {
             JSONArray points = leg == null ? null : leg.optJSONArray("points");
             if (points != null) for (int pointIndex = 0; pointIndex < points.length(); pointIndex++) {
                 JSONObject point = points.optJSONObject(pointIndex);
-                if (point != null) geometry.add(new RoutePoint(point.optDouble("latitude"), point.optDouble("longitude")));
+                if (point == null || !point.has("latitude") || !point.has("longitude")) continue;
+                double latitude = point.optDouble("latitude", Double.NaN);
+                double longitude = point.optDouble("longitude", Double.NaN);
+                if (!isValidCoordinate(latitude, longitude)) {
+                    Log.w(TAG, "Skipping invalid routes[].legs[].points coordinate lat=" + latitude + " lon=" + longitude);
+                    continue;
+                }
+                geometry.add(new RoutePoint(latitude, longitude));
             }
         }
+        logGeometry(originLat, originLng, destinationLat, destinationLng, geometry);
         JSONObject guidance = route.optJSONObject("guidance");
         JSONArray instructions = guidance == null ? null : guidance.optJSONArray("instructions");
         int previousRouteOffset = 0;
@@ -137,6 +155,38 @@ public final class TomTomRoutingProvider implements RoutingProvider {
 
     private static String point(double latitude, double longitude) {
         return latitude + "," + longitude;
+    }
+
+    private static void logRawResponse(JSONObject body) {
+        String raw = body == null ? "" : body.toString();
+        int maximumLogLength = 12_000;
+        Log.d(TAG, "raw Calculate Route response chars=" + raw.length() + " payload="
+                + (raw.length() <= maximumLogLength ? raw : raw.substring(0, maximumLogLength) + "...[truncated]"));
+    }
+
+    private static void logGeometry(double originLat, double originLng, double destinationLat, double destinationLng,
+                                    List<RoutePoint> geometry) {
+        StringBuilder samples = new StringBuilder();
+        int[] candidates = {0, geometry.size() / 4, geometry.size() / 2, (geometry.size() * 3) / 4, geometry.size() - 1};
+        int previous = -1;
+        for (int index : candidates) {
+            if (index < 0 || index >= geometry.size() || index == previous) continue;
+            RoutePoint point = geometry.get(index);
+            if (samples.length() > 0) samples.append(" | ");
+            samples.append(index).append('=').append(point.latitude).append(',').append(point.longitude);
+            previous = index;
+        }
+        Log.i(TAG, "geometry source=routes[].legs[].points encoding=coordinate-array"
+                + " coordinateOrder=latitude,longitude parsedPoints=" + geometry.size()
+                + " origin=" + originLat + ',' + originLng
+                + " destination=" + destinationLat + ',' + destinationLng
+                + " samples=[" + samples + ']');
+    }
+
+    private static boolean isValidCoordinate(double latitude, double longitude) {
+        return !Double.isNaN(latitude) && !Double.isNaN(longitude)
+                && !Double.isInfinite(latitude) && !Double.isInfinite(longitude)
+                && latitude >= -90d && latitude <= 90d && longitude >= -180d && longitude <= 180d;
     }
 
     private static String persianInstruction(JSONObject instruction, int announcementDistanceMeters, String routeRoadName) {
