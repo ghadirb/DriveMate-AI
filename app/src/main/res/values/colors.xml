@@ -8,4 +8,12 @@
     <color name="drivemate_border">#D6E7EE</color>
     <color name="drivemate_panel_bg">#EAF7F1</color>
     <color name="drivemate_tab_pressed">#E4F0F5</color>
+    <!-- Deliberately NOT overridden in values-night: the OSM basemap tiles are always light
+         regardless of app theme, so the on-map turn-by-turn banner needs to stay fixed at
+         max contrast (dark navy + white) in both day and night mode rather than following
+         drivemate_blue/white, which flip to a light-on-dark pairing at night and become hard
+         to read against the still-bright map behind them. -->
+    <color name="nav_overlay_bg">#0F3A52</color>
+    <color name="nav_overlay_text">#FFFFFF</color>
+    <color name="nav_overlay_border">#4DFFFFFF</color>
 </resources>

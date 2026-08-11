@@ -55,6 +55,7 @@ import ai.drivemate.model.TripRecord;
 import ai.drivemate.routing.MapIrRoutingProvider;
 import ai.drivemate.routing.NeshanRoutingProvider;
 import ai.drivemate.routing.OpenRouteServiceRoutingProvider;
+import ai.drivemate.routing.TomTomRoutingProvider;
 import ai.drivemate.routing.NavigationEngine;
 import ai.drivemate.routing.OfflineRoadSafetyProvider;
 import ai.drivemate.routing.OverpassPoiProvider;
@@ -132,6 +133,7 @@ public class MainActivity extends Activity {
     private NeshanRoutingProvider neshanRoutingProvider;
     private MapIrRoutingProvider mapIrRoutingProvider;
     private OpenRouteServiceRoutingProvider openRouteServiceRoutingProvider;
+    private TomTomRoutingProvider tomTomRoutingProvider;
     private RouteRepository routeRepository;
     private PlaceSearchRepository placeSearchRepository;
     private VoiceCommandParser commandParser;
@@ -165,7 +167,7 @@ public class MainActivity extends Activity {
      *  active route; disabled cleanly if no key is configured (see TrafficIncidentProvider.hasKey).
      *  Refreshed periodically (not just once per route) since these change while a live incident
      *  clears or a new one appears - unlike the mostly-static OSM hazard/safety-alert sets above. */
-    private final TrafficIncidentProvider trafficIncidentProvider = new TrafficIncidentProvider(BuildConfig.TOMTOM_API_KEY);
+    private final TrafficIncidentProvider trafficIncidentProvider = new TrafficIncidentProvider("");
     private List<TrafficIncident> activeRouteTrafficIncidents = new ArrayList<>();
     /** Keyed by the provider's own incident id (not array index) since this list is periodically
      *  refreshed rather than fixed for the whole trip. */
@@ -277,12 +279,13 @@ public class MainActivity extends Activity {
         voicePlayer = new VoiceGuidancePlayer(this);
         locationTracker = new DeviceLocationTracker(this);
         offlineRoadSafetyProvider = new OfflineRoadSafetyProvider(this);
-        neshanRoutingProvider = new NeshanRoutingProvider(BuildConfig.NESHAN_API_KEY);
-        mapIrRoutingProvider = new MapIrRoutingProvider(BuildConfig.MAPIR_API_KEY);
-        openRouteServiceRoutingProvider = new OpenRouteServiceRoutingProvider(BuildConfig.OPENROUTESERVICE_API_KEY);
-        routeRepository = new RouteRepository(neshanRoutingProvider, mapIrRoutingProvider, openRouteServiceRoutingProvider);
-        placeSearchRepository = new PlaceSearchRepository(neshanRoutingProvider, mapIrRoutingProvider,
-                BuildConfig.TOMTOM_API_KEY);
+        neshanRoutingProvider = new NeshanRoutingProvider("");
+        mapIrRoutingProvider = new MapIrRoutingProvider("");
+        openRouteServiceRoutingProvider = new OpenRouteServiceRoutingProvider("");
+        tomTomRoutingProvider = new TomTomRoutingProvider("");
+        routeRepository = new RouteRepository(mapIrRoutingProvider, neshanRoutingProvider,
+                openRouteServiceRoutingProvider, tomTomRoutingProvider);
+        placeSearchRepository = new PlaceSearchRepository(neshanRoutingProvider, "");
         commandParser = new VoiceCommandParser();
         aiAssistant = new AiAssistant(BuildConfig.AI_API_KEY);
         intelligenceCoordinator = new DrivingIntelligenceCoordinator(aiAssistant);
@@ -498,10 +501,10 @@ public class MainActivity extends Activity {
         }
         // The encrypted runtime payload may contain only AI keys. Keep routing keys injected
         // by GitHub Actions available to the map as a fallback.
-        intent.putExtra(MapActivity.EXTRA_NESHAN_KEY, routingKey("NESHAN_API_KEY", BuildConfig.NESHAN_API_KEY));
-        intent.putExtra(MapActivity.EXTRA_MAPIR_KEY, routingKey("MAPIR_API_KEY", BuildConfig.MAPIR_API_KEY));
-        intent.putExtra(MapActivity.EXTRA_TOMTOM_KEY, BuildConfig.TOMTOM_API_KEY);
-        intent.putExtra(MapActivity.EXTRA_OPENROUTESERVICE_KEY, BuildConfig.OPENROUTESERVICE_API_KEY);
+        intent.putExtra(MapActivity.EXTRA_NESHAN_KEY, routingKey("NESHAN_API_KEY"));
+        intent.putExtra(MapActivity.EXTRA_MAPIR_KEY, routingKey("MAPIR_API_KEY"));
+        intent.putExtra(MapActivity.EXTRA_TOMTOM_KEY, routingKey("TOMTOM_API_KEY"));
+        intent.putExtra(MapActivity.EXTRA_OPENROUTESERVICE_KEY, routingKey("OPENROUTESERVICE_API_KEY"));
         startActivityForResult(intent, REQ_MAP);
     }
 
@@ -520,10 +523,10 @@ public class MainActivity extends Activity {
             intent.putExtra(MapActivity.EXTRA_ORIGIN_LATITUDE, location.getLatitude());
             intent.putExtra(MapActivity.EXTRA_ORIGIN_LONGITUDE, location.getLongitude());
         }
-        intent.putExtra(MapActivity.EXTRA_NESHAN_KEY, routingKey("NESHAN_API_KEY", BuildConfig.NESHAN_API_KEY));
-        intent.putExtra(MapActivity.EXTRA_MAPIR_KEY, routingKey("MAPIR_API_KEY", BuildConfig.MAPIR_API_KEY));
-        intent.putExtra(MapActivity.EXTRA_TOMTOM_KEY, BuildConfig.TOMTOM_API_KEY);
-        intent.putExtra(MapActivity.EXTRA_OPENROUTESERVICE_KEY, BuildConfig.OPENROUTESERVICE_API_KEY);
+        intent.putExtra(MapActivity.EXTRA_NESHAN_KEY, routingKey("NESHAN_API_KEY"));
+        intent.putExtra(MapActivity.EXTRA_MAPIR_KEY, routingKey("MAPIR_API_KEY"));
+        intent.putExtra(MapActivity.EXTRA_TOMTOM_KEY, routingKey("TOMTOM_API_KEY"));
+        intent.putExtra(MapActivity.EXTRA_OPENROUTESERVICE_KEY, routingKey("OPENROUTESERVICE_API_KEY"));
         intent.putExtra(MapActivity.EXTRA_NAVIGATION_MODE, true);
         intent.putExtra(MapActivity.EXTRA_DESTINATION_LATITUDE, destination.latitude);
         intent.putExtra(MapActivity.EXTRA_DESTINATION_LONGITUDE, destination.longitude);
@@ -555,9 +558,9 @@ public class MainActivity extends Activity {
         return result;
     }
 
-    private String routingKey(String name, String buildConfigFallback) {
+    private String routingKey(String name) {
         String runtimeValue = runtimeKeys == null ? null : runtimeKeys.get(name);
-        return runtimeValue == null || runtimeValue.trim().isEmpty() ? buildConfigFallback : runtimeValue;
+        return runtimeValue == null ? "" : runtimeValue;
     }
 
     private void showBackupDialog() {
@@ -615,7 +618,14 @@ public class MainActivity extends Activity {
     private void importBackup() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType(BackupManager.MIME_TYPE);
+        // Restricting this to the exact MIME type "application/json" made the system file picker
+        // filter out (or grey out) the very backup file the user is trying to restore on a lot of
+        // devices/providers: files saved from a chat app, cloud drive, or browser download very
+        // often get tagged as text/plain or application/octet-stream instead of application/json,
+        // even though the file itself is exactly the JSON this app wrote. Ask for everything and
+        // hint at the JSON types instead, which is the standard, more permissive pattern.
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/json", "text/plain", "text/json"});
         startActivityForResult(intent, REQ_IMPORT_BACKUP);
     }
 
@@ -664,6 +674,7 @@ public class MainActivity extends Activity {
             }
             return;
         }
+        onlineSpeechClient.setTranscriptionHint(voiceTranscriptionHint());
         if (onlineSpeechClient.canUseOnlineSpeech() && onlineSpeechClient.startRecording()) {
             recordingOnlineSpeech = true;
             voicePlayer.announce("listening", "در حال گوش دادن هستم.");
@@ -719,6 +730,32 @@ public class MainActivity extends Activity {
         recordingLocalSpeech = false;
         voiceButton.setEnabled(true);
         voiceButton.setText("مقصد را بگویید");
+    }
+
+    /**
+     * Names already saved by the driver are the most important vocabulary for destination
+     * recognition. Keep the prompt short so it remains an STT hint rather than a transcript.
+     */
+    private String voiceTranscriptionHint() {
+        StringBuilder hint = new StringBuilder(
+                "گفتار به زبان فارسی است و معمولاً نام مقصد، خیابان، مجتمع، پلاک یا شماره واحد را دارد.");
+        List<SavedPlace> places = placeStore == null ? java.util.Collections.emptyList() : placeStore.allPlaces();
+        int count = Math.min(20, places.size());
+        if (count > 0) hint.append(" نام‌های ذخیره‌شده: ");
+        for (int index = 0; index < count; index++) {
+            String name = places.get(index).name;
+            if (name == null || name.trim().isEmpty()) continue;
+            hint.append(name.trim()).append(index == count - 1 ? "." : "، ");
+        }
+        return hint.toString();
+    }
+
+    /** The retry action must actually start a fresh recording, not merely show a prompt. */
+    private void retryVoiceDestination() {
+        onlineSpeechClient.stopPlayback();
+        voicePlayer.interrupt();
+        setStatus("نام مقصد را دوباره بگویید.");
+        voiceHandler.postDelayed(this::toggleVoiceInput, 250L);
     }
 
     private void handleVoiceText(String text) {
@@ -886,6 +923,17 @@ public class MainActivity extends Activity {
             voicePlayer.announce("gps_lost", "موقعیت مکانی هنوز در دسترس نیست.");
             return;
         }
+        // A place restored from an old/foreign backup, or one whose coordinates never saved
+        // correctly, can carry NaN or an unset 0,0 latitude/longitude. Routing silently against
+        // that produced either an empty result (see the routes.isEmpty() guard below, which used
+        // to bail out with zero feedback) or, worse, let RouteCache's tolerance check - which is
+        // NaN-unsafe - match a stale cached route for a completely different destination. Catch
+        // it here instead, before any of that runs.
+        if (Double.isNaN(destination.latitude) || Double.isNaN(destination.longitude)
+                || (destination.latitude == 0d && destination.longitude == 0d)) {
+            setStatus("مختصات این مکان معتبر نیست. آن را دوباره ذخیره کنید.");
+            return;
+        }
         setStatus("در حال دریافت مسیر به " + destination.name + "...");
         showRouteAnalysisLoading(destination);
         if (!isFullIntelligenceMode()) {
@@ -896,8 +944,17 @@ public class MainActivity extends Activity {
         final List<RoutePoint> requestedWaypoints = waypoints == null ? new ArrayList<>() : new ArrayList<>(waypoints);
         routeRepository.getRoutes(originLatitude, originLongitude, requestedWaypoints, destination.latitude, destination.longitude,
                 routes -> runOnUiThread(() -> {
-                    if (routes == null || routes.isEmpty()) return;
                     if (requestSequence != routeRequestSequence) return;
+                    if (routes == null || routes.isEmpty()) {
+                        // This used to just "return" here with no feedback at all: the loading
+                        // spinner stayed on screen forever and nothing was ever drawn, which is
+                        // exactly the "I go to the map and there's no navigation, nothing happened"
+                        // symptom - the request had actually already finished, just with zero routes.
+                        hideTripAnalysis();
+                        setStatus("مسیر قابل استفاده‌ای به " + destination.name + " پیدا نشد.");
+                        voicePlayer.announce("route_not_found", "مسیری به این مقصد پیدا نشد.");
+                        return;
+                    }
                     PersonalRouteAnalyzer.Suggestion personalRoute = preferredRouteIndex == 0
                             ? PersonalRouteAnalyzer.suggest(routes, tripStore.recent(60), originLatitude, originLongitude,
                             destination.latitude, destination.longitude) : null;
@@ -1439,24 +1496,60 @@ public class MainActivity extends Activity {
         Location location = locationTracker.getLastLocation();
         if (location == null) { setStatus("برای پیدا کردن مقصد، GPS باید آماده باشد."); return; }
         if (term.isEmpty()) { speakShort("نام مقصد را دوباره بگویید."); return; }
-        setStatus("در حال پیدا کردن " + term + "...");
-        placeSearchRepository.search(term, location.getLatitude(), location.getLongitude(),
-                place -> runOnUiThread(() -> startNavigation(place)),
+        setStatus("در حال پیدا کردن مقصد «" + term + "»...");
+        placeSearchRepository.searchAll(term, location.getLatitude(), location.getLongitude(),
+                places -> runOnUiThread(() -> showVoiceDestinationChoices(term, places)),
                 error -> runOnUiThread(() -> { setStatus(error); speakShort("مقصد پیدا نشد. نام آن را دوباره بگویید."); }));
+    }
+
+    /** Speech recognition and place search can each be imperfect. Never start a trip to the
+     * first fuzzy search result: let the driver explicitly select the intended destination. */
+    private void showVoiceDestinationChoices(String spokenTerm, List<SavedPlace> places) {
+        if (places == null || places.isEmpty()) {
+            setStatus("برای «" + spokenTerm + "» مقصدی پیدا نشد.");
+            speakShort("مقصد پیدا نشد. نام آن را دوباره بگویید.");
+            return;
+        }
+        int count = Math.min(5, places.size());
+        String[] labels = new String[count];
+        for (int index = 0; index < count; index++) {
+            SavedPlace place = places.get(index);
+            String address = place.address == null ? "" : place.address.trim();
+            labels[index] = address.isEmpty() ? place.name : place.name + "\n" + address;
+        }
+        setStatus("مقصدهای پیدا شده برای «" + spokenTerm + "» را بررسی کنید.");
+        new AlertDialog.Builder(this)
+                .setTitle("کدام مقصد مدنظر شماست؟")
+                .setMessage("شنیدم: «" + spokenTerm + "»")
+                .setItems(labels, (dialog, which) -> startNavigation(places.get(which)))
+                .setNegativeButton("دوباره می‌گویم", (dialog, which) -> {
+                    retryVoiceDestination();
+                })
+                .show();
     }
 
     private void loadRuntimeKeys() {
         new Thread(() -> {
-            runtimeKeys = RuntimeKeys.fetch(new String[]{
-                    "https://abrehamrahi.ir/o/public/eUFcsXOX",
-                    "https://gist.githubusercontent.com/ghadirb/626a804df3009e49045a2948dad89fe5/raw/c93c06d1b2f38c65ee30f092c134a89998326d12/keys.txt"
-            }, BuildConfig.KEYS_DECRYPTION_SECRET);
+            runtimeKeys = RuntimeKeys.fetchDefault(BuildConfig.KEYS_DECRYPTION_SECRET);
             aiAssistant.setRuntimeKeys(runtimeKeys);
             onlineSpeechClient.setRuntimeKeys(runtimeKeys);
             neshanRoutingProvider.setApiKey(runtimeKeys.get("NESHAN_API_KEY"));
             mapIrRoutingProvider.setApiKey(runtimeKeys.get("MAPIR_API_KEY"));
+            tomTomRoutingProvider.setApiKey(runtimeKeys.get("TOMTOM_API_KEY"));
+            openRouteServiceRoutingProvider.setApiKey(runtimeKeys.get("OPENROUTESERVICE_API_KEY"));
+            tomTomRoutingProvider.setEnabled(runtimeKeys.providerEnabled("TOMTOM", true));
+            openRouteServiceRoutingProvider.setEnabled(runtimeKeys.providerEnabled("OPENROUTESERVICE", true));
+            neshanRoutingProvider.setEnabled(runtimeKeys.providerEnabled("NESHAN", true));
+            mapIrRoutingProvider.setEnabled(runtimeKeys.providerEnabled("MAPIR", true));
+            placeSearchRepository.setTomTomApiKey(runtimeKeys.get("TOMTOM_API_KEY"));
+            placeSearchRepository.setTomTomEnabled(runtimeKeys.providerEnabled("TOMTOM", true));
+            trafficIncidentProvider.setEnabled(false);
+            android.util.Log.i("DriveMateKeys", "routing configured: TomTom="
+                    + tomTomRoutingProvider.isConfigured() + ", map.ir=" + mapIrRoutingProvider.isConfigured()
+                    + ", Neshan=" + neshanRoutingProvider.isConfigured() + ", ORS="
+                    + openRouteServiceRoutingProvider.isConfigured());
             StringBuilder found = new StringBuilder();
-            for (String name : new String[]{"GAPGPT_API_KEY", "LIARA_API_KEY", "AI_API_KEY", "NESHAN_API_KEY", "MAPIR_API_KEY"}) {
+            for (String name : new String[]{"GAPGPT_API_KEY", "LIARA_API_KEY", "AI_API_KEY", "TOMTOM_API_KEY", "OPENROUTESERVICE_API_KEY", "NESHAN_API_KEY", "MAPIR_API_KEY"}) {
                 if (runtimeKeys.has(name)) found.append(name).append(' ');
             }
             android.util.Log.d("DriveMateKeys", found.length() == 0
@@ -2280,9 +2373,8 @@ public class MainActivity extends Activity {
 
     private void scheduleTrafficCheck() {
         voiceHandler.removeCallbacks(trafficCheck);
-        if (navigationEngine.isNavigating() && activeDestination != null) {
-            voiceHandler.postDelayed(trafficCheck, TRAFFIC_CHECK_INTERVAL_MS);
-        }
+        // Version 1 keeps the active route until confirmed off-route navigation requests a reroute.
+        // This avoids periodic paid route requests while GPS and local route progress continue normally.
     }
 
     /**
@@ -2296,9 +2388,15 @@ public class MainActivity extends Activity {
         final SavedPlace destination = activeDestination;
         final int priorEtaSeconds = lastTrafficEtaSeconds;
         final long priorEtaMeasuredAt = lastTrafficEtaMeasuredAt;
-        routeRepository.getRoute(location.getLatitude(), location.getLongitude(), activeWaypoints,
-                destination.latitude, destination.longitude,
-                route -> runOnUiThread(() -> {
+        if (!neshanRoutingProvider.isConfigured()) {
+            scheduleTrafficCheck();
+            return;
+        }
+        new Thread(() -> {
+            try {
+                RouteResult route = neshanRoutingProvider.routeWithWaypoints(location.getLatitude(),
+                        location.getLongitude(), activeWaypoints, destination.latitude, destination.longitude);
+                runOnUiThread(() -> {
                     if (!navigationEngine.isNavigating() || activeDestination != destination) return;
                     long now = System.currentTimeMillis();
                     int elapsedSeconds = priorEtaMeasuredAt == 0L ? 0 : (int) ((now - priorEtaMeasuredAt) / 1000L);
@@ -2310,9 +2408,16 @@ public class MainActivity extends Activity {
                             && gainSeconds * 100 >= expectedRemaining * 12;
                     lastTrafficEtaSeconds = route.durationSeconds;
                     lastTrafficEtaMeasuredAt = now;
-                    if (materiallyFaster) replaceRouteForTraffic(route, destination, gainSeconds);
-                    else scheduleTrafficCheck();
-                }), error -> runOnUiThread(this::scheduleTrafficCheck));
+                    if (materiallyFaster) {
+                        setStatus("برآورد ترافیک نشان: مسیر فعلی حدود "
+                                + Math.max(1, gainSeconds / 60) + " دقیقه زمان بیشتری دارد.");
+                    }
+                    scheduleTrafficCheck();
+                });
+            } catch (Exception error) {
+                runOnUiThread(this::scheduleTrafficCheck);
+            }
+        }).start();
     }
 
     private void replaceRouteForTraffic(RouteResult route, SavedPlace destination, int gainSeconds) {
@@ -2645,9 +2750,8 @@ public class MainActivity extends Activity {
 
     private void scheduleTrafficIncidentCheck() {
         voiceHandler.removeCallbacks(trafficIncidentCheck);
-        if (navigationEngine.isNavigating() && activeDestination != null && trafficIncidentProvider.hasKey()) {
-            voiceHandler.postDelayed(trafficIncidentCheck, TRAFFIC_INCIDENT_CHECK_INTERVAL_MS);
-        }
+        // A live incident snapshot is fetched once for a newly calculated route. Repeating this
+        // request every few minutes adds key usage without changing turn-by-turn GPS guidance.
     }
 
     /** Live point traffic-incident counterpart to checkRouteHazards/checkRouteSafetyAlerts: same

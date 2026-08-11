@@ -16,6 +16,7 @@ import ai.drivemate.model.SpeedLimitPoint;
 
 public class NeshanRoutingProvider implements RoutingProvider {
     private String apiKey;
+    private boolean enabled = true;
 
     public NeshanRoutingProvider(String apiKey) { this.apiKey = apiKey; }
 
@@ -23,8 +24,9 @@ public class NeshanRoutingProvider implements RoutingProvider {
         if (apiKey != null && !apiKey.trim().isEmpty()) this.apiKey = apiKey.trim();
     }
 
-    String apiKey() { return apiKey == null || apiKey.trim().isEmpty() ? null : apiKey; }
-    public boolean isConfigured() { return apiKey() != null; }
+    String apiKey() { return !enabled || apiKey == null || apiKey.trim().isEmpty() ? null : apiKey; }
+    public boolean isConfigured() { return enabled && apiKey() != null; }
+    public void setEnabled(boolean enabled) { this.enabled = enabled; }
 
     @Override public String name() { return "Neshan"; }
 

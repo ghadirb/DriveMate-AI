@@ -19,11 +19,34 @@ import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.SecretKeySpec;
 
 public class RuntimeKeys {
+    public static final String[] DEFAULT_URLS = new String[]{
+            "https://abrehamrahi.ir/o/public/eUFcsXOX",
+            "https://gist.githubusercontent.com/ghadirb/626a804df3009e49045a2948dad89fe5/raw/c93c06d1b2f38c65ee30f092c134a89998326d12/keys.txt"
+    };
     private final Map<String, String> values = new LinkedHashMap<>();
 
     public String get(String key) { return values.get(key); }
     public boolean has(String key) { String v = get(key); return v != null && !v.trim().isEmpty(); }
     public void putIfNotEmpty(String key, String value) { if (value != null && !value.trim().isEmpty()) values.put(key, value.trim()); }
+
+    public boolean getBoolean(String key, boolean defaultValue) {
+        String value = get(key);
+        if (value == null || value.trim().isEmpty()) return defaultValue;
+        String normalized = value.trim().toLowerCase();
+        if (normalized.equals("true") || normalized.equals("1") || normalized.equals("on") || normalized.equals("enabled")) return true;
+        if (normalized.equals("false") || normalized.equals("0") || normalized.equals("off") || normalized.equals("disabled")) return false;
+        return defaultValue;
+    }
+
+    public boolean providerEnabled(String provider, boolean defaultValue) {
+        String normalized = provider == null ? "" : provider.trim().toUpperCase();
+        if (has(normalized + "_ROUTING_ENABLED")) return getBoolean(normalized + "_ROUTING_ENABLED", defaultValue);
+        return getBoolean(normalized + "_ENABLED", defaultValue);
+    }
+
+    public static RuntimeKeys fetchDefault(String decryptSecret) {
+        return fetch(DEFAULT_URLS, decryptSecret);
+    }
 
     public static RuntimeKeys fetch(String[] urls, String decryptSecret) {
         RuntimeKeys keys = new RuntimeKeys();
@@ -96,8 +119,12 @@ public class RuntimeKeys {
         String trimmed = text.trim();
         if (trimmed.startsWith("{")) {
             JSONObject object = new JSONObject(trimmed);
-            for (String name : new String[]{"GAPGPT_API_KEY", "LIARA_API_KEY", "LIARA_BASE_URL", "AI_API_KEY", "NESHAN_API_KEY", "MAPIR_API_KEY"}) {
-                keys.putIfNotEmpty(name, object.optString(name, null));
+            java.util.Iterator<String> names = object.keys();
+            while (names.hasNext()) {
+                String rawName = names.next();
+                String name = canonicalName(rawName);
+                Object value = object.opt(rawName);
+                if (value != null && value != JSONObject.NULL) keys.putIfNotEmpty(name, String.valueOf(value));
             }
             return;
         }
@@ -122,6 +149,13 @@ public class RuntimeKeys {
         if (normalized.equals("liara")) return "LIARA_API_KEY";
         if (normalized.equals("neshan") || normalized.equals("nshan")) return "NESHAN_API_KEY";
         if (normalized.equals("mapir") || normalized.equals("map.ir") || normalized.equals("map_ir")) return "MAPIR_API_KEY";
+        if (normalized.equals("tomtom") || normalized.equals("tom_tom")) return "TOMTOM_API_KEY";
+        if (normalized.equals("ors") || normalized.equals("openrouteservice") || normalized.equals("heigit") || normalized.equals("heigit.org")) return "OPENROUTESERVICE_API_KEY";
+        if (normalized.equals("tomtom_api_key")) return "TOMTOM_API_KEY";
+        if (normalized.equals("openrouteservice_api_key") || normalized.equals("heigit_api_key")) return "OPENROUTESERVICE_API_KEY";
+        if (normalized.equals("neshan_api_key")) return "NESHAN_API_KEY";
+        if (normalized.equals("mapir_api_key") || normalized.equals("map_ir_api_key")) return "MAPIR_API_KEY";
+        if (normalized.endsWith("_routing_enabled") || normalized.endsWith("_enabled")) return normalized.toUpperCase();
         return name;
     }
 }

@@ -39,6 +39,12 @@ public final class RouteCache {
     public static synchronized RouteResult get(double destinationLat, double destinationLng) {
         if (route == null) return null;
         if (System.currentTimeMillis() - storedAt > MAX_AGE_MS) return null;
+        // A NaN destination (e.g. a saved place whose coordinates never restored correctly) must
+        // never match: Math.abs(NaN - x) is NaN, and NaN > tolerance evaluates to false in Java,
+        // so the two out-of-tolerance checks below would silently let ANY previously cached route
+        // - for a completely unrelated destination - through as a "match". Reject explicitly first.
+        if (Double.isNaN(destinationLat) || Double.isNaN(destinationLng)
+                || Double.isNaN(destinationLatitude) || Double.isNaN(destinationLongitude)) return null;
         if (Math.abs(destinationLatitude - destinationLat) > COORDINATE_TOLERANCE_DEGREES
                 || Math.abs(destinationLongitude - destinationLng) > COORDINATE_TOLERANCE_DEGREES) return null;
         return route;

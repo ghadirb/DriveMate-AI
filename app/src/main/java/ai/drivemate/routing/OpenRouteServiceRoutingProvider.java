@@ -12,15 +12,22 @@ import ai.drivemate.model.RouteStep;
 
 /** Third routing fallback. ORS supplies GeoJSON, so its geometry can be drawn directly on the map. */
 public class OpenRouteServiceRoutingProvider implements RoutingProvider {
-    private final String apiKey;
+    private String apiKey = "";
+    private boolean enabled = true;
 
     public OpenRouteServiceRoutingProvider(String apiKey) {
-        this.apiKey = apiKey == null ? "" : apiKey.trim();
+        setApiKey(apiKey);
+    }
+
+    public void setApiKey(String value) {
+        if (value != null && !value.trim().isEmpty()) apiKey = value.trim();
     }
 
     public boolean isConfigured() {
-        return apiKey.length() >= 20;
+        return enabled && apiKey.length() >= 20;
     }
+
+    public void setEnabled(boolean enabled) { this.enabled = enabled; }
 
     @Override public String name() {
         return "OpenRouteService";
