@@ -9,8 +9,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,29 +31,11 @@ jobs:
           gradle-version: "8.9"
 
       - name: Build debug APK
-        id: build_debug
-        continue-on-error: true
         env:
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           OPENWEATHERMAP_API_KEY: ${{ secrets.OPENWEATHERMAP_API_KEY }}
           KEYS_DECRYPTION_SECRET: ${{ secrets.KEYS_DECRYPTION_SECRET }}
-        run: gradle assembleDebug --stacktrace 2>&1 | tee /tmp/build_debug.log
-
-      - name: Save build log on failure
-        if: steps.build_debug.outcome == 'failure'
-        run: |
-          tail -c 60000 /tmp/build_debug.log > BUILD_ERROR.log
-          git config user.email "ci@drivemate.local"
-          git config user.name "CI Bot"
-          git checkout --orphan ci-build-log
-          git rm -rf . > /dev/null 2>&1 || true
-          git add BUILD_ERROR.log
-          git commit -m "CI build error log"
-          git push origin HEAD:ci-build-log --force
-
-      - name: Fail job if build failed
-        if: steps.build_debug.outcome == 'failure'
-        run: exit 1
+        run: gradle assembleDebug --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
