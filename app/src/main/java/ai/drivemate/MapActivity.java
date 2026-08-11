@@ -2583,12 +2583,30 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         Log.w("DriveMateMap", "Navigation camera orientation is unavailable in this SDK build.");
     }
 
+    /** Manual "پایان مسیر" tap. Previously this stopped the engine silently and closed the screen -
+     *  a report only ever appeared if the driver happened to still be inside the strict arrival
+     *  radius when onArrived() fired on its own. In practice drivers stop the trip from wherever
+     *  they actually parked (a lot, the curb across the street, etc.), so the report needs to show
+     *  regardless of exact distance to the destination point - same trip-completion path onArrived()
+     *  uses, just triggered by the driver instead of the arrival-radius check. */
     private void stopNavigationFromMap() {
+        boolean wasNavigating = navigationMode && navigationEngine.isNavigating();
         navigationEngine.stop();
+        navigationMode = false;
+        followVehicle = false;
+        navigationCameraEnabled = false;
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        if (wasNavigating && !tripCompletionShown) {
+            tripCompletionShown = true;
+            saveTripRecordIfNeeded();
+            showMapTripCompletionReport();
+        }
         Intent result = new Intent();
         result.putExtra(RESULT_STOP_NAVIGATION, true);
         setResult(RESULT_OK, result);
-        finish();
+        if (!wasNavigating) finish();
+        // else: showMapTripCompletionReport()'s buttons (returnCompletedTripToMain / cancel) are
+        // what actually finish() this screen, so the driver sees the report before it closes.
     }
 
     private void saveSelectedPlace() {

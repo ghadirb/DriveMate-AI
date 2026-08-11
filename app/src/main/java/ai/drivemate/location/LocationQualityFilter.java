@@ -16,12 +16,20 @@ import java.util.ArrayDeque;
 public final class LocationQualityFilter {
     private static final float MAX_ACCURACY_METERS = 75f;
     private static final float MAX_PLAUSIBLE_SPEED_MPS = 55f;
-    private static final int RELOCATION_CONFIRM_SAMPLES = 3;
-    private static final long RELOCATION_MIN_SPAN_MS = 1_500L;
+    private static final int RELOCATION_CONFIRM_SAMPLES = 2;
+    private static final long RELOCATION_MIN_SPAN_MS = 800L;
     private static final long MAX_SEED_AGE_MS = 2 * 60_000L;
     private static final int MOTION_HISTORY_SIZE = 4;
     private static final float LOW_SPEED_MAX_PLAUSIBLE_MPS = 28f;
     private static final float MAX_CONFIRMED_ACCELERATION_MPS2 = 9f;
+    // If nothing has been accepted for this long while fixes keep arriving (e.g. a run of samples
+    // each individually flagged as an implausible jump/acceleration, or relocation candidates that
+    // keep failing to cluster with each other because the vehicle is genuinely covering ground
+    // between them), the marker/camera were staying frozen on the old fix well past the point where
+    // a stale position is worse than a slightly noisy one. Past this stall duration the newest
+    // candidate is accepted outright instead of waiting for another confirmation round, so the map
+    // never sits stuck for more than ~this long during an active drive.
+    private static final long MAX_STALL_MS = 4_000L;
 
     private Location acceptedLocation;
     private long acceptedAtRealtimeMs;
@@ -81,9 +89,14 @@ public final class LocationQualityFilter {
         float plausibleMeters = Math.max(45f,
                 elapsedMs / 1000f * plausibleSpeedMps + uncertaintyMeters + 12f);
         if (isAccelerationImplausible(candidate, observedSpeedMps, elapsedMs)) {
-            return considerRelocation(candidate, nowRealtimeMs);
+            return elapsedMs >= MAX_STALL_MS ? accept(candidate, nowRealtimeMs)
+                    : considerRelocation(candidate, nowRealtimeMs);
         }
         if (distanceMeters <= plausibleMeters) {
+            clearRelocationCandidate();
+            return accept(candidate, nowRealtimeMs);
+        }
+        if (elapsedMs >= MAX_STALL_MS) {
             clearRelocationCandidate();
             return accept(candidate, nowRealtimeMs);
         }
@@ -120,7 +133,7 @@ public final class LocationQualityFilter {
 
     private boolean sameRelocationCluster(Location first, Location second) {
         float radiusMeters = Math.max(35f,
-                Math.min(90f, Math.max(accuracyOr(first, 40f), accuracyOr(second, 40f)) + 20f));
+                Math.min(140f, Math.max(accuracyOr(first, 40f), accuracyOr(second, 40f)) + 20f));
         return first.distanceTo(second) <= radiusMeters;
     }
 
