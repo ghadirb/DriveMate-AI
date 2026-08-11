@@ -618,7 +618,14 @@ public class MainActivity extends Activity {
     private void importBackup() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType(BackupManager.MIME_TYPE);
+        // Restricting this to the exact MIME type "application/json" made the system file picker
+        // filter out (or grey out) the very backup file the user is trying to restore on a lot of
+        // devices/providers: files saved from a chat app, cloud drive, or browser download very
+        // often get tagged as text/plain or application/octet-stream instead of application/json,
+        // even though the file itself is exactly the JSON this app wrote. Ask for everything and
+        // hint at the JSON types instead, which is the standard, more permissive pattern.
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/json", "text/plain", "text/json"});
         startActivityForResult(intent, REQ_IMPORT_BACKUP);
     }
 
@@ -916,6 +923,17 @@ public class MainActivity extends Activity {
             voicePlayer.announce("gps_lost", "موقعیت مکانی هنوز در دسترس نیست.");
             return;
         }
+        // A place restored from an old/foreign backup, or one whose coordinates never saved
+        // correctly, can carry NaN or an unset 0,0 latitude/longitude. Routing silently against
+        // that produced either an empty result (see the routes.isEmpty() guard below, which used
+        // to bail out with zero feedback) or, worse, let RouteCache's tolerance check - which is
+        // NaN-unsafe - match a stale cached route for a completely different destination. Catch
+        // it here instead, before any of that runs.
+        if (Double.isNaN(destination.latitude) || Double.isNaN(destination.longitude)
+                || (destination.latitude == 0d && destination.longitude == 0d)) {
+            setStatus("مختصات این مکان معتبر نیست. آن را دوباره ذخیره کنید.");
+            return;
+        }
         setStatus("در حال دریافت مسیر به " + destination.name + "...");
         showRouteAnalysisLoading(destination);
         if (!isFullIntelligenceMode()) {
@@ -926,8 +944,17 @@ public class MainActivity extends Activity {
         final List<RoutePoint> requestedWaypoints = waypoints == null ? new ArrayList<>() : new ArrayList<>(waypoints);
         routeRepository.getRoutes(originLatitude, originLongitude, requestedWaypoints, destination.latitude, destination.longitude,
                 routes -> runOnUiThread(() -> {
-                    if (routes == null || routes.isEmpty()) return;
                     if (requestSequence != routeRequestSequence) return;
+                    if (routes == null || routes.isEmpty()) {
+                        // This used to just "return" here with no feedback at all: the loading
+                        // spinner stayed on screen forever and nothing was ever drawn, which is
+                        // exactly the "I go to the map and there's no navigation, nothing happened"
+                        // symptom - the request had actually already finished, just with zero routes.
+                        hideTripAnalysis();
+                        setStatus("مسیر قابل استفاده‌ای به " + destination.name + " پیدا نشد.");
+                        voicePlayer.announce("route_not_found", "مسیری به این مقصد پیدا نشد.");
+                        return;
+                    }
                     PersonalRouteAnalyzer.Suggestion personalRoute = preferredRouteIndex == 0
                             ? PersonalRouteAnalyzer.suggest(routes, tripStore.recent(60), originLatitude, originLongitude,
                             destination.latitude, destination.longitude) : null;

@@ -147,8 +147,13 @@ public final class OsmMapView extends org.osmdroid.views.MapView {
     private void applyTilt(float degrees) {
         currentTilt = degrees;
         setRotationX(degrees);
+        // The previous version clamped the cosine at 0.62, which under-compensates for any tilt
+        // past ~52 degrees - at the actual 58-degree navigation tilt this left the scaled plane
+        // roughly 15% short of covering the container, exposing the plain background color as a
+        // visible band at the top of the screen, right under the turn banner. Compensate for the
+        // real angle (with a small safety margin for rounding/device variance) instead.
         double radians = Math.toRadians(degrees);
-        float compensation = (float) (1d / Math.max(0.62d, Math.cos(radians)));
+        float compensation = (float) (1.08d / Math.max(0.05d, Math.cos(radians)));
         setScaleX(compensation);
         setScaleY(compensation);
     }
