@@ -9,20 +9,6 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <!-- Fades in only while the tilted navigation camera is active: a soft top-down scrim that
-         reads as "distance/haze toward the horizon", reinforcing the perspective illusion created
-         by tilting the flat map plane. Purely decorative, so it ignores touch. -->
-    <View
-        android:id="@+id/navigationHorizonScrim"
-        android:layout_width="match_parent"
-        android:layout_height="120dp"
-        android:layout_gravity="top"
-        android:background="@drawable/nav_horizon_scrim"
-        android:clickable="false"
-        android:focusable="false"
-        android:alpha="0"
-        android:visibility="gone" />
-
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -36,6 +22,7 @@
             android:layout_height="wrap_content"
             android:layout_marginBottom="10dp"
             android:background="@drawable/nav_banner"
+            android:elevation="8dp"
             android:gravity="center_vertical"
             android:orientation="horizontal"
             android:padding="16dp"
@@ -47,7 +34,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginStart="14dp"
                 android:text="↑"
-                android:textColor="@color/white"
+                android:textColor="@color/nav_overlay_text"
                 android:textSize="36sp"
                 android:textStyle="bold" />
 
@@ -62,7 +49,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:text=""
-                    android:textColor="@color/white"
+                    android:textColor="@color/nav_overlay_text"
                     android:textSize="22sp"
                     android:textStyle="bold" />
 
@@ -72,7 +59,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="3dp"
                     android:text=""
-                    android:textColor="@color/white"
+                    android:textColor="@color/nav_overlay_text"
                     android:textSize="16sp" />
             </LinearLayout>
 
@@ -82,7 +69,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginStart="6dp"
                 android:text="▾"
-                android:textColor="@color/white"
+                android:textColor="@color/nav_overlay_text"
                 android:textSize="20sp" />
         </LinearLayout>
 
@@ -93,6 +80,7 @@
             android:layout_gravity="start"
             android:layout_marginBottom="10dp"
             android:background="@drawable/nav_banner"
+            android:elevation="8dp"
             android:gravity="center_vertical"
             android:orientation="horizontal"
             android:padding="8dp"

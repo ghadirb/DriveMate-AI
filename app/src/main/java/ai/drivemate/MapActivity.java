@@ -175,7 +175,6 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private TextView roadSpeedLimitText;
     private ScrollView turnStepsScroll;
     private LinearLayout turnStepsContent;
-    private View navigationHorizonScrim;
     private boolean turnStepsExpanded;
     private final Handler searchHandler = new Handler(Looper.getMainLooper());
     private Runnable pendingSuggestionSearch;
@@ -307,7 +306,6 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         laneGuidanceRow = findViewById(R.id.laneGuidanceRow);
         roadSpeedLimitText = findViewById(R.id.roadSpeedLimitText);
         turnStepsScroll = findViewById(R.id.turnStepsScroll);
-        navigationHorizonScrim = findViewById(R.id.navigationHorizonScrim);
         turnStepsContent = findViewById(R.id.turnStepsContent);
         turnBannerContainer.setOnClickListener(v -> toggleTurnSteps());
         destinationText.setOnClickListener(v -> showWaypointManager());
@@ -319,7 +317,6 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         if (map != null && isSpeedLimitLayerEnabled() && !navigationMode) loadNearbySpeedLimits();
         if (navigationMode) {
             navigationCameraEnabled = true;
-            setHorizonScrimVisible(true);
             findViewById(R.id.startMapNavigationButton).setVisibility(View.GONE);
             SavedPlace active = new SavedPlace(getIntent().getStringExtra(EXTRA_DESTINATION_NAME), "active_navigation",
                     getIntent().getDoubleExtra(EXTRA_DESTINATION_LATITUDE, 0d),
@@ -336,6 +333,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             findViewById(R.id.mapSearchBarRow).setVisibility(View.GONE);
             findViewById(R.id.savedPlacesButton).setVisibility(View.GONE);
             findViewById(R.id.nearMeButton).setVisibility(View.GONE);
+            // The bottom tab strip (dashboard/map/saved/profile) has nothing to do with driving
+            // and was permanently occupying ~68dp of screen height even in navigation mode -
+            // hide it here so the live map gets that space back while a trip is active.
+            findViewById(R.id.mapBottomTabs).setVisibility(View.GONE);
         }
     }
 
@@ -2260,7 +2261,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                 map.moveCamera(new LatLng(originLatitude, originLongitude), 0.3f);
                 map.setZoom(16f, 0.3f);
             }
-            setHorizonScrimVisible(false);
+            findViewById(R.id.mapBottomTabs).setVisibility(View.VISIBLE);
             findViewById(R.id.routeOptionsButton).setVisibility(View.VISIBLE);
             findViewById(R.id.saveMapPlaceButton).setVisibility(View.VISIBLE);
             findViewById(R.id.routeWaypointsButton).setVisibility(!routeWaypoints.isEmpty() ? View.VISIBLE : View.GONE);
@@ -2453,7 +2454,6 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         applyMapOrientation(0f, 0f, 0.2f);
         map.moveCamera(new LatLng(originLatitude, originLongitude), 0.25f);
         map.setZoom(12.5f, 0.25f);
-        setHorizonScrimVisible(false);
     }
 
     /** Restores the driver-first viewport: the vehicle stays below center and the road points up. */
@@ -2462,20 +2462,6 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         navigationCameraEnabled = true;
         followVehicle = true;
         updateNavigationCamera();
-        setHorizonScrimVisible(true);
-    }
-
-    /** Fades the decorative horizon scrim in/out in step with the tilted 3D camera so it never
-     *  appears while the map is flat (route overview) or on activities that skip navigation mode. */
-    private void setHorizonScrimVisible(boolean visible) {
-        if (navigationHorizonScrim == null) return;
-        if (visible) {
-            navigationHorizonScrim.setVisibility(View.VISIBLE);
-            navigationHorizonScrim.animate().alpha(1f).setDuration(280).start();
-        } else {
-            navigationHorizonScrim.animate().alpha(0f).setDuration(200)
-                    .withEndAction(() -> navigationHorizonScrim.setVisibility(View.GONE)).start();
-        }
     }
 
     private void updateNavigationCamera() {
