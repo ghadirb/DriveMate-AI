@@ -166,6 +166,13 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private final NavigationEngine navigationEngine = new NavigationEngine();
     private final SimpleDateFormat etaFormat = new SimpleDateFormat("HH:mm", Locale.US);
     private long mapNavigationStartedAt;
+    /** Snapshot of the origin at the true start of this trip (not updated by reroutes), used so
+     *  the completion report reflects distance actually traveled, origin to wherever the trip
+     *  ends, rather than the originally planned route distance to the destination. */
+    private double tripOriginLatitude = Double.NaN;
+    private double tripOriginLongitude = Double.NaN;
+    private float tripTraveledDistanceMeters;
+    private Location lastTripAccumLocation;
     private boolean tripCompletionShown;
     private View turnBannerContainer;
     private TextView turnArrowText;
@@ -1754,7 +1761,16 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         current.setLongitude(originLongitude);
         current.setBearing(lastBearing);
         navigationEngine.start(route, this, current, new RoutePoint(destination.latitude, destination.longitude));
-        mapNavigationStartedAt = System.currentTimeMillis();
+        // Guarded: refreshNavigationRouteFrom/recalculateActiveRoute also call this on every
+        // reroute, which must not reset the true trip start time/origin/distance-so-far - only a
+        // genuinely new trip (mapNavigationStartedAt == 0) initializes these.
+        if (mapNavigationStartedAt == 0L) {
+            mapNavigationStartedAt = System.currentTimeMillis();
+            tripOriginLatitude = originLatitude;
+            tripOriginLongitude = originLongitude;
+            tripTraveledDistanceMeters = 0f;
+            lastTripAccumLocation = null;
+        }
         tripCompletionShown = false;
         turnBannerContainer.setVisibility(View.VISIBLE);
         turnDistanceText.setText("");
@@ -2201,6 +2217,16 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         if (closestIndex >= 0 && closestDistance <= 120f) routeWaypoints.remove(closestIndex);
     }
 
+    /** Minimum distance actually traveled before a trip is considered a real, reportable
+     *  completion - stopping moments after selecting a destination (or right where you already
+     *  are) should not be treated as "arrived", regardless of how close that happens to be to the
+     *  destination. */
+    private static final float MIN_REPORTABLE_TRIP_METERS = 80f;
+
+    private boolean tripIsReportable() {
+        return tripTraveledDistanceMeters >= MIN_REPORTABLE_TRIP_METERS;
+    }
+
     /** MainActivity runs its own independent NavigationEngine tracking the same trip in the
      *  background, and normally saves the trip itself when it detects arrival - but that instance
      *  can be destroyed by Android before arrival (extended screen-off time while the driver was on
@@ -2209,7 +2235,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
      *  startedAt + destination name check below skips this if MainActivity's save already landed,
      *  so the trip does not appear twice in history when both fire normally. */
     private void saveTripRecordIfNeeded() {
-        if (destination == null || tripStore == null) return;
+        if (destination == null || tripStore == null || !tripIsReportable()) return;
         long startedAt = mapNavigationStartedAt > 0 ? mapNavigationStartedAt : System.currentTimeMillis();
         // MainActivity's own tripStartedAt and this activity's mapNavigationStartedAt are each set
         // independently, so they are never exactly equal for the same real trip - a 5-minute
@@ -2219,19 +2245,36 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             if (existing.destinationName.equals(destination.name)
                     && Math.abs(existing.startedAt - startedAt) <= 300_000L) return;
         }
-        int distanceMeters = selectedRoute != null ? selectedRoute.distanceMeters : 0;
-        int durationSeconds = selectedRoute != null ? selectedRoute.durationSeconds : 0;
+        // Distance/duration reflect the actual trip - origin to wherever it ended - not the
+        // originally planned route to the destination, which may never have been fully driven.
+        int distanceMeters = Math.round(tripTraveledDistanceMeters);
+        long elapsedSeconds = (System.currentTimeMillis() - startedAt) / 1000L;
+        int durationSeconds = (int) Math.max(1L, elapsedSeconds);
         String provider = selectedRoute != null ? selectedRoute.providerName : "";
-        tripStore.add(new TripRecord(destination.name, originLatitude, originLongitude,
+        double fromLatitude = Double.isNaN(tripOriginLatitude) ? originLatitude : tripOriginLatitude;
+        double fromLongitude = Double.isNaN(tripOriginLongitude) ? originLongitude : tripOriginLongitude;
+        tripStore.add(new TripRecord(destination.name, fromLatitude, fromLongitude,
                 destination.latitude, destination.longitude, distanceMeters, durationSeconds,
                 startedAt, System.currentTimeMillis(), distanceMeters, provider, routeWaypoints.size(), true));
+    }
+
+    /** Clears the per-trip tracking fields once a trip has been fully handled (report shown or
+     *  skipped as too short), so the next startTurnByTurn() call is recognized as a genuinely new
+     *  trip rather than continuing to accumulate against the previous one. */
+    private void resetTripTracking() {
+        mapNavigationStartedAt = 0L;
+        tripOriginLatitude = Double.NaN;
+        tripOriginLongitude = Double.NaN;
+        tripTraveledDistanceMeters = 0f;
+        lastTripAccumLocation = null;
     }
 
     @Override public void onArrived() {
         runOnUiThread(() -> {
             if (tripCompletionShown) return;
             tripCompletionShown = true;
-            saveTripRecordIfNeeded();
+            boolean reportable = tripIsReportable();
+            if (reportable) saveTripRecordIfNeeded();
             turnInstructionText.setText("به مقصد رسیدید");
             turnDistanceText.setText("");
             turnArrowText.setText("●");
@@ -2265,21 +2308,20 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             findViewById(R.id.routeOptionsButton).setVisibility(View.VISIBLE);
             findViewById(R.id.saveMapPlaceButton).setVisibility(View.VISIBLE);
             findViewById(R.id.routeWaypointsButton).setVisibility(!routeWaypoints.isEmpty() ? View.VISIBLE : View.GONE);
-            showMapTripCompletionReport();
+            if (reportable) showMapTripCompletionReport();
+            resetTripTracking();
         });
         trafficIncidentHandler.removeCallbacks(trafficIncidentRefresh);
     }
 
     private void showMapTripCompletionReport() {
-        int routeDistanceMeters = selectedRoute == null ? 0 : selectedRoute.distanceMeters;
-        int routeDurationSeconds = selectedRoute == null ? 0 : selectedRoute.durationSeconds;
+        int traveledMeters = Math.round(tripTraveledDistanceMeters);
         long elapsedMinutes = mapNavigationStartedAt == 0L ? 0L
                 : Math.max(1L, (System.currentTimeMillis() - mapNavigationStartedAt) / 60_000L);
         String destinationName = destination == null ? "مقصد" : destination.name;
         String report = "به " + destinationName + " رسیدید."
                 + "\nمدت سفر: " + elapsedMinutes + " دقیقه"
-                + (routeDistanceMeters > 0 ? "\nمسیر: " + formatDistance(routeDistanceMeters) : "")
-                + (routeDurationSeconds > 0 ? "\nبرآورد اولیه: " + formatDuration(routeDurationSeconds) : "");
+                + (traveledMeters > 0 ? "\nمسافت طی‌شده: " + formatDistance(traveledMeters) : "");
         try {
             new AlertDialog.Builder(this)
                     .setTitle("گزارش پایان سفر")
@@ -2583,12 +2625,14 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         Log.w("DriveMateMap", "Navigation camera orientation is unavailable in this SDK build.");
     }
 
-    /** Manual "پایان مسیر" tap. Previously this stopped the engine silently and closed the screen -
-     *  a report only ever appeared if the driver happened to still be inside the strict arrival
-     *  radius when onArrived() fired on its own. In practice drivers stop the trip from wherever
-     *  they actually parked (a lot, the curb across the street, etc.), so the report needs to show
-     *  regardless of exact distance to the destination point - same trip-completion path onArrived()
-     *  uses, just triggered by the driver instead of the arrival-radius check. */
+    /** Manual "پایان مسیر" tap. Only treated as trip completion (report shown, saved as completed)
+     *  when the driver is reasonably close to the destination - stopping while nowhere near it is a
+     *  genuine cancellation, not an arrival, and showing an end-of-trip report for that is confusing
+     *  and was reported as repeatedly appearing on every stop regardless of actual progress. A
+     *  generous radius (not the strict arrival radius) still covers stopping a bit short, e.g.
+     *  parking across the street or in a lot near the destination. */
+    private static final float MANUAL_STOP_COMPLETION_RADIUS_METERS = 200f;
+
     private void stopNavigationFromMap() {
         boolean wasNavigating = navigationMode && navigationEngine.isNavigating();
         navigationEngine.stop();
@@ -2596,15 +2640,28 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         followVehicle = false;
         navigationCameraEnabled = false;
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        if (wasNavigating && !tripCompletionShown) {
+        boolean nearDestination = false;
+        if (wasNavigating && destination != null) {
+            Location current = currentMapLocation();
+            Location destinationLocation = new Location("destination");
+            destinationLocation.setLatitude(destination.latitude);
+            destinationLocation.setLongitude(destination.longitude);
+            nearDestination = current.distanceTo(destinationLocation) <= MANUAL_STOP_COMPLETION_RADIUS_METERS;
+        }
+        // Proximity to the destination alone is not enough: selecting a destination close to
+        // where the driver already is, then stopping immediately, is trivially "near" without any
+        // real trip having happened. Require actual distance traveled too.
+        boolean reportable = wasNavigating && nearDestination && tripIsReportable();
+        if (reportable && !tripCompletionShown) {
             tripCompletionShown = true;
             saveTripRecordIfNeeded();
             showMapTripCompletionReport();
         }
+        resetTripTracking();
         Intent result = new Intent();
-        result.putExtra(RESULT_STOP_NAVIGATION, true);
+        result.putExtra(reportable ? RESULT_TRIP_COMPLETED : RESULT_STOP_NAVIGATION, true);
         setResult(RESULT_OK, result);
-        if (!wasNavigating) finish();
+        if (!reportable) finish();
         // else: showMapTripCompletionReport()'s buttons (returnCompletedTripToMain / cancel) are
         // what actually finish() this screen, so the driver sees the report before it closes.
     }
@@ -2822,6 +2879,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         if (accepted.hasBearing()) {
             lastBearing = accepted.getBearing();
             hasHeading = true;
+        }
+        if (navigationMode && navigationEngine.isNavigating()) {
+            if (lastTripAccumLocation != null) tripTraveledDistanceMeters += lastTripAccumLocation.distanceTo(accepted);
+            lastTripAccumLocation = new Location(accepted);
         }
         runOnUiThread(() -> {
             if (isFinishing() || isDestroyed() || map == null || !map.isReadyForOverlays()) return;

@@ -444,7 +444,7 @@ public class MainActivity extends Activity {
             } else if (data.getBooleanExtra(MapActivity.RESULT_START_VOICE, false)) {
                 toggleVoiceInput();
             } else if (data.getBooleanExtra(MapActivity.RESULT_TRIP_COMPLETED, false)) {
-                if (activeDestination != null) finishTrip(activeDestination, false);
+                clearActiveNavigationStateAfterMapCompletion();
             } else if (data.getBooleanExtra(MapActivity.RESULT_STOP_NAVIGATION, false)) {
                 requestStopNavigation("مسیریابی متوقف شد.");
             } else if (data.hasExtra(MapActivity.RESULT_LATITUDE) && data.hasExtra(MapActivity.RESULT_LONGITUDE)) {
@@ -1432,6 +1432,38 @@ public class MainActivity extends Activity {
         String instruction = route.steps.get(0).instruction == null ? "" : route.steps.get(0).instruction.trim();
         if (instruction.length() > 110) instruction = instruction.substring(0, 110);
         return instruction;
+    }
+
+    /** MapActivity already saved and reported this trip itself (see saveTripRecordIfNeeded /
+     *  showMapTripCompletionReport there) before returning RESULT_TRIP_COMPLETED. Calling the full
+     *  finishTrip() here as before would independently re-save a second, undeduped trip record
+     *  under MainActivity's own clock and never mark it shown - which is exactly why the report
+     *  kept reappearing after being closed. This only clears MainActivity's own mirrored engine
+     *  state so it does not keep tracking a trip that has already ended. */
+    private void clearActiveNavigationStateAfterMapCompletion() {
+        if (activeDestination == null) return;
+        resetGuidance(true);
+        navigationEngine.stop();
+        activeDestination = null;
+        activeRoute = null;
+        activeWaypoints = new ArrayList<>();
+        tripStartedAt = 0L;
+        activeTripDistanceMeters = 0;
+        activeTripPath.clear();
+        activeTripOriginLatitude = Double.NaN;
+        activeTripOriginLongitude = Double.NaN;
+        lastTripLocation = null;
+        lastAlertMovementLocation = null;
+        alertMovingUntil = 0L;
+        initialGuidanceHeldUntil = 0L;
+        smartCompanion.stop();
+        voiceHandler.removeCallbacks(trafficCheck);
+        voiceHandler.removeCallbacks(weatherCheck);
+        voiceHandler.removeCallbacks(trafficIncidentCheck);
+        stopBackgroundNavigation();
+        hideTripAnalysis();
+        if (tripStatsPanel != null) tripStatsPanel.setVisibility(View.GONE);
+        setStatus("سفر به پایان رسید.");
     }
 
     private void finishTrip(SavedPlace destination) {
