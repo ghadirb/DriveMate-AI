@@ -23,8 +23,11 @@ public final class RouteCurveAnalyzer {
     /** A plain city-street corner or T-junction routinely bends 60-90 degrees and is already
      *  announced as a normal turn instruction by the route step itself; this analyzer exists to
      *  flag something extra - a genuinely sharp, sustained curve worth a separate safety alert -
-     *  not every ordinary intersection. */
-    private static final double SHARP_TURN_DEGREES = 70d;
+     *  not every ordinary intersection. The threshold used to sit at 70 degrees, inside that
+     *  normal-turn range, so an everyday 80-90 degree corner routinely fired the same "sharp curve"
+     *  alert as a real hairpin. Raised above the ordinary-turn range so only bends sharper than a
+     *  standard right-angle intersection - real curves, not corners - are flagged. */
+    private static final double SHARP_TURN_DEGREES = 100d;
 
     public static List<RouteSafetyAlert> sharpCurves(List<RoutePoint> geometry) {
         ArrayList<RouteSafetyAlert> curves = new ArrayList<>();

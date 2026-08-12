@@ -130,6 +130,12 @@ public class MainActivity extends Activity {
     /** True while the "GPS unavailable" status is showing, so repeated onProviderDisabled calls
      *  (GPS and network can each fire independently) don't spam setStatus. */
     private boolean gpsWarningActive;
+    /** Destination/waypoints the driver actually asked to navigate to while GPS was off, so the
+     *  trip can be started automatically the moment location comes back - instead of the driver
+     *  having to notice the "GPS must be on" status text and tap "start" again themselves. Cleared
+     *  once consumed or once a new navigation request is made. */
+    private SavedPlace pendingNavigationDestination;
+    private List<RoutePoint> pendingNavigationWaypoints;
     private NeshanRoutingProvider neshanRoutingProvider;
     private MapIrRoutingProvider mapIrRoutingProvider;
     private OpenRouteServiceRoutingProvider openRouteServiceRoutingProvider;
@@ -303,6 +309,13 @@ public class MainActivity extends Activity {
         locationTracker.setUpdateListener(new DeviceLocationTracker.UpdateListener() {
             @Override public void onLocationUpdate(Location location) {
                 gpsWarningActive = false;
+                if (pendingNavigationDestination != null) {
+                    SavedPlace destination = pendingNavigationDestination;
+                    List<RoutePoint> waypoints = pendingNavigationWaypoints;
+                    pendingNavigationDestination = null;
+                    pendingNavigationWaypoints = null;
+                    startNavigation(destination, waypoints);
+                }
                 navigationEngine.onLocation(location);
                 smartCompanion.onLocation(location);
                 recordTripLocation(location);
@@ -339,6 +352,13 @@ public class MainActivity extends Activity {
                     } else if (available && gpsWarningActive) {
                         gpsWarningActive = false;
                         setStatus("موقعیت مکانی دوباره در دسترس است.");
+                    }
+                    if (available && pendingNavigationDestination != null) {
+                        SavedPlace destination = pendingNavigationDestination;
+                        List<RoutePoint> waypoints = pendingNavigationWaypoints;
+                        pendingNavigationDestination = null;
+                        pendingNavigationWaypoints = null;
+                        startNavigation(destination, waypoints);
                     }
                 });
             }
@@ -906,6 +926,12 @@ public class MainActivity extends Activity {
     /** Re-routing keeps the original trip clock and GPS distance so the final report covers the
      *  whole journey rather than only its last recalculated segment. */
     private void startNavigation(SavedPlace destination, List<RoutePoint> waypoints, boolean preserveTripProgress) {
+        if (!locationTracker.isLocationEnabled()) {
+            promptEnableLocationForNavigation(destination, waypoints);
+            return;
+        }
+        pendingNavigationDestination = null;
+        pendingNavigationWaypoints = null;
         stopAnyOtherActiveSessionBeforeStartingHere();
         resetGuidance(true);
         final long requestSequence = ++routeRequestSequence;
@@ -1647,6 +1673,28 @@ public class MainActivity extends Activity {
                     .setNegativeButton("بعداً", null)
                     .show();
         }
+    }
+
+    /** Fired the moment the driver actually taps "start navigation" while GPS/location is off -
+     *  distinct from promptEnableLocationIfNeeded() above, which only runs once at app launch and
+     *  is easy to dismiss with "بعداً" long before the driver picks a destination. Remembers the
+     *  requested trip and, once location comes back on (see onLocationAvailabilityChanged),
+     *  starts it automatically instead of leaving the driver to notice and tap "start" again. */
+    private void promptEnableLocationForNavigation(SavedPlace destination, List<RoutePoint> waypoints) {
+        pendingNavigationDestination = destination;
+        pendingNavigationWaypoints = waypoints == null ? new ArrayList<>() : new ArrayList<>(waypoints);
+        setStatus("برای شروع مسیر، GPS باید روشن باشد.");
+        new AlertDialog.Builder(this)
+                .setTitle("GPS خاموش است")
+                .setMessage("برای مسیریابی به \"" + destination.name + "\" باید مکان/GPS گوشی روشن باشد. "
+                        + "به محض روشن شدن، مسیریابی به‌طور خودکار شروع می‌شود.")
+                .setPositiveButton("روشن کردن GPS", (d, w) -> startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)))
+                .setNegativeButton("انصراف", (d, w) -> {
+                    pendingNavigationDestination = null;
+                    pendingNavigationWaypoints = null;
+                })
+                .setCancelable(false)
+                .show();
     }
 
     private void askAi(String question) {
