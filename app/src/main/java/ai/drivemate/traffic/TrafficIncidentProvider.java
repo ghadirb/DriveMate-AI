@@ -4,6 +4,8 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 
@@ -19,7 +21,7 @@ public final class TrafficIncidentProvider {
     private boolean enabled = true;
     private JSONObject cachedSummary;
     private long summaryAt;
-    private final java.util.Map<String, CachedRegion> regionCache = new java.util.HashMap<>();
+    private final java.util.Map<String, CachedRegion> regionCache = new HashMap<>();
 
     public TrafficIncidentProvider(String ignoredApiKey) { }
     public void setApiKey(String ignored) { }
@@ -31,10 +33,11 @@ public final class TrafficIncidentProvider {
         JSONObject summary = getSummary();
         if (summary == null) return new ArrayList<>();
         LinkedHashMap<String, TrafficIncident> result = new LinkedHashMap<>();
-        JSONArray regions = summary.optJSONObject("regions") == null ? null : null;
         JSONObject regionMap = summary.optJSONObject("regions");
         if (regionMap == null) return new ArrayList<>();
-        for (String regionId : regionMap.keySet()) {
+        Iterator<String> keys = regionMap.keys();
+        while (keys.hasNext()) {
+            String regionId = keys.next();
             JSONObject meta = regionMap.optJSONObject(regionId);
             JSONArray bbox = meta == null ? null : meta.optJSONArray("bbox");
             if (bbox == null || bbox.length() < 4 || !routeTouchesBox(geometry, bbox)) continue;
