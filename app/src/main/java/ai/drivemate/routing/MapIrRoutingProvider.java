@@ -107,6 +107,15 @@ public class MapIrRoutingProvider implements RoutingProvider {
         String modifier = maneuver.optString("modifier", "").toLowerCase(java.util.Locale.ROOT);
         String road = step.optString("name", maneuver.optString("name", "")).trim();
         String explicit = maneuver.optString("instruction", step.optString("instruction", "")).trim();
+        // Diagnostic only: lets a logcat capture from a real drive show exactly what map.ir sent
+        // for every maneuver (type/modifier/exit), so a roundabout that got voiced as a plain
+        // "turn left" instead of "میدان ... خروجی" can be confirmed as either (a) map.ir's own
+        // road data not tagging that junction as a roundabout at all - nothing to fix on our end -
+        // or (b) a type/field value this method isn't recognizing, which would be. Cheap at debug
+        // level; safe to leave in.
+        android.util.Log.d("DriveMateManeuver", "type=" + type + " modifier=" + modifier
+                + " exit=" + maneuver.optInt("exit", maneuver.optInt("roundaboutExitNumber", -1))
+                + " road=" + road);
         if (type.isEmpty()) return explicit.isEmpty() ? "در مسیر ادامه دهید" : explicit;
         String instruction;
         if ("arrive".equals(type)) {
@@ -129,6 +138,15 @@ public class MapIrRoutingProvider implements RoutingProvider {
             instruction = "در مسیر ادامه دهید";
         } else {
             instruction = turnInstruction(modifier, false);
+        }
+        // Iranian junctions that are actually roundabouts are very often carried in OSM only as a
+        // named place ("میدان آزادی", "میدان ولیعصر") rather than a junction=roundabout tag map.ir's
+        // engine recognizes, so this maneuver can arrive as a plain "turn" even though the road name
+        // itself says it's a میدان. Keep the direction (still correct) but frame it as the roundabout
+        // it actually is instead of a generic street-corner turn.
+        if (road.contains("میدان") && ("turn".equals(type) || "end of road".equals(type) || "fork".equals(type))) {
+            instruction = "در " + road + (modifier.contains("left") ? " از سمت چپ" : modifier.contains("right") ? " از سمت راست" : "") + " خارج شوید";
+            return instruction;
         }
         return road.isEmpty() || "به مقصد می‌رسید".equals(instruction)
                 ? instruction : instruction + " به سمت " + road;
