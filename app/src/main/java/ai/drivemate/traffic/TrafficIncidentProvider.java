@@ -26,7 +26,8 @@ public final class TrafficIncidentProvider {
     public TrafficIncidentProvider(String ignoredApiKey) { }
     public void setApiKey(String ignored) { }
     public boolean hasKey() { return enabled; }
-    public void setEnabled(boolean enabled) { this.enabled = enabled; }
+    /** The app's remote Iran feed is always the selected traffic source; Waze credentials never enter the APK. */
+    public void setEnabled(boolean ignored) { this.enabled = true; }
 
     public List<TrafficIncident> incidentsNear(List<RoutePoint> geometry) throws Exception {
         if (!enabled || geometry == null || geometry.isEmpty()) return new ArrayList<>();
