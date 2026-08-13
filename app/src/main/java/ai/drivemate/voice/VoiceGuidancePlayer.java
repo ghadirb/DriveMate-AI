@@ -6,20 +6,18 @@ import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 import android.util.Log;
 
-import java.util.Locale;
+import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Set;
 
 /**
- * Plays pre-recorded guidance clips (res/raw/*.wav) when one exists for the requested name.
- * When no matching clip exists (or the requested text is fully dynamic, e.g. an AI answer or a
- * live status message), falls back to the device's built-in, offline, free TextToSpeech engine
- * so the driver still hears something instead of silence.
+ * Serial, non-overlapping local guidance player. Fixed Persian clips and dynamic local TTS are
+ * queued together so a new warning cannot truncate the sentence already being played.
  */
 public class VoiceGuidancePlayer {
     private static final String TAG = "DriveMateVoice";
-    private static final String UTTERANCE_ID = "drivemate_tts";
     private static final Set<String> REAL_CLIPS = new HashSet<>(Arrays.asList(
             "alternative_route", "continue_route", "dangerous_curve_ahead", "danger_ahead", "delay_10_min",
             "destination_arrived", "fuel_station_1km", "fuel_station_5km", "heavy_traffic", "low_fuel_warning",
@@ -33,17 +31,13 @@ public class VoiceGuidancePlayer {
     ));
 
     private final Context context;
+    private final ArrayDeque<Item> queue = new ArrayDeque<>();
     private float volume = 0.85f;
     private MediaPlayer player;
     private TextToSpeech textToSpeech;
     private boolean ttsReady;
     private boolean ttsAvailable = true;
-    /** Latest speak() call made before the async TextToSpeech engine finished initialising (see
-     *  constructor). Economy mode never calls the online voice service and relies solely on this
-     *  local engine for every dynamic warning, so if a hazard/turn instruction fired in that short
-     *  init window it used to be dropped with only a log line and no audio at all; now it is kept
-     *  and flushed once the engine reports SUCCESS (see the constructor callback). */
-    private String pendingSpeechText;
+    private boolean playing;
 
     public VoiceGuidancePlayer(Context context) {
         this.context = context.getApplicationContext();
@@ -51,47 +45,47 @@ public class VoiceGuidancePlayer {
             if (status != TextToSpeech.SUCCESS) {
                 ttsAvailable = false;
                 Log.w(TAG, "TextToSpeech engine could not be initialised on this device.");
+                drain();
                 return;
             }
             int result = textToSpeech.setLanguage(new Locale("fa", "IR"));
             if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                // No Persian voice installed on this device; fall back to the default language
-                // rather than silently failing, so we still say *something*.
                 textToSpeech.setLanguage(Locale.getDefault());
                 Log.w(TAG, "Persian TTS voice is unavailable; using the device default voice.");
-            } else {
-                Log.i(TAG, "Persian TTS voice is ready.");
             }
             textToSpeech.setSpeechRate(1.0f);
             ttsReady = true;
-            if (pendingSpeechText != null) {
-                String queued = pendingSpeechText;
-                pendingSpeechText = null;
-                speakNow(queued);
-            }
+            drain();
         });
     }
 
-    /** Plays a fixed clip if it exists; otherwise speaks fallbackText through local TTS.
-     *  @return true if a clip actually started playing or the TTS fallback was accepted (spoken
-     *  now or queued); false only if TTS was needed but is unavailable on this device. */
-    public boolean announce(String clipName, String fallbackText) {
-        String resolvedName = resolveClipName(clipName);
-        int resId = context.getResources().getIdentifier(resolvedName, "raw", context.getPackageName());
-        if (REAL_CLIPS.contains(resolvedName) && resId != 0) {
-            Log.i(TAG, "Playing local guidance clip: " + resolvedName);
-            return playClip(resId);
+    public synchronized boolean announce(String clipName, String fallbackText) {
+        String resolved = resolveClipName(clipName);
+        int resId = context.getResources().getIdentifier(resolved, "raw", context.getPackageName());
+        if (REAL_CLIPS.contains(resolved) && resId != 0) {
+            queue.addLast(Item.clip(resId, resolved));
+        } else if (fallbackText != null && !fallbackText.trim().isEmpty()) {
+            queue.addLast(Item.text(fallbackText));
+        } else {
+            return false;
         }
-        Log.i(TAG, "No local clip for " + resolvedName + "; speaking fallback text.");
-        return speak(fallbackText);
+        drain();
+        return true;
     }
 
-    /** Kept for call sites that only have a clip name and no dynamic text to fall back on. */
-    public void play(String clipName) {
-        String resolvedName = resolveClipName(clipName);
-        int resId = context.getResources().getIdentifier(resolvedName, "raw", context.getPackageName());
-        if (!REAL_CLIPS.contains(resolvedName) || resId == 0) return;
-        playClip(resId);
+    public synchronized void play(String clipName) {
+        String resolved = resolveClipName(clipName);
+        int resId = context.getResources().getIdentifier(resolved, "raw", context.getPackageName());
+        if (!REAL_CLIPS.contains(resolved) || resId == 0) return;
+        queue.addLast(Item.clip(resId, resolved));
+        drain();
+    }
+
+    public synchronized boolean speak(String text) {
+        if (text == null || text.trim().isEmpty()) return false;
+        queue.addLast(Item.text(text));
+        drain();
+        return true;
     }
 
     private String resolveClipName(String name) {
@@ -101,94 +95,119 @@ public class VoiceGuidancePlayer {
         return name;
     }
 
-    /** Speaks arbitrary, dynamic Persian text (AI answers, live status, warnings) via local TTS.
-     *  @return true if the engine accepted the text (spoken now or queued for once init finishes);
-     *  false if it was dropped because TTS is unavailable on this device, so callers can avoid
-     *  reporting a "played" status when nothing will actually be heard. */
-    public boolean speak(String text) {
-        if (text == null || text.trim().isEmpty()) return false;
-        if (!ttsAvailable) {
-            Log.w(TAG, "TTS engine unavailable on this device; dropped: " + text);
-            return false;
-        }
-        if (!ttsReady || textToSpeech == null) {
-            // Still initialising asynchronously (see constructor) - queue instead of dropping so
-            // the driver still hears this once init finishes, rather than getting silence.
-            pendingSpeechText = text;
-            Log.w(TAG, "TTS not ready yet; queued: " + text);
-            return true;
-        }
-        return speakNow(text);
-    }
-
-    private boolean speakNow(String text) {
-        stopCurrent();
-        textToSpeech.setOnUtteranceProgressListener(new UtteranceProgressListener() {
-            @Override public void onStart(String utteranceId) {
-                Log.i(TAG, "TTS started: " + utteranceId);
+    private synchronized void drain() {
+        if (playing) return;
+        while (!queue.isEmpty()) {
+            Item item = queue.peekFirst();
+            if (item.clipResId != 0) {
+                queue.removeFirst();
+                if (startClip(item.clipResId, item.label)) return;
+                continue;
             }
-            @Override public void onDone(String utteranceId) {
-                Log.i(TAG, "TTS completed: " + utteranceId);
+            if (!ttsAvailable) {
+                queue.removeFirst();
+                continue;
             }
-            @Override public void onError(String utteranceId) {
-                Log.w(TAG, "TTS failed: " + utteranceId);
-            }
-        });
-        int result = textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID);
-        if (result != TextToSpeech.SUCCESS) {
-            Log.w(TAG, "TTS rejected text with result=" + result + ": " + text);
-            return false;
+            if (!ttsReady || textToSpeech == null) return;
+            queue.removeFirst();
+            if (startTts(item.text)) return;
         }
-        Log.i(TAG, "TTS queued: " + text);
-        return true;
     }
 
-    public void increaseVolume() {
-        volume = Math.min(1f, volume + 0.15f);
-    }
-
-    public void decreaseVolume() {
-        volume = Math.max(0.2f, volume - 0.15f);
-    }
-
-    private boolean playClip(int resId) {
-        stopCurrent();
+    private boolean startClip(int resId, String label) {
+        stopMediaOnly();
         if (textToSpeech != null) textToSpeech.stop();
         player = MediaPlayer.create(context, resId);
         if (player == null) return false;
         player.setVolume(volume, volume);
+        playing = true;
         player.setOnCompletionListener(completed -> {
             completed.release();
-            if (player == completed) player = null;
+            synchronized (VoiceGuidancePlayer.this) {
+                if (player == completed) player = null;
+                playing = false;
+                drain();
+            }
+        });
+        player.setOnErrorListener((mp, what, extra) -> {
+            try { mp.reset(); } catch (Exception ignored) { }
+            mp.release();
+            synchronized (VoiceGuidancePlayer.this) {
+                if (player == mp) player = null;
+                playing = false;
+                drain();
+            }
+            return true;
         });
         player.start();
+        Log.i(TAG, "Playing queued local guidance clip: " + label);
         return true;
     }
 
-    private void stopCurrent() {
+    private boolean startTts(String text) {
+        if (textToSpeech == null || !ttsReady) return false;
+        playing = true;
+        final String utteranceId = "drivemate_tts_" + System.nanoTime();
+        textToSpeech.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+            @Override public void onStart(String id) { Log.i(TAG, "TTS started: " + id); }
+            @Override public void onDone(String id) { finishTts(); }
+            @Override public void onError(String id) { finishTts(); }
+        });
+        int result = textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId);
+        if (result != TextToSpeech.SUCCESS) {
+            playing = false;
+            return false;
+        }
+        return true;
+    }
+
+    private void finishTts() {
+        synchronized (this) {
+            playing = false;
+            drain();
+        }
+    }
+
+    public synchronized void increaseVolume() { volume = Math.min(1f, volume + 0.15f); }
+    public synchronized void decreaseVolume() { volume = Math.max(0.2f, volume - 0.15f); }
+
+    private void stopMediaOnly() {
         if (player != null) {
-            try {
-                player.stop();
-                player.release();
-            } catch (IllegalStateException ignored) {
-            }
+            try { player.stop(); } catch (IllegalStateException ignored) { }
+            try { player.release(); } catch (Exception ignored) { }
             player = null;
         }
     }
 
-    /** Stops any local clip or local TTS before a higher-priority announcement starts. */
-    public void interrupt() {
-        stopCurrent();
+    /** Explicit high-priority cancellation. Normal warnings use the queue instead. */
+    public synchronized void interrupt() {
+        queue.clear();
+        stopMediaOnly();
         if (textToSpeech != null) textToSpeech.stop();
+        playing = false;
     }
 
-    /** Call from Activity#onDestroy to release the TTS engine. */
-    public void shutdown() {
-        stopCurrent();
+    public synchronized void shutdown() {
+        queue.clear();
+        stopMediaOnly();
         if (textToSpeech != null) {
             textToSpeech.stop();
             textToSpeech.shutdown();
             textToSpeech = null;
         }
+        playing = false;
+    }
+
+    private static final class Item {
+        final int clipResId;
+        final String label;
+        final String text;
+        private Item(int clipResId, String label, String text) {
+            this.clipResId = clipResId;
+            this.label = label;
+            this.text = text;
+        }
+        static Item clip(int resId, String label) { return new Item(resId, label, null); }
+        static Item text(String text) { return new Item(0, null, text); }
     }
 }
