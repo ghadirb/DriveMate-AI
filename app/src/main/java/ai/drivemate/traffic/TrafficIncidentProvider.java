@@ -26,7 +26,7 @@ public final class TrafficIncidentProvider {
     public TrafficIncidentProvider(String ignoredApiKey) { }
     public void setApiKey(String ignored) { }
     public boolean hasKey() { return enabled; }
-    public void setEnabled(boolean enabled) { this.enabled = true; }
+    public void setEnabled(boolean enabled) { this.enabled = enabled; }
 
     public List<TrafficIncident> incidentsNear(List<RoutePoint> geometry) throws Exception {
         if (!enabled || geometry == null || geometry.isEmpty()) return new ArrayList<>();
@@ -110,7 +110,7 @@ public final class TrafficIncidentProvider {
             if(speed>=0) detail += ", سرعت تقریبی "+Math.round(speed);
             if(delay>0) detail += ", تأخیر "+Math.round(delay)+" ثانیه";
             String id=x.optString("id","jam-"+i);
-            out.put(id,new TrafficIncident(id,TrafficIncident.Type.HAZARD,bestLat,bestLng,detail,Math.max(0,(int)delay)));
+            out.put(id,new TrafficIncident(id,TrafficIncident.Type.TRAFFIC_JAM,bestLat,bestLng,detail,Math.max(0,(int)delay)));
         }
     }
 
