@@ -12,10 +12,7 @@ import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
 
-/**
- * Serial, non-overlapping local guidance player. Fixed Persian clips and dynamic local TTS are
- * queued together so a new warning cannot truncate the sentence already being played.
- */
+/** Serial, non-overlapping local guidance player. */
 public class VoiceGuidancePlayer {
     private static final String TAG = "DriveMateVoice";
     private static final Set<String> REAL_CLIPS = new HashSet<>(Arrays.asList(
@@ -66,9 +63,7 @@ public class VoiceGuidancePlayer {
             queue.addLast(Item.clip(resId, resolved));
         } else if (fallbackText != null && !fallbackText.trim().isEmpty()) {
             queue.addLast(Item.text(fallbackText));
-        } else {
-            return false;
-        }
+        } else return false;
         drain();
         return true;
     }
@@ -104,10 +99,7 @@ public class VoiceGuidancePlayer {
                 if (startClip(item.clipResId, item.label)) return;
                 continue;
             }
-            if (!ttsAvailable) {
-                queue.removeFirst();
-                continue;
-            }
+            if (!ttsAvailable) { queue.removeFirst(); continue; }
             if (!ttsReady || textToSpeech == null) return;
             queue.removeFirst();
             if (startTts(item.text)) return;
@@ -140,7 +132,6 @@ public class VoiceGuidancePlayer {
             return true;
         });
         player.start();
-        Log.i(TAG, "Playing queued local guidance clip: " + label);
         return true;
     }
 
@@ -149,11 +140,12 @@ public class VoiceGuidancePlayer {
         playing = true;
         final String utteranceId = "drivemate_tts_" + System.nanoTime();
         textToSpeech.setOnUtteranceProgressListener(new UtteranceProgressListener() {
-            @Override public void onStart(String id) { Log.i(TAG, "TTS started: " + id); }
+            @Override public void onStart(String id) { }
             @Override public void onDone(String id) { finishTts(); }
             @Override public void onError(String id) { finishTts(); }
         });
-        int result = textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId);
+        // The app owns the queue, so never flush a currently playing warning.
+        int result = textToSpeech.speak(text, TextToSpeech.QUEUE_ADD, null, utteranceId);
         if (result != TextToSpeech.SUCCESS) {
             playing = false;
             return false;
@@ -179,7 +171,6 @@ public class VoiceGuidancePlayer {
         }
     }
 
-    /** Explicit high-priority cancellation. Normal warnings use the queue instead. */
     public synchronized void interrupt() {
         queue.clear();
         stopMediaOnly();
