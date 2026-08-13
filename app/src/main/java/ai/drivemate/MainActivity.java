@@ -3364,7 +3364,22 @@ public class MainActivity extends Activity {
         if (lower.contains("left") || text.contains("چپ")) lastInstruction = "turn_left";
         else if (lower.contains("right") || text.contains("راست")) lastInstruction = "turn_right";
         else if (lower.contains("arriv") || text.contains("مقصد")) lastInstruction = "destination_arrived";
-        else lastInstruction = "continue_route";
+        else if (lower.contains("uturn") || lower.contains("u-turn") || text.contains("دور بزنید")) lastInstruction = "make_u_turn";
+        else if (text.contains("میدان") || lower.contains("roundabout")) {
+            // Previously any roundabout step ("وارد میدان شوید و از خروجی ۲ خارج شوید") fell
+            // through every one of the checks above and landed on the generic "continue_route"
+            // bucket below - which HAS a matching pre-recorded clip, so in economy mode the driver
+            // heard the fixed "ادامه مسیر" clip instead of which exit to actually take. Route to a
+            // dedicated roundabout clip when the exit number is 1-3 (the only ones recorded);
+            // otherwise fall through to real speech instead of ever substituting the generic clip.
+            int exitNumber = extractExitNumber(text);
+            lastInstruction = exitNumber >= 1 && exitNumber <= 3 ? "roundabout_exit_" + exitNumber : "roundabout_custom";
+        }
+        // "continue_route" also has a real recorded clip, so it must stay reserved for instructions
+        // that are genuinely generic ("مسیر را ادامه دهید") - anything mentioning a specific lane,
+        // exit, or keep-left/right direction needs to be actually spoken, not replaced by that clip.
+        else if (text.contains("ادامه") && !text.contains("خروجی") && !text.contains("بمانید")) lastInstruction = "continue_route";
+        else lastInstruction = "route_step_custom";
         lastInstructionText = text;
         String laneClause = laneGuidanceClause(step.lanes);
         String fallbackWithLane = laneClause.isEmpty() ? text : text + " " + laneClause;
@@ -3375,6 +3390,30 @@ public class MainActivity extends Activity {
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING, stepPrompt,
                 lastInstruction, fallbackWithLane, 10_000L);
         setStatus(text);
+    }
+
+    /** Pulls the roundabout exit ordinal out of an instruction like "از خروجی ۲ خارج شوید" or
+     *  "exit 2", accepting both Persian and Latin digits. Returns 0 when no number is found, which
+     *  callers treat as "no dedicated clip for this exit - speak the real text instead". */
+    private int extractExitNumber(String text) {
+        StringBuilder digits = new StringBuilder();
+        boolean afterKeyword = false;
+        for (int index = 0; index < text.length(); index++) {
+            char character = text.charAt(index);
+            if (Character.isDigit(character)) {
+                int value = Character.digit(character, 10);
+                if (value >= 0) digits.append(value);
+                afterKeyword = true;
+            } else if (afterKeyword && digits.length() > 0) {
+                break;
+            }
+        }
+        if (digits.length() == 0) return 0;
+        try {
+            return Integer.parseInt(digits.toString());
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
     }
 
     private void announceWaypointReached(RouteStep step, int ordinal) {

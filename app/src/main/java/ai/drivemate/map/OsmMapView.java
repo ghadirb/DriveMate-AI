@@ -10,7 +10,12 @@ import org.osmdroid.views.overlay.MapEventsOverlay;
 /** OpenStreetMap renderer used by MapActivity. It never initializes the Neshan map SDK. */
 public final class OsmMapView extends org.osmdroid.views.MapView {
     public interface LongClickListener { void onLongClick(LatLng point); }
+    /** Fired on ACTION_DOWN of any touch on the map - i.e. the driver actually put a finger on the
+     *  screen to pan or pinch-zoom, as opposed to a programmatic moveCamera()/setZoom() call from
+     *  the follow-vehicle logic. */
+    public interface UserGestureListener { void onUserGestureStart(); }
     private boolean detached;
+    private UserGestureListener userGestureListener;
 
     public OsmMapView(Context context) {
         super(context);
@@ -41,6 +46,18 @@ public final class OsmMapView extends org.osmdroid.views.MapView {
                 return true;
             }
         }));
+    }
+
+    public void setOnUserGestureListener(UserGestureListener listener) { this.userGestureListener = listener; }
+
+    /** Only ACTION_DOWN is used as the "the driver just grabbed the map" signal - one call per
+     *  gesture rather than one per pixel of movement - and the event is always passed through
+     *  (returning false) so osmdroid's own pan/pinch-zoom handling is completely unaffected. */
+    @Override public boolean dispatchTouchEvent(android.view.MotionEvent event) {
+        if (event.getActionMasked() == android.view.MotionEvent.ACTION_DOWN && userGestureListener != null) {
+            userGestureListener.onUserGestureStart();
+        }
+        return super.dispatchTouchEvent(event);
     }
 
     public boolean isReadyForOverlays() { return !detached; }

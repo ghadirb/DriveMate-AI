@@ -159,6 +159,17 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private LocationManager locationManager;
     private boolean navigationMode;
     private boolean followVehicle = true;
+    /** Set while the driver has manually panned/zoomed away from the follow camera mid-navigation
+     *  (see resumeFollowVehicle), so incoming location updates skip re-centering until the timer
+     *  below fires - otherwise every ~1s GPS update snapped the view straight back to the vehicle
+     *  before the driver had a chance to actually look at the road ahead. */
+    private final Runnable resumeFollowVehicle = () -> {
+        if (!navigationMode) return;
+        followVehicle = true;
+        navigationCameraEnabled = true;
+        updateNavigationCamera();
+    };
+    private static final long FOLLOW_VEHICLE_RESUME_DELAY_MS = 8_000L;
     private float lastBearing;
     private boolean hasHeading;
     private boolean navigationCameraEnabled;
@@ -465,6 +476,15 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                 map.setZoom(14f, 0f);
             });
             showCurrentMarker();
+            map.setOnUserGestureListener(() -> {
+                if (!navigationMode) return;
+                // The driver grabbed the map to pan or zoom ahead - stop re-centering under them
+                // until they've had a few seconds to actually look, then resume following on its
+                // own (or immediately if they tap the recenter button themselves).
+                followVehicle = false;
+                searchHandler.removeCallbacks(resumeFollowVehicle);
+                searchHandler.postDelayed(resumeFollowVehicle, FOLLOW_VEHICLE_RESUME_DELAY_MS);
+            });
             map.setOnMapLongClickListener(point -> {
                 final double latitude = point.getLatitude();
                 final double longitude = point.getLongitude();
@@ -2501,6 +2521,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     /** Restores the driver-first viewport: the vehicle stays below center and the road points up. */
     private void enableNavigationCamera() {
         if (!navigationMode) return;
+        searchHandler.removeCallbacks(resumeFollowVehicle);
         navigationCameraEnabled = true;
         followVehicle = true;
         updateNavigationCamera();

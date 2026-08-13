@@ -44,6 +44,13 @@ public class NavigationEngine {
     private double[] stepProgressMeters = new double[0];
     private static final long MIN_MS_BETWEEN_INSTRUCTIONS = 1800L;
     private static final float MAX_ACCURACY_FOR_ADVANCE_METERS = 60f;
+    /** Deliberately looser than the maneuver-advance accuracy gate above: arrival is checked
+     *  against a much larger 55m radius already, and a driver who has actually reached the
+     *  destination but is getting a degraded fix (underground/multi-level parking, dense urban
+     *  canyon, covered driveway - exactly where trips often end) must still be able to arrive
+     *  rather than sit there indefinitely hearing "continue on route" because no fix ever came in
+     *  under the tighter 60m bar used for in-route maneuver advancement. */
+    private static final float MAX_ACCURACY_FOR_ARRIVAL_METERS = 100f;
     /** Minimum gap between onOffRoute() callbacks. Time-based rather than a one-shot latch that
      *  only clears on the next maneuver or a fresh start(): a one-shot latch can permanently lock
      *  up if the caller ever declines to act on a callback (e.g. its own reroute throttle), since
@@ -167,7 +174,7 @@ public class NavigationEngine {
         RouteStep destinationStep = route.steps.get(route.steps.size() - 1);
         float metersToDestination = location.distanceTo(finalDestination == null
                 ? asLocation(destinationStep) : asLocation(finalDestination));
-        if (accuracyOk(location) && metersToDestination < FINAL_ARRIVAL_RADIUS_METERS) {
+        if (accuracyOkFor(location, MAX_ACCURACY_FOR_ARRIVAL_METERS) && metersToDestination < FINAL_ARRIVAL_RADIUS_METERS) {
             finalArrivalConfirmSamples++;
         } else {
             finalArrivalConfirmSamples = 0;
@@ -300,7 +307,11 @@ public class NavigationEngine {
     }
 
     private boolean accuracyOk(Location location) {
-        return !location.hasAccuracy() || location.getAccuracy() <= MAX_ACCURACY_FOR_ADVANCE_METERS;
+        return accuracyOkFor(location, MAX_ACCURACY_FOR_ADVANCE_METERS);
+    }
+
+    private boolean accuracyOkFor(Location location, float maxAccuracyMeters) {
+        return !location.hasAccuracy() || location.getAccuracy() <= maxAccuracyMeters;
     }
 
     private int nextWaypointIndex() {
