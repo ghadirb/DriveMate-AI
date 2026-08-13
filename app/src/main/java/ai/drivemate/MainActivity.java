@@ -460,12 +460,16 @@ public class MainActivity extends Activity {
         if (requestCode == REQ_MAP && resultCode == RESULT_OK && data != null) {
             String requestedTab = data.getStringExtra(MapActivity.RESULT_MAIN_TAB);
             if (requestedTab != null) {
+                android.util.Log.i("DriveMateSession", "Map returned to tab=" + requestedTab
+                        + "; keeping current navigation session.");
                 selectMainTab("saved".equals(requestedTab) ? 1 : "profile".equals(requestedTab) ? 2 : 0);
             } else if (data.getBooleanExtra(MapActivity.RESULT_START_VOICE, false)) {
                 toggleVoiceInput();
             } else if (data.getBooleanExtra(MapActivity.RESULT_TRIP_COMPLETED, false)) {
+                android.util.Log.i("DriveMateSession", "Map reported trip completion.");
                 clearActiveNavigationStateAfterMapCompletion();
             } else if (data.getBooleanExtra(MapActivity.RESULT_STOP_NAVIGATION, false)) {
+                android.util.Log.i("DriveMateSession", "Map explicitly requested navigation stop.");
                 requestStopNavigation("مسیریابی متوقف شد.");
             } else if (data.hasExtra(MapActivity.RESULT_LATITUDE) && data.hasExtra(MapActivity.RESULT_LONGITUDE)) {
                 SavedPlace destination = new SavedPlace(
@@ -2602,6 +2606,8 @@ public class MainActivity extends Activity {
      *  trip report from stats this instance never tracked while leaving the real GPS/voice session
      *  in the owner instance running untouched - so the stop is forwarded to the real owner first. */
     private void requestStopNavigation(String message) {
+        android.util.Log.i("DriveMateSession", "Stop requested: " + message
+                + ", observingBackgroundSession=" + observingBackgroundSession);
         MainActivity owner = activeSessionOwner == null ? null : activeSessionOwner.get();
         if (observingBackgroundSession && owner != null && owner != this) {
             owner.stopNavigation(message);
@@ -2617,6 +2623,8 @@ public class MainActivity extends Activity {
     }
 
     private void stopNavigation(String message) {
+        android.util.Log.i("DriveMateSession", "Stopping navigation: " + message
+                + ", destination=" + (activeDestination == null ? "<none>" : activeDestination.name));
         TripRecord tripReport = buildTripRecord(activeDestination, false);
         saveTripRecord(tripReport);
         resetGuidance(true);
@@ -3334,7 +3342,6 @@ public class MainActivity extends Activity {
     }
 
     private void announceRouteStep(RouteStep step) {
-        onlineSpeechClient.stopPlayback();
         String text = step.instruction == null || step.instruction.trim().isEmpty() ? "ادامه مسیر" : step.instruction;
         String lower = text.toLowerCase(Locale.ROOT);
         if (lower.contains("camera") || text.contains("دوربین")) {
@@ -3383,6 +3390,7 @@ public class MainActivity extends Activity {
         lastInstructionText = text;
         String laneClause = laneGuidanceClause(step.lanes);
         String fallbackWithLane = laneClause.isEmpty() ? text : text + " " + laneClause;
+        android.util.Log.i("DriveMateVoice", "Route instruction=" + text + ", clip=" + lastInstruction);
         String stepPrompt = "دستور مسیریابی فعلی این است: " + text + "."
                 + (laneClause.isEmpty() ? "" : " راهنمای خط عبور از داده مسیر: " + laneClause)
                 + " آن را در یک جمله فارسی کوتاه، طبیعی و مناسب رانندگی بیان کن"

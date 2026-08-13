@@ -450,6 +450,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     private void returnToMainTab(String tab) {
+        Log.i("DriveMateSession", "Leaving navigation map for tab=" + tab
+                + "; main navigation remains active=" + navigationMode);
         Intent result = new Intent();
         result.putExtra(RESULT_MAIN_TAB, tab);
         setResult(RESULT_OK, result);
@@ -2655,6 +2657,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private static final float MANUAL_STOP_COMPLETION_RADIUS_METERS = 200f;
 
     private void stopNavigationFromMap() {
+        Log.i("DriveMateSession", "Navigation stop explicitly requested from the map screen.");
         boolean wasNavigating = navigationMode && navigationEngine.isNavigating();
         navigationEngine.stop();
         navigationMode = false;

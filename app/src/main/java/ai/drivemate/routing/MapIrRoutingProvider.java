@@ -82,7 +82,7 @@ public class MapIrRoutingProvider implements RoutingProvider {
                     JSONArray point = maneuver.optJSONArray("location");
                     double longitude = point == null ? destinationLng : point.optDouble(0, destinationLng);
                     double latitude = point == null ? destinationLat : point.optDouble(1, destinationLat);
-                    steps.add(new RouteStep(latitude, longitude, maneuver.optString("instruction"), step.optInt("distance"),
+                    steps.add(new RouteStep(latitude, longitude, persianInstruction(step, maneuver), step.optInt("distance"),
                             parseLaneGuidance(step)));
                     int speedLimit = explicitSpeedLimit(step);
                     if (speedLimit > 0) speedLimits.add(new SpeedLimitPoint(latitude, longitude, speedLimit, name()));
@@ -97,6 +97,63 @@ public class MapIrRoutingProvider implements RoutingProvider {
         if (steps.isEmpty()) steps.add(new RouteStep(destinationLat, destinationLng, "Arrive at destination", 0));
         return new RouteResult(name(), route.optInt("distance"), route.optInt("duration"), route.optString("weight_name"), steps,
                 RouteGeometry.fromRoute(route, steps, originLat, originLng, destinationLat, destinationLng), speedLimits);
+    }
+
+    /** map.ir is OSRM-style and commonly exposes maneuver type/modifier rather than a complete
+     * instruction string. Build the spoken Persian instruction from those stable fields so voice
+     * guidance never degenerates into a repeated generic "continue" message. */
+    private String persianInstruction(JSONObject step, JSONObject maneuver) {
+        String type = maneuver.optString("type", "").toLowerCase(java.util.Locale.ROOT);
+        String modifier = maneuver.optString("modifier", "").toLowerCase(java.util.Locale.ROOT);
+        String road = step.optString("name", maneuver.optString("name", "")).trim();
+        String explicit = maneuver.optString("instruction", step.optString("instruction", "")).trim();
+        if (type.isEmpty()) return explicit.isEmpty() ? "در مسیر ادامه دهید" : explicit;
+        String instruction;
+        if ("arrive".equals(type)) {
+            return "به مقصد می‌رسید";
+        } else if ("depart".equals(type)) {
+            instruction = "به سمت مقصد حرکت کنید";
+        } else if (type.contains("roundabout") || type.contains("rotary")) {
+            int exit = maneuver.optInt("exit", maneuver.optInt("roundaboutExitNumber", 0));
+            instruction = exit > 0 ? "وارد میدان شوید و از خروجی " + persianDigits(exit) + " خارج شوید"
+                    : "وارد میدان شوید";
+        } else if (type.contains("u-turn") || type.contains("uturn") || modifier.contains("uturn")) {
+            instruction = "دور بزنید";
+        } else if ("turn".equals(type) || "end of road".equals(type) || "fork".equals(type)) {
+            instruction = turnInstruction(modifier, "end of road".equals(type));
+        } else if (type.contains("exit") || type.contains("off ramp")) {
+            instruction = "از خروجی خارج شوید";
+        } else if (type.contains("merge") || type.contains("on ramp")) {
+            instruction = "وارد مسیر شوید";
+        } else if ("new name".equals(type) || "continue".equals(type) || "notification".equals(type)) {
+            instruction = "در مسیر ادامه دهید";
+        } else {
+            instruction = turnInstruction(modifier, false);
+        }
+        return road.isEmpty() || "به مقصد می‌رسید".equals(instruction)
+                ? instruction : instruction + " به سمت " + road;
+    }
+
+    private String turnInstruction(String modifier, boolean endOfRoad) {
+        if (modifier.contains("sharp left")) return endOfRoad ? "در انتهای مسیر تند به چپ بپیچید" : "تند به چپ بپیچید";
+        if (modifier.contains("slight left")) return "کمی به چپ بپیچید";
+        if (modifier.contains("left")) return endOfRoad ? "در انتهای مسیر به چپ بپیچید" : "به چپ بپیچید";
+        if (modifier.contains("sharp right")) return endOfRoad ? "در انتهای مسیر تند به راست بپیچید" : "تند به راست بپیچید";
+        if (modifier.contains("slight right")) return "کمی به راست بپیچید";
+        if (modifier.contains("right")) return endOfRoad ? "در انتهای مسیر به راست بپیچید" : "به راست بپیچید";
+        if (modifier.contains("straight")) return "مستقیم ادامه دهید";
+        return "در مسیر ادامه دهید";
+    }
+
+    private static String persianDigits(int value) {
+        String latin = String.valueOf(value);
+        StringBuilder result = new StringBuilder(latin.length());
+        for (int index = 0; index < latin.length(); index++) {
+            char character = latin.charAt(index);
+            result.append(character >= '0' && character <= '9'
+                    ? (char) ('۰' + character - '0') : character);
+        }
+        return result.toString();
     }
 
     /** Parses map.ir's OSRM-style intersections[0].lanes when the response actually includes

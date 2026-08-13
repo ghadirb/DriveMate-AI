@@ -58,6 +58,9 @@ public class VoiceGuidancePlayer {
                 // No Persian voice installed on this device; fall back to the default language
                 // rather than silently failing, so we still say *something*.
                 textToSpeech.setLanguage(Locale.getDefault());
+                Log.w(TAG, "Persian TTS voice is unavailable; using the device default voice.");
+            } else {
+                Log.i(TAG, "Persian TTS voice is ready.");
             }
             textToSpeech.setSpeechRate(1.0f);
             ttsReady = true;
@@ -76,8 +79,10 @@ public class VoiceGuidancePlayer {
         String resolvedName = resolveClipName(clipName);
         int resId = context.getResources().getIdentifier(resolvedName, "raw", context.getPackageName());
         if (REAL_CLIPS.contains(resolvedName) && resId != 0) {
+            Log.i(TAG, "Playing local guidance clip: " + resolvedName);
             return playClip(resId);
         }
+        Log.i(TAG, "No local clip for " + resolvedName + "; speaking fallback text.");
         return speak(fallbackText);
     }
 
@@ -113,18 +118,29 @@ public class VoiceGuidancePlayer {
             Log.w(TAG, "TTS not ready yet; queued: " + text);
             return true;
         }
-        speakNow(text);
-        return true;
+        return speakNow(text);
     }
 
-    private void speakNow(String text) {
+    private boolean speakNow(String text) {
         stopCurrent();
         textToSpeech.setOnUtteranceProgressListener(new UtteranceProgressListener() {
-            @Override public void onStart(String utteranceId) { }
-            @Override public void onDone(String utteranceId) { }
-            @Override public void onError(String utteranceId) { }
+            @Override public void onStart(String utteranceId) {
+                Log.i(TAG, "TTS started: " + utteranceId);
+            }
+            @Override public void onDone(String utteranceId) {
+                Log.i(TAG, "TTS completed: " + utteranceId);
+            }
+            @Override public void onError(String utteranceId) {
+                Log.w(TAG, "TTS failed: " + utteranceId);
+            }
         });
-        textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID);
+        int result = textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID);
+        if (result != TextToSpeech.SUCCESS) {
+            Log.w(TAG, "TTS rejected text with result=" + result + ": " + text);
+            return false;
+        }
+        Log.i(TAG, "TTS queued: " + text);
+        return true;
     }
 
     public void increaseVolume() {
@@ -141,7 +157,10 @@ public class VoiceGuidancePlayer {
         player = MediaPlayer.create(context, resId);
         if (player == null) return false;
         player.setVolume(volume, volume);
-        player.setOnCompletionListener(MediaPlayer::release);
+        player.setOnCompletionListener(completed -> {
+            completed.release();
+            if (player == completed) player = null;
+        });
         player.start();
         return true;
     }

@@ -1,6 +1,7 @@
 package ai.drivemate.routing;
 
 import android.location.Location;
+import android.util.Log;
 
 import ai.drivemate.model.RouteResult;
 import ai.drivemate.model.RoutePoint;
@@ -8,6 +9,7 @@ import ai.drivemate.model.RouteStep;
 
 /** Keeps route progress separate from the activity so GPS updates can be handled consistently. */
 public class NavigationEngine {
+    private static final String TAG = "DriveMateNav";
     public interface Listener {
         void onInstruction(RouteStep step);
         void onOffRoute();
@@ -98,6 +100,9 @@ public class NavigationEngine {
         this.finalDestination = finalDestination;
         this.nextStep = route == null || route.steps.isEmpty() ? 0
                 : Math.max(0, Math.min(initialStepIndex, route.steps.size() - 1));
+        if (initialStepIndex == 0) {
+            this.nextStep = firstActionableStepIndex(route, this.nextStep);
+        }
         this.lastOffRouteCallbackAt = 0L;
         this.offRouteSamples = 0;
         this.advanceConfirmSamples = 0;
@@ -111,6 +116,10 @@ public class NavigationEngine {
         progressTracker.reset(route, currentLocation);
         buildStepProgress();
         updateTargetReference(currentLocation);
+        if (route != null && !route.steps.isEmpty()) {
+            Log.i(TAG, "start step=" + nextStep + " steps=" + route.steps.size()
+                    + " instruction=" + route.steps.get(nextStep).instruction);
+        }
     }
 
     public void stop() {
@@ -266,13 +275,32 @@ public class NavigationEngine {
                 || instruction.contains("\u0631\u0633\u06cc\u062f"));
     }
 
+    private static int firstActionableStepIndex(RouteResult route, int startingIndex) {
+        if (route == null || route.steps == null) return startingIndex;
+        for (int index = startingIndex; index < route.steps.size(); index++) {
+            RouteStep step = route.steps.get(index);
+            if (step.waypointOrdinal >= 0) continue;
+            String instruction = step.instruction == null ? "" : step.instruction.trim();
+            String lower = instruction.toLowerCase(java.util.Locale.ROOT);
+            boolean arrival = lower.contains("arriv") || instruction.contains("\u0645\u0642\u0635\u062f")
+                    || instruction.contains("\u0631\u0633\u06cc\u062f");
+            boolean genericStart = lower.contains("depart") || lower.contains("continue")
+                    || instruction.contains("\u0628\u0647 \u0633\u0645\u062a \u0645\u0642\u0635\u062f \u062d\u0631\u06a9\u062a")
+                    || instruction.contains("\u062f\u0631 \u0645\u0633\u06cc\u0631 \u0627\u062f\u0627\u0645\u0647");
+            if (!arrival && !genericStart) return index;
+        }
+        return startingIndex;
+    }
+
     /** Announces the first actionable provider instruction as soon as a route is ready. */
     public boolean announceCurrentInstruction() {
         if (!instructionAnnouncementsEnabled || route == null || listener == null || route.steps.isEmpty() || currentInstructionAnnounced
                 || !hasActionableCurrentInstruction()) return false;
         currentInstructionAnnounced = true;
         lastInstructionAt = System.currentTimeMillis();
-        listener.onInstruction(route.steps.get(Math.min(nextStep, route.steps.size() - 1)));
+        RouteStep step = route.steps.get(Math.min(nextStep, route.steps.size() - 1));
+        Log.i(TAG, "announce step=" + nextStep + " instruction=" + step.instruction);
+        listener.onInstruction(step);
         return true;
     }
 
@@ -386,15 +414,10 @@ public class NavigationEngine {
         passedStepConfirmSamples++;
         if (passedStepConfirmSamples < STEP_ADVANCE_CONFIRM_SAMPLES) return;
         passedStepConfirmSamples = 0;
-        while (nextStep < route.steps.size() - 1) {
-            RouteStep step = route.steps.get(nextStep);
-            if (step.waypointOrdinal >= 0 || nextStep >= stepProgressMeters.length
-                    || Double.isNaN(stepProgressMeters[nextStep])
-                    || routeProgress.progressMeters < stepProgressMeters[nextStep] + PASSED_STEP_BUFFER_METERS) {
-                break;
-            }
-            nextStep++;
-        }
+        // Advance one maneuver per accepted GPS update. A mocked or delayed location stream can
+        // leap across several short city blocks; advancing them all in a loop skips every spoken
+        // left/right/roundabout instruction and leaves only the final generic message.
+        nextStep = Math.min(nextStep + 1, route.steps.size() - 1);
         currentInstructionAnnounced = false;
         advanceConfirmSamples = 0;
         updateTargetReference(location);
