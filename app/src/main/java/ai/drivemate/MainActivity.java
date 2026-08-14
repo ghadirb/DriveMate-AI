@@ -52,6 +52,7 @@ import ai.drivemate.model.SavedPlace;
 import ai.drivemate.model.SpeedLimitPoint;
 import ai.drivemate.model.TrafficIncident;
 import ai.drivemate.model.TripRecord;
+import ai.drivemate.model.PersonalRoute;
 import ai.drivemate.routing.MapIrRoutingProvider;
 import ai.drivemate.routing.NeshanRoutingProvider;
 import ai.drivemate.routing.OpenRouteServiceRoutingProvider;
@@ -364,6 +365,7 @@ public class MainActivity extends Activity {
             }
         });
         handleSharedIntent(getIntent());
+        handlePersonalRouteIntent(getIntent());
         registerNavigationReceiver();
         refreshNotificationButton();
         refreshIntelligenceButton();
@@ -1264,6 +1266,12 @@ public class MainActivity extends Activity {
 
     private void renderTripHistory() {
         tripHistoryContent.removeAllViews();
+        Button personalRoutes = new Button(this);
+        personalRoutes.setText("مسیرهای شخصی و نقاط اجباری");
+        personalRoutes.setAllCaps(false);
+        personalRoutes.setOnClickListener(v -> startActivity(new Intent(this, PersonalRouteActivity.class)));
+        tripHistoryContent.addView(personalRoutes, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         List<TripRecord> records = tripStore.recent(60);
         if (records.isEmpty()) {
             TextView empty = new TextView(this);
@@ -1310,8 +1318,19 @@ public class MainActivity extends Activity {
     }
 
     private void showTripDetail(TripRecord record, boolean allowDelete) {
-        AlertDialog.Builder builder = new AlertDialog.Builder(this).setTitle("جزئیات سفر")
-                .setMessage(tripDetailText(record)).setPositiveButton("بستن", null);
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+                .setTitle("جزئیات سفر")
+                .setMessage(tripDetailText(record))
+                .setPositiveButton("نمایش مسیر روی نقشه", (dialog, which) -> {
+                    try {
+                        Intent intent = new Intent(this, TripMapActivity.class);
+                        intent.putExtra(TripMapActivity.EXTRA_TRIP_JSON, record.toJson().toString());
+                        startActivity(intent);
+                    } catch (Exception e) {
+                        Toast.makeText(this, "امکان باز کردن مسیر این سفر وجود ندارد.", Toast.LENGTH_SHORT).show();
+                    }
+                })
+                .setNeutralButton("بستن", null);
         if (allowDelete) {
             builder.setNegativeButton("حذف", (dialog, which) -> {
                 tripStore.remove(record.startedAt);
@@ -1619,6 +1638,7 @@ public class MainActivity extends Activity {
                     : "runtime keys parsed: " + found);
             runOnUiThread(() -> {
                 runtimeKeysLoading = false;
+                handlePersonalRouteIntent(getIntent());
                 boolean onlineReady = onlineSpeechClient.canUseOnlineSpeech();
                 refreshAiStatus();
                 setStatus(onlineReady ? "سرویس‌های آنلاین آماده شدند." : "سرویس آنلاین در دسترس نیست؛ تشخیص گفتار گوشی فعال است.");
@@ -1635,6 +1655,31 @@ public class MainActivity extends Activity {
         setIntent(intent);
         handleSharedIntent(intent);
         if (ACTION_VOICE_FROM_NOTIFICATION.equals(intent.getAction())) voiceHandler.postDelayed(this::toggleVoiceInput, 350L);
+        handlePersonalRouteIntent(intent);
+    }
+
+    private void handlePersonalRouteIntent(Intent intent) {
+        if (intent == null || !PersonalRouteActivity.ACTION_START_PERSONAL_ROUTE.equals(intent.getAction())) return;
+        if (runtimeKeysLoading) {
+            voiceHandler.postDelayed(() -> handlePersonalRouteIntent(getIntent()), 700L);
+            return;
+        }
+        String json = intent.getStringExtra(PersonalRouteActivity.EXTRA_PERSONAL_ROUTE_JSON);
+        intent.setAction(null);
+        if (json == null || json.trim().isEmpty()) return;
+        try {
+            PersonalRoute route = PersonalRoute.fromJson(new org.json.JSONObject(json));
+            if (route.points.size() < 2) return;
+            ai.drivemate.model.RoutePoint last = route.points.get(route.points.size() - 1);
+            SavedPlace destination = new SavedPlace(route.name, "personal_route",
+                    last.latitude, last.longitude, "مسیر شخصی", System.currentTimeMillis(), false);
+            ArrayList<RoutePoint> mandatory = new ArrayList<>();
+            for (int i = 0; i < route.points.size() - 1; i++) mandatory.add(route.points.get(i));
+            startNavigation(destination, mandatory);
+            setStatus("مسیریابی مسیر شخصی «" + route.name + "» با نقاط اجباری آغاز شد.");
+        } catch (Exception e) {
+            Toast.makeText(this, "مسیر شخصی قابل خواندن نیست.", Toast.LENGTH_SHORT).show();
+        }
     }
 
     private void handleSharedIntent(Intent intent) {

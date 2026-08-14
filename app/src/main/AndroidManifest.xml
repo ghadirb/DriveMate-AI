@@ -49,5 +49,7 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
-    </application>
+            <activity android:name=".PersonalRouteActivity" android:exported="false" />
+        <activity android:name=".TripMapActivity" android:exported="false" />
+</application>
 </manifest>
