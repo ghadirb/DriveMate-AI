@@ -10,12 +10,12 @@ permissions:
   contents: write
 
 jobs:
-  patch_navigation:
-    if: github.event_name != 'pull_request'
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Apply verified navigation hardening
         run: |
           python3 <<'PY'
@@ -84,7 +84,6 @@ jobs:
               if resume_anchor not in text:
                   raise SystemExit('onResume anchor not found; refusing to modify MapActivity.java')
               text = text.replace(resume_anchor, resume_new, 1)
-
           map_path.write_text(text, encoding='utf-8')
 
           nav_path = Path('app/src/main/java/ai/drivemate/routing/NavigationEngine.java')
@@ -108,7 +107,7 @@ jobs:
      * slow car does not announce excessively early while a fast car still gets meaningful lead time.
      */
     private float dynamicAnnouncementDistance(Location location, RouteStep step) {
-        float speedMps = 13.9f; // ~50 km/h when no reliable speed is available.
+        float speedMps = 13.9f;
         if (location != null && location.hasSpeed() && location.getSpeed() >= 0f && location.getSpeed() < 70f) {
             speedMps = location.getSpeed();
         }
@@ -137,76 +136,55 @@ jobs:
               nav = nav.replace(helper_marker, helper + helper_marker, 1)
           nav_path.write_text(nav, encoding='utf-8')
           PY
-          if git diff --quiet; then
-            echo 'Navigation hardening already present; nothing to commit.'
-            exit 0
-          fi
           git diff --check
-          git config user.name "DriveMate AI"
-          git config user.email "ghadir.baraty@gmail.com"
-          git add app/src/main/java/ai/drivemate/MapActivity.java app/src/main/java/ai/drivemate/routing/NavigationEngine.java
-          git commit -m "fix: harden location settings UX and speed-aware navigation alerts"
-          git push
+          if ! git diff --quiet; then
+            git config user.name "DriveMate AI"
+            git config user.email "ghadir.baraty@gmail.com"
+            git add app/src/main/java/ai/drivemate/MapActivity.java app/src/main/java/ai/drivemate/routing/NavigationEngine.java
+            git commit -m "fix: harden location settings UX and speed-aware navigation alerts [skip ci]"
+            git push
+          fi
 
-  build:
-    needs: patch_navigation
-    if: always() && (github.event_name == 'pull_request' || needs.patch_navigation.result == 'success')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+
       - name: Install Android platform
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
+
       - name: Build debug APK
         env:
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           OPENWEATHERMAP_API_KEY: ${{ secrets.OPENWEATHERMAP_API_KEY }}
           KEYS_DECRYPTION_SECRET: ${{ secrets.KEYS_DECRYPTION_SECRET }}
         run: gradle assembleDebug --stacktrace
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: DriveMate-AI-debug-apk
           path: app/build/outputs/apk/debug/*.apk
 
-  release:
-    needs: patch_navigation
-    if: always() && github.event_name != 'pull_request' && needs.patch_navigation.result == 'success'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up JDK
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-      - name: Install Android platform
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.9"
       - name: Prepare release keystore
+        if: github.event_name != 'pull_request'
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
           test -n "$ANDROID_KEYSTORE_BASE64" || (echo "Missing ANDROID_KEYSTORE_BASE64 secret" && exit 1)
           echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > app/release.jks
+
       - name: Build signed Release APK and AAB
+        if: github.event_name != 'pull_request'
         env:
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           OPENWEATHERMAP_API_KEY: ${{ secrets.OPENWEATHERMAP_API_KEY }}
@@ -216,12 +194,16 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: gradle assembleRelease bundleRelease --stacktrace
+
       - name: Upload signed Release APK
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: DriveMate-AI-release-apk
           path: app/build/outputs/apk/release/*.apk
+
       - name: Upload signed Release AAB
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: DriveMate-AI-release-aab
