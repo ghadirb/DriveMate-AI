@@ -1,0 +1,36 @@
+name: Apply personal routes and trip map
+
+on:
+  push:
+    branches: [ feature/personal-routes-and-trip-maps ]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[skip personal-route]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply implementation
+        run: python3 tools/apply_personal_routes.py
+
+      - name: Build debug APK
+        run: chmod +x ./gradlew && ./gradlew :app:assembleDebug --no-daemon
+
+      - name: Commit implementation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/ai/drivemate/MainActivity.java app/src/main/AndroidManifest.xml
+          if git diff --cached --quiet; then
+            echo "No source changes to commit."
+            exit 0
+          fi
+          git commit -m "Complete personal routes and trip map UI [skip personal-route]"
+          git push
