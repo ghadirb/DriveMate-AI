@@ -184,6 +184,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private double tripOriginLongitude = Double.NaN;
     private float tripTraveledDistanceMeters;
     private Location lastTripAccumLocation;
+    /** GPS samples actually driven during the current navigation session. */
+    private final List<RoutePoint> activeTraveledPath = new ArrayList<>();
+    private Polyline traveledPathPolyline;
+    private long lastTraveledPathRenderAt;
     private boolean tripCompletionShown;
     private View turnBannerContainer;
     private TextView turnArrowText;
@@ -1665,6 +1669,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             map.removePolyline(routePolyline);
             routePolyline = null;
         }
+        // drawAllRoutes() is also called after reroutes; restore the actual driven trail after
+        // replacing planned-route overlays so it never disappears when the route is recalculated.
+        renderTraveledPath();
         List<RouteResult> routesToDraw = routeOptions.isEmpty() && selectedRoute != null
                 ? java.util.Collections.singletonList(selectedRoute) : routeOptions;
         for (RouteResult route : routesToDraw) {
@@ -1792,6 +1799,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             tripOriginLongitude = originLongitude;
             tripTraveledDistanceMeters = 0f;
             lastTripAccumLocation = null;
+            activeTraveledPath.clear();
+            lastTraveledPathRenderAt = 0L;
+            clearTraveledPathOverlay();
         }
         tripCompletionShown = false;
         turnBannerContainer.setVisibility(View.VISIBLE);
@@ -2656,6 +2666,44 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
      *  parking across the street or in a lot near the destination. */
     private static final float MANUAL_STOP_COMPLETION_RADIUS_METERS = 200f;
 
+    private void recordActiveTraveledPath(Location location) {
+        if (!navigationMode || location == null || !navigationEngine.isNavigating()) return;
+        if (activeTraveledPath.isEmpty()) {
+            activeTraveledPath.add(new RoutePoint(location.getLatitude(), location.getLongitude()));
+        } else {
+            RoutePoint last = activeTraveledPath.get(activeTraveledPath.size() - 1);
+            Location lastLocation = new Location("traveled_path");
+            lastLocation.setLatitude(last.latitude);
+            lastLocation.setLongitude(last.longitude);
+            if (lastLocation.distanceTo(location) < 8f) return;
+            activeTraveledPath.add(new RoutePoint(location.getLatitude(), location.getLongitude()));
+            // Keep memory and drawing cost bounded just like TripRecord.traveledPath.
+            while (activeTraveledPath.size() > 240) activeTraveledPath.remove(0);
+        }
+        long now = System.currentTimeMillis();
+        if (now - lastTraveledPathRenderAt >= 1000L || activeTraveledPath.size() == 1) {
+            renderTraveledPath();
+            lastTraveledPathRenderAt = now;
+        }
+    }
+
+    private void renderTraveledPath() {
+        if (map == null || !map.isReadyForOverlays() || activeTraveledPath.size() < 2) return;
+        clearTraveledPathOverlay();
+        ArrayList<LatLng> points = new ArrayList<>();
+        for (RoutePoint point : activeTraveledPath) points.add(new LatLng(point.latitude, point.longitude));
+        // Green/teal is intentionally different from the planned blue route.
+        traveledPathPolyline = new Polyline(points, android.graphics.Color.rgb(0, 150, 110), 14f);
+        map.addPolyline(traveledPathPolyline);
+    }
+
+    private void clearTraveledPathOverlay() {
+        if (map != null && traveledPathPolyline != null && map.isReadyForOverlays()) {
+            map.removePolyline(traveledPathPolyline);
+        }
+        traveledPathPolyline = null;
+    }
+
     private void stopNavigationFromMap() {
         Log.i("DriveMateSession", "Navigation stop explicitly requested from the map screen.");
         boolean wasNavigating = navigationMode && navigationEngine.isNavigating();
@@ -2681,6 +2729,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             saveTripRecordIfNeeded();
             showMapTripCompletionReport();
         }
+        clearTraveledPathOverlay();
+        activeTraveledPath.clear();
         resetTripTracking();
         Intent result = new Intent();
         result.putExtra(reportable ? RESULT_TRIP_COMPLETED : RESULT_STOP_NAVIGATION, true);
@@ -2911,6 +2961,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         runOnUiThread(() -> {
             if (isFinishing() || isDestroyed() || map == null || !map.isReadyForOverlays()) return;
             showCurrentMarker();
+            if (navigationMode && navigationEngine.isNavigating()) recordActiveTraveledPath(accepted);
             if (selectedRoute != null) updateRoadSpeedLimit(accepted.getLatitude(), accepted.getLongitude());
             if (navigationMode && navigationEngine.isNavigating()) {
                 navigationEngine.onLocation(accepted);

@@ -1309,6 +1309,20 @@ public class MainActivity extends Activity {
             metadata.setPadding(0, dp(6), 0, 0);
             body.addView(destination);
             body.addView(metadata);
+            Button mapTrip = new Button(this);
+            mapTrip.setText("نمایش مسیر این سفر روی نقشه");
+            mapTrip.setAllCaps(false);
+            mapTrip.setOnClickListener(v -> {
+                try {
+                    Intent intent = new Intent(this, TripMapActivity.class);
+                    intent.putExtra(TripMapActivity.EXTRA_TRIP_JSON, record.toJson().toString());
+                    startActivity(intent);
+                } catch (Exception e) {
+                    Toast.makeText(this, "امکان نمایش مسیر این سفر وجود ندارد.", Toast.LENGTH_SHORT).show();
+                }
+            });
+            body.addView(mapTrip, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
             card.addView(body);
             LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
