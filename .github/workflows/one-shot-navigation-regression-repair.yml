@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'tools/repair_navigation_regressions.py'
+      - '.github/workflows/one-shot-navigation-regression-repair.yml'
   workflow_dispatch:
 
 permissions:
