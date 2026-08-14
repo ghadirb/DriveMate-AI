@@ -1,0 +1,39 @@
+name: one-shot main navigation start repair
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: contains(github.event.head_commit.message, '[main-start-repair]') == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch main navigation start
+        run: python3 - <<'PY'
+          from pathlib import Path
+          p = Path('app/src/main/java/ai/drivemate/MainActivity.java')
+          s = p.read_text(encoding='utf-8')
+          needle = '''            activeRoute = route;\n            RouteCache.store(route, destination.latitude, destination.longitude);\n            activeWaypoints = new ArrayList<>(requestedWaypoints);\n'''
+          replacement = '''            activeRoute = route;\n            RouteCache.store(route, destination.latitude, destination.longitude);\n            activeWaypoints = new ArrayList<>(requestedWaypoints);\n            // The foreground service must start while this Activity is visible so Android grants\n            // the location FGS its while-in-use access and keeps navigation alive in background.\n            startBackgroundNavigation();\n'''
+          if 'startBackgroundNavigation();' in s and s.count('activeWaypoints = new ArrayList<>(requestedWaypoints);') >= 1:
+              # Only insert if this exact main-session assignment has not already been followed by the call.
+              if replacement not in s:
+                  if s.count(needle) != 1: raise SystemExit(f'anchor count={s.count(needle)}')
+                  s = s.replace(needle, replacement, 1)
+          else:
+              raise SystemExit('main navigation anchor missing')
+          p.write_text(s, encoding='utf-8')
+          PY
+      - name: Commit source fix
+        run: |
+          git config user.name "DriveMate AI"
+          git config user.email "ghadir.baraty@gmail.com"
+          git add app/src/main/java/ai/drivemate/MainActivity.java
+          git diff --cached --check
+          git commit -m "fix: start navigation foreground service with main trip [main-start-repair]"
+          git push
