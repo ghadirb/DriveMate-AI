@@ -78,8 +78,13 @@ public class VoiceGuidancePlayer {
         else return false;
 
         if (item.priority) {
-            // Safety guidance is local and must not wait behind ordinary turn/TTS items.
+            // Safety guidance must not wait behind ordinary navigation or AI speech.
             removeNonSafetyQueuedItems();
+            if (playing) {
+                stopMediaOnly();
+                if (textToSpeech != null) textToSpeech.stop();
+                playing = false;
+            }
             queue.addFirst(item);
         } else {
             queue.addLast(item);
@@ -98,6 +103,11 @@ public class VoiceGuidancePlayer {
         Item item = Item.clip(resId, resolved, isSafetyClip(resolved));
         if (item.priority) {
             removeNonSafetyQueuedItems();
+            if (playing) {
+                stopMediaOnly();
+                if (textToSpeech != null) textToSpeech.stop();
+                playing = false;
+            }
             queue.addFirst(item);
         } else queue.addLast(item);
         remember(key);
