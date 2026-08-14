@@ -1,0 +1,41 @@
+name: Complete traveled path
+
+on:
+  push:
+    branches: [ feature/visible-traveled-path ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: ${{ !contains(github.event.head_commit.message, '[skip traveled-path]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Apply source changes
+        run: python3 tools/complete_traveled_path.py
+      - name: Build debug APK
+        run: gradle :app:assembleDebug --no-daemon
+      - name: Commit generated source
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/ai/drivemate/MapActivity.java app/src/main/java/ai/drivemate/MainActivity.java app/src/main/java/ai/drivemate/map/Polyline.java
+          if git diff --cached --quiet; then
+            echo "No generated source changes."
+            exit 0
+          fi
+          git commit -m "Show live traveled path and trip map action [skip traveled-path]"
+          git push
