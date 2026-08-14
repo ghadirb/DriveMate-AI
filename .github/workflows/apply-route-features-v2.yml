@@ -1,0 +1,48 @@
+name: Apply route features v2
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: "!contains(github.event.head_commit.message, '[route-features]')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Extract and apply implementation script
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path('.github/workflows/apply-route-features.yml').read_text(encoding='utf-8')
+          start = source.index("          python3 <<'PY'\n") + len("          python3 <<'PY'\n")
+          end = source.index("          PY\n", start)
+          script = source[start:end]
+          Path('/tmp/apply_route_features.py').write_text(script, encoding='utf-8')
+          PY
+          python3 /tmp/apply_route_features.py
+      - name: Build after implementation
+        env:
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          OPENWEATHERMAP_API_KEY: ${{ secrets.OPENWEATHERMAP_API_KEY }}
+          KEYS_DECRYPTION_SECRET: ${{ secrets.KEYS_DECRYPTION_SECRET }}
+        run: gradle assembleDebug --stacktrace
+      - name: Commit implementation
+        run: |
+          git config user.name 'DriveMate AI'
+          git config user.email 'ghadir.baraty@gmail.com'
+          git add app/src/main/java/ai/drivemate app/src/main/res/layout/activity_main.xml app/src/main/AndroidManifest.xml
+          git commit -m 'feat: add custom routes and traveled trip maps [route-features]'
+          git push
