@@ -9,16 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-      - uses: android-actions/setup-android@v3
-      - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
-      - name: Patch navigation timing and traffic refresh
+      - name: Apply navigation alert repairs
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -66,16 +57,10 @@ jobs:
           s=s.replace(old,new)
           p.write_text(s)
           PY
-      - name: Verify and commit
+      - name: Commit repaired sources
         run: |
-          gradle test --no-daemon
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add app/src/main/java/ai/drivemate/MainActivity.java app/src/main/java/ai/drivemate/ai/DrivingIntelligenceCoordinator.java
           git commit -m 'Fix timely navigation alerts and live traffic refresh'
-          git push
-      - name: Remove one-shot workflow
-        run: |
-          git rm .github/workflows/one-shot-navigation-fix.yml NAVIGATION_FIX_TRIGGER.txt
-          git commit -m 'Remove one-shot navigation repair workflow'
           git push
