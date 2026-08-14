@@ -8,7 +8,6 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 
 import ai.drivemate.model.RoutePoint;
 import ai.drivemate.model.TrafficIncident;
@@ -19,7 +18,6 @@ public final class TrafficIncidentProvider {
     private static final String SUMMARY_URL = "https://raw.githubusercontent.com/ghadirb/iran-traffic-data/main/mobile/summary.json";
     private static final String BASE_URL = "https://raw.githubusercontent.com/ghadirb/iran-traffic-data/main/mobile/";
     private static final long CACHE_MS = 5 * 60_000L;
-    private static final long ANNOUNCED_TTL_MS = 30 * 60_000L;
     private static final double MAX_ROUTE_DISTANCE_METERS = 900d;
     private static final double MIN_AHEAD_METERS = 60d;
     private static final double BEHIND_TOLERANCE_METERS = 35d;
@@ -27,19 +25,16 @@ public final class TrafficIncidentProvider {
     private boolean enabled = true;
     private JSONObject cachedSummary;
     private long summaryAt;
-    private final Map<String, CachedRegion> regionCache = new HashMap<>();
-    private final Map<String, Long> seenIncidentAt = new HashMap<>();
+    private final java.util.Map<String, CachedRegion> regionCache = new HashMap<>();
 
     public TrafficIncidentProvider(String ignoredApiKey) { }
     public void setApiKey(String ignored) { }
     public boolean hasKey() { return enabled; }
-
     /** The app's remote Iran feed is always the selected traffic source; Waze credentials never enter the APK. */
     public void setEnabled(boolean ignored) { this.enabled = true; }
 
     public synchronized List<TrafficIncident> incidentsNear(List<RoutePoint> geometry) throws Exception {
         if (!enabled || geometry == null || geometry.size() < 2) return new ArrayList<>();
-        purgeExpiredSeen();
         JSONObject summary = getSummary();
         if (summary == null) return new ArrayList<>();
         LinkedHashMap<String, TrafficIncident> result = new LinkedHashMap<>();
@@ -52,12 +47,8 @@ public final class TrafficIncidentProvider {
             JSONArray bbox = meta == null ? null : meta.optJSONArray("bbox");
             if (bbox == null || bbox.length() < 4 || !routeTouchesBox(geometry, bbox)) continue;
             JSONObject feed;
-            try {
-                feed = getRegion(regionId);
-            } catch (Exception ignored) {
-                // One stale/down region must never abort the whole traffic refresh.
-                continue;
-            }
+            try { feed = getRegion(regionId); }
+            catch (Exception ignored) { continue; }
             if (feed == null) continue;
             parseAlerts(feed.optJSONArray("a"), geometry, result);
             parseJams(feed.optJSONArray("j"), geometry, result);
@@ -106,7 +97,6 @@ public final class TrafficIncidentProvider {
             if (!validCoordinate(lat, lng)) continue;
             RoutePosition position = positionOnRoute(lat, lng, route);
             if (position.distanceMeters > MAX_ROUTE_DISTANCE_METERS || !position.ahead) continue;
-
             String type = x.optString("t", "OTHER");
             TrafficIncident.Type mapped;
             if ("ACCIDENT".equals(type)) mapped = TrafficIncident.Type.ACCIDENT;
@@ -117,9 +107,7 @@ public final class TrafficIncidentProvider {
             if (detail.isEmpty()) detail = x.optString("st", "");
             if ("POLICE".equals(type)) detail = detail.isEmpty() ? "پلیس" : ("پلیس: " + detail);
             String id = stableId(x.optString("id", ""), type, lat, lng, i);
-            if (shouldReturn(id, mapped)) {
-                out.put(id, new TrafficIncident(id, mapped, lat, lng, detail, 0));
-            }
+            out.put(id, new TrafficIncident(id, mapped, lat, lng, detail, 0));
         }
     }
 
@@ -130,38 +118,29 @@ public final class TrafficIncidentProvider {
             if (x == null) continue;
             JSONArray line = x.optJSONArray("g");
             double bestLat = Double.NaN, bestLng = Double.NaN, best = Double.MAX_VALUE;
-            int bestIndex = -1;
             if (line != null) for (int j = 0; j < line.length(); j++) {
                 JSONArray p = line.optJSONArray(j);
                 if (p == null || p.length() < 2) continue;
                 double lat = p.optDouble(0), lng = p.optDouble(1);
                 if (!validCoordinate(lat, lng)) continue;
                 RoutePosition pos = positionOnRoute(lat, lng, route);
-                if (pos.distanceMeters < best) {
-                    best = pos.distanceMeters;
-                    bestLat = lat;
-                    bestLng = lng;
-                    bestIndex = pos.index;
-                }
+                if (pos.distanceMeters < best) { best = pos.distanceMeters; bestLat = lat; bestLng = lng; }
             }
-            if (Double.isNaN(bestLat) || best > MAX_ROUTE_DISTANCE_METERS || bestIndex < 0) continue;
+            if (Double.isNaN(bestLat) || best > MAX_ROUTE_DISTANCE_METERS) continue;
             RoutePosition bestPosition = positionOnRoute(bestLat, bestLng, route);
             if (!bestPosition.ahead) continue;
             String street = x.optString("s", "");
             String detail = "ترافیک" + (street.isEmpty() ? "" : " در " + street);
-            double speed = x.optDouble("v", -1);
-            double delay = x.optDouble("d", 0);
+            double speed = x.optDouble("v", -1), delay = x.optDouble("d", 0);
             if (speed >= 0) detail += ", سرعت تقریبی " + Math.round(speed);
             if (delay > 0) detail += ", تأخیر " + Math.round(delay) + " ثانیه";
             String id = stableId(x.optString("id", ""), "jam", bestLat, bestLng, i);
-            TrafficIncident.Type type = TrafficIncident.Type.TRAFFIC_JAM;
-            if (shouldReturn(id, type)) {
-                out.put(id, new TrafficIncident(id, type, bestLat, bestLng, detail, Math.max(0, (int) delay)));
-            }
+            out.put(id, new TrafficIncident(id, TrafficIncident.Type.TRAFFIC_JAM, bestLat, bestLng,
+                    detail, Math.max(0, (int) delay)));
         }
     }
 
-    /** Returns the nearest route vertex and whether the incident lies materially ahead of route start. */
+    /** Uses route order to reject incidents that are materially behind the route origin. */
     private RoutePosition positionOnRoute(double lat, double lng, List<RoutePoint> route) {
         double best = Double.MAX_VALUE;
         int bestIndex = -1;
@@ -173,36 +152,19 @@ public final class TrafficIncidentProvider {
         }
         if (bestIndex < 0) return new RoutePosition(Double.MAX_VALUE, -1, false);
         if (bestIndex == 0) return new RoutePosition(best, 0, best >= MIN_AHEAD_METERS);
-        double aheadDistance = distanceAlongRoute(route, 0, bestIndex);
-        return new RoutePosition(best, bestIndex, aheadDistance >= MIN_AHEAD_METERS - BEHIND_TOLERANCE_METERS);
+        double along = distanceAlongRoute(route, 0, bestIndex);
+        return new RoutePosition(best, bestIndex, along >= MIN_AHEAD_METERS - BEHIND_TOLERANCE_METERS);
     }
 
     private double distanceAlongRoute(List<RoutePoint> route, int from, int to) {
         double total = 0d;
         int end = Math.min(to, route.size() - 1);
         for (int i = Math.max(0, from + 1); i <= end; i++) {
-            RoutePoint a = route.get(i - 1), b = route.get(i);
+            RoutePoint a = route.get(i), b = route.get(i - 1);
             if (a == null || b == null) continue;
             total += distanceMeters(a.latitude, a.longitude, b.latitude, b.longitude);
         }
         return total;
-    }
-
-    private boolean shouldReturn(String id, TrafficIncident.Type type) {
-        if (id == null || id.isEmpty()) return false;
-        Long last = seenIncidentAt.get(id);
-        long now = System.currentTimeMillis();
-        if (last != null && now - last < ANNOUNCED_TTL_MS) return false;
-        // Important incidents are allowed to reappear after the TTL. The caller can then announce
-        // a genuinely new feed occurrence without repeating every 90-second refresh forever.
-        seenIncidentAt.put(id, now);
-        return true;
-    }
-
-    private void purgeExpiredSeen() {
-        long now = System.currentTimeMillis();
-        java.util.Iterator<Map.Entry<String, Long>> it = seenIncidentAt.entrySet().iterator();
-        while (it.hasNext()) if (now - it.next().getValue() >= ANNOUNCED_TTL_MS) it.remove();
     }
 
     private String stableId(String raw, String type, double lat, double lng, int index) {
@@ -223,20 +185,9 @@ public final class TrafficIncidentProvider {
         return 6371000d * 2d * Math.atan2(Math.sqrt(h), Math.sqrt(Math.max(0d, 1d - h)));
     }
 
-    private static final class CachedRegion {
-        final JSONObject data;
-        final long at;
-        CachedRegion(JSONObject d, long a) { data = d; at = a; }
-    }
-
+    private static final class CachedRegion { final JSONObject data; final long at; CachedRegion(JSONObject d, long a) { data = d; at = a; } }
     private static final class RoutePosition {
-        final double distanceMeters;
-        final int index;
-        final boolean ahead;
-        RoutePosition(double distanceMeters, int index, boolean ahead) {
-            this.distanceMeters = distanceMeters;
-            this.index = index;
-            this.ahead = ahead;
-        }
+        final double distanceMeters; final int index; final boolean ahead;
+        RoutePosition(double d, int i, boolean a) { distanceMeters = d; index = i; ahead = a; }
     }
 }
