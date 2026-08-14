@@ -523,10 +523,10 @@ public class NavigationEngine {
         // maneuver that is still ahead, then announce that actionable maneuver immediately.
         nextStep = Math.min(furthestNextStep, route.steps.size() - 1);
         currentInstructionAnnounced = false;
+        announceStageReached = 0;
         advanceConfirmSamples = 0;
         updateTargetReference(location);
         if (instructionAnnouncementsEnabled) announceCurrentInstruction();
-        announceStageReached = 0;
     }
 
     private void buildStepProgress() {
