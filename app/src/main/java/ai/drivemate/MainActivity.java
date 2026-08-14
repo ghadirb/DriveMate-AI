@@ -243,6 +243,10 @@ public class MainActivity extends Activity {
      *  trip already running, and if so, whose is it". Cleared once that owner's own stopNavigation
      *  or finishTrip actually ends the trip. */
     private static java.lang.ref.WeakReference<MainActivity> activeSessionOwner;
+    /** Strong owner while a foreground navigation service is active. This deliberately keeps the
+     * authoritative Activity instance alive while navigation is running so GPS/voice callbacks
+     * do not disappear when the task leaves the foreground. Cleared on a real navigation stop. */
+    private static MainActivity backgroundSessionOwner;
     /** True on a freshly (re)created instance that found activeSessionOwner already driving a
      *  trip in onCreate: this instance mirrors the destination/route for display and forwards the
      *  map and stop actions to the real owner instead of running a second, duplicate trip. */
@@ -1496,6 +1500,7 @@ public class MainActivity extends Activity {
         if (activeDestination == null) return;
         resetGuidance(true);
         navigationEngine.stop();
+        stopBackgroundNavigation();
         activeDestination = null;
         activeRoute = null;
         activeWaypoints = new ArrayList<>();
@@ -1525,6 +1530,7 @@ public class MainActivity extends Activity {
     private void finishTrip(SavedPlace destination, boolean showCompletionReport) {
         if (activeDestination == null) return;
         resetGuidance(true);
+        stopBackgroundNavigation();
         TripRecord tripReport = buildTripRecord(destination, true);
         saveTripRecord(tripReport);
         int minutes = tripStartedAt == 0L ? 0 : Math.max(1, (int) ((System.currentTimeMillis() - tripStartedAt) / 60_000L));
@@ -2561,6 +2567,9 @@ public class MainActivity extends Activity {
         fetchRouteHazards(route);
         fetchRouteSafetyAlerts(route);
         fetchRouteTrafficIncidents(route);
+        // Start the location foreground service while the Activity is visible. Android 12+
+        // restricts background starts for location FGS, so waiting until onDestroy is too late.
+        startBackgroundNavigation();
         navigationEngine.start(route, new NavigationEngine.Listener() {
             @Override public void onInstruction(RouteStep step) { runOnUiThread(() -> announceRouteStep(step)); }
             @Override public void onOffRoute() { runOnUiThread(() -> rerouteFromCurrentLocation()); }
@@ -2622,11 +2631,13 @@ public class MainActivity extends Activity {
 
     private void startBackgroundNavigation() {
         if (!backgroundNavigationEnabled()) return;
+        backgroundSessionOwner = this;
         Intent intent = new Intent(this, NavigationForegroundService.class);
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent); else startService(intent);
     }
 
     private void stopBackgroundNavigation() {
+        if (backgroundSessionOwner == this) backgroundSessionOwner = null;
         stopService(new Intent(this, NavigationForegroundService.class));
     }
 
