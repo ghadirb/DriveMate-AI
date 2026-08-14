@@ -225,7 +225,7 @@ public class MainActivity extends Activity {
     private final android.os.Handler guidanceHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private final ArrayDeque<DrivingAnnouncement> safetyAnnouncementQueue = new ArrayDeque<>();
     private boolean safetyAnnouncementPlaying;
-    private DrivingAnnouncement pendingDrivingAnnouncement;
+    private final ArrayDeque<DrivingAnnouncement> pendingDrivingAnnouncements = new ArrayDeque<>();
     private final Runnable automaticStop = this::finishOnlineRecording;
     private final Runnable trafficCheck = this::checkTrafficAndMaybeReroute;
     private final Runnable weatherCheck = this::checkWeatherAlong;
@@ -1733,7 +1733,7 @@ public class MainActivity extends Activity {
         guidanceHandler.removeCallbacksAndMessages(null);
         safetyAnnouncementQueue.clear();
         safetyAnnouncementPlaying = false;
-        pendingDrivingAnnouncement = null;
+        pendingDrivingAnnouncements.clear();
         intelligenceCoordinator.cancelAll();
         if (interruptPlayback) {
             onlineSpeechClient.stopPlayback();
@@ -1756,7 +1756,7 @@ public class MainActivity extends Activity {
             return;
         }
         if (safetyAnnouncementPlaying || !safetyAnnouncementQueue.isEmpty()) {
-            pendingDrivingAnnouncement = announcement;
+            pendingDrivingAnnouncements.addLast(announcement);
             return;
         }
         playDrivingAnnouncement(announcement);
@@ -1769,10 +1769,10 @@ public class MainActivity extends Activity {
             announcement = safetyAnnouncementQueue.poll();
         } while (announcement != null && announcement.expiresAt < System.currentTimeMillis());
         if (announcement == null) {
-            DrivingAnnouncement pending = pendingDrivingAnnouncement;
-            pendingDrivingAnnouncement = null;
-            if (pending != null && pending.expiresAt >= System.currentTimeMillis()) {
-                playDrivingAnnouncement(pending);
+            long now = System.currentTimeMillis();
+            while (!pendingDrivingAnnouncements.isEmpty()) {
+                DrivingAnnouncement pending = pendingDrivingAnnouncements.pollFirst();
+                if (pending != null && pending.expiresAt >= now) playDrivingAnnouncement(pending);
             }
             return;
         }
@@ -1808,8 +1808,10 @@ public class MainActivity extends Activity {
         // online-TTS-fallback path each only stopped their own kind, not the other's. Switching
         // intelligence mode mid-trip could then leave a leftover clip from the old mode overlapping
         // a fresh one from the new mode, playing simultaneously.
-        voicePlayer.interrupt();
-        onlineSpeechClient.stopPlayback();
+        if (priority == DrivingIntelligenceCoordinator.Priority.SAFETY) {
+            voicePlayer.interrupt();
+            onlineSpeechClient.stopPlayback();
+        }
         if (isFullIntelligenceMode()) {
             setStatus("\u062f\u0631 \u062d\u0627\u0644 \u0622\u0645\u0627\u062f\u0647 \u06a9\u0631\u062f\u0646 \u067e\u0627\u0633\u062e \u0635\u0648\u062a\u06cc \u0647\u0648\u0634\u0645\u0646\u062f...");
             final AtomicBoolean delivered = new AtomicBoolean(false);
@@ -3368,23 +3370,13 @@ public class MainActivity extends Activity {
             setStatus(text);
             return;
         }
-        if (lower.contains("left") || text.contains("چپ")) lastInstruction = "turn_left";
+        if (text.contains("میدان") || lower.contains("roundabout") || lower.contains("rotary")) {
+            int exitNumber = extractExitNumber(text);
+            lastInstruction = exitNumber >= 1 && exitNumber <= 3 ? "roundabout_exit_" + exitNumber : "roundabout_custom";
+        } else if (lower.contains("left") || text.contains("چپ")) lastInstruction = "turn_left";
         else if (lower.contains("right") || text.contains("راست")) lastInstruction = "turn_right";
         else if (lower.contains("arriv") || text.contains("مقصد")) lastInstruction = "destination_arrived";
         else if (lower.contains("uturn") || lower.contains("u-turn") || text.contains("دور بزنید")) lastInstruction = "make_u_turn";
-        else if (text.contains("میدان") || lower.contains("roundabout")) {
-            // Previously any roundabout step ("وارد میدان شوید و از خروجی ۲ خارج شوید") fell
-            // through every one of the checks above and landed on the generic "continue_route"
-            // bucket below - which HAS a matching pre-recorded clip, so in economy mode the driver
-            // heard the fixed "ادامه مسیر" clip instead of which exit to actually take. Route to a
-            // dedicated roundabout clip when the exit number is 1-3 (the only ones recorded);
-            // otherwise fall through to real speech instead of ever substituting the generic clip.
-            int exitNumber = extractExitNumber(text);
-            lastInstruction = exitNumber >= 1 && exitNumber <= 3 ? "roundabout_exit_" + exitNumber : "roundabout_custom";
-        }
-        // "continue_route" also has a real recorded clip, so it must stay reserved for instructions
-        // that are genuinely generic ("مسیر را ادامه دهید") - anything mentioning a specific lane,
-        // exit, or keep-left/right direction needs to be actually spoken, not replaced by that clip.
         else if (text.contains("ادامه") && !text.contains("خروجی") && !text.contains("بمانید")) lastInstruction = "continue_route";
         else lastInstruction = "route_step_custom";
         lastInstructionText = text;

@@ -238,12 +238,16 @@ public final class TomTomRoutingProvider implements RoutingProvider {
                 ? directRoadName(instruction) : routeRoadName.trim();
         String prefix = announcementDistanceMeters > 0
                 ? distanceLabel(announcementDistanceMeters) + " جلوتر " : "";
+        String junctionType = instruction.optString("junctionType", "").toUpperCase(java.util.Locale.US);
+        int explicitRoundaboutExit = instruction.optInt("roundaboutExitNumber", 0);
+        boolean roundabout = maneuver.contains("ROUNDABOUT") || junctionType.contains("ROUNDABOUT")
+                || explicitRoundaboutExit > 0;
         String text;
         if (maneuver.contains("ARRIVE")) return "به مقصد می‌رسید";
         if (maneuver.contains("DEPART")) return "به سمت مقصد حرکت کنید";
         if (maneuver.contains("UTURN")) text = "دور بزنید";
-        else if (maneuver.contains("ROUNDABOUT")) {
-            int exit = instruction.optInt("roundaboutExitNumber", 0);
+        else if (roundabout) {
+            int exit = explicitRoundaboutExit;
             text = exit > 0 ? "وارد میدان شوید و از خروجی " + persianDigits(exit) + " خارج شوید" : "وارد میدان شوید";
         } else if (maneuver.contains("LEFT")) text = maneuver.contains("KEEP") ? "در سمت چپ بمانید" : "به چپ بپیچید";
         else if (maneuver.contains("RIGHT")) text = maneuver.contains("KEEP") ? "در سمت راست بمانید" : "به راست بپیچید";
