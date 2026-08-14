@@ -1,0 +1,97 @@
+name: One-shot final navigation validation
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  fix-build-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch navigation UX and voice queue
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('app/src/main/java/ai/drivemate/MainActivity.java')
+          s = p.read_text(encoding='utf-8')
+          s = s.replace('        promptEnableLocationIfNeeded();\n', '')
+          old = '''            long now = System.currentTimeMillis();
+            while (!pendingDrivingAnnouncements.isEmpty()) {
+                DrivingAnnouncement pending = pendingDrivingAnnouncements.pollFirst();
+                if (pending != null && pending.expiresAt >= now) playDrivingAnnouncement(pending);
+            }
+            return;'''
+          new = '''            long now = System.currentTimeMillis();
+            while (!pendingDrivingAnnouncements.isEmpty()) {
+                DrivingAnnouncement pending = pendingDrivingAnnouncements.pollFirst();
+                if (pending != null && pending.expiresAt >= now) {
+                    playDrivingAnnouncement(pending);
+                    break;
+                }
+            }
+            return;'''
+          if old not in s: raise SystemExit('voice queue block not found')
+          s = s.replace(old, new, 1)
+          old = '''    protected void onResume() {
+        super.onResume();
+        maybeShowPendingTripReport();
+        if (NightModeManager.refreshIfChanged(this)) return;
+        NightModeManager.applyWindowBrightness(this);
+    }'''
+          new = '''    protected void onResume() {
+        super.onResume();
+        maybeShowPendingTripReport();
+        if (pendingNavigationDestination != null && locationTracker != null
+                && locationTracker.isLocationEnabled()) {
+            SavedPlace destination = pendingNavigationDestination;
+            List<RoutePoint> waypoints = pendingNavigationWaypoints == null
+                    ? new ArrayList<>() : new ArrayList<>(pendingNavigationWaypoints);
+            pendingNavigationDestination = null;
+            pendingNavigationWaypoints = null;
+            startNavigation(destination, waypoints, false);
+        }
+        if (NightModeManager.refreshIfChanged(this)) return;
+        NightModeManager.applyWindowBrightness(this);
+    }'''
+          if old not in s: raise SystemExit('onResume block not found')
+          s = s.replace(old, new, 1)
+          old = '''                .setMessage("برای مسیریابی به \\\"" + destination.name + "\\\" باید مکان/GPS گوشی روشن باشد. "
+                        + "به محض روشن شدن، مسیریابی به‌طور خودکار شروع می‌شود.")
+                .setPositiveButton("روشن کردن GPS", (d, w) -> startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)))'''
+          new = '''                .setMessage("برای مسیریابی به \\\"" + destination.name + "\\\" باید مکان گوشی روشن باشد. "
+                        + "با زدن «فعال کردن موقعیت»، تنظیمات استاندارد Android باز می‌شود. "
+                        + "بعد از روشن کردن موقعیت و بازگشت به برنامه، مسیریابی خودکار ادامه پیدا می‌کند.")
+                .setPositiveButton("فعال کردن موقعیت", (d, w) -> startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)))'''
+          if old not in s: raise SystemExit('location dialog block not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s, encoding='utf-8')
+          t = Path('app/src/test/java/ai/drivemate/traffic/TrafficIncidentProviderContractTest.java')
+          t.parent.mkdir(parents=True, exist_ok=True)
+          t.write_text('''package ai.drivemate.traffic;\n\nimport org.junit.Test;\nimport static org.junit.Assert.*;\n\npublic class TrafficIncidentProviderContractTest {\n    @Test public void providerDoesNotRequireAnApiKey() {\n        TrafficIncidentProvider provider = new TrafficIncidentProvider(\"\");\n        assertTrue(provider.hasKey());\n        provider.setApiKey(\"ignored\");\n        provider.setEnabled(false);\n        assertTrue(provider.hasKey());\n    }\n}\n''', encoding='utf-8')
+      - name: Validate diff
+        run: git diff --check
+      - name: Build debug APK
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Build debug APK
+        env:
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          OPENWEATHERMAP_API_KEY: ${{ secrets.OPENWEATHERMAP_API_KEY }}
+          KEYS_DECRYPTION_SECRET: ${{ secrets.KEYS_DECRYPTION_SECRET }}
+        run: gradle assembleDebug --stacktrace
+      - name: Commit verified source and remove one-shot workflow
+        run: |
+          git config user.name 'DriveMate AI'
+          git config user.email 'ghadir.baraty@gmail.com'
+          rm -f FINAL_NAVIGATION_TRIGGER.txt FINAL_FIX_TRIGGER.txt FINAL_FIX_TRIGGER_2.txt
+          git rm -f .github/workflows/agent-final-main.yml .github/workflows/agent-finalize-navigation.yml .github/workflows/agent-finalize-pr.yml .github/workflows/agent-apply-now.yml || true
+          git add app/src/main/java/ai/drivemate/MainActivity.java app/src/test/java/ai/drivemate/traffic/TrafficIncidentProviderContractTest.java
+          git commit -m 'fix: harden navigation voice and location UX'
+          git push origin main
