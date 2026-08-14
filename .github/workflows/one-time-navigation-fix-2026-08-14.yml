@@ -1,0 +1,543 @@
+name: One-time navigation robustness fix
+
+on:
+  push:
+    branches:
+      - fix/navigation-robustness-2026-08-14
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Patch navigation, roundabouts and voice serialization
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def patch(path, old, new, label):
+              p = Path(path)
+              s = p.read_text(encoding='utf-8')
+              if old not in s:
+                  raise SystemExit(f'{label}: exact source marker not found in {path}')
+              p.write_text(s.replace(old, new, 1), encoding='utf-8')
+              print(f'patched {label}')
+
+          # 1) NavigationEngine: robust arrival + multi-maneuver GPS-jump synchronization + less false off-route.
+          nav = 'app/src/main/java/ai/drivemate/routing/NavigationEngine.java'
+          patch(nav,
+                'private static final float FINAL_ARRIVAL_RADIUS_METERS = 55f;',
+                'private static final float FINAL_ARRIVAL_RADIUS_METERS = 100f;',
+                'arrival radius')
+
+          patch(nav,
+                '''        if (accuracyOkFor(location, MAX_ACCURACY_FOR_ARRIVAL_METERS) && metersToDestination < FINAL_ARRIVAL_RADIUS_METERS) {
+            finalArrivalConfirmSamples++;
+        } else {
+            finalArrivalConfirmSamples = 0;
+        }''',
+                '''        boolean destinationCloseEnough = metersToDestination <= FINAL_ARRIVAL_RADIUS_METERS
+                || (routeProgress != null && routeProgress.onRoute
+                && routeProgress.remainingMeters <= 120 && metersToDestination <= 140f);
+        if (accuracyOkFor(location, MAX_ACCURACY_FOR_ARRIVAL_METERS) && destinationCloseEnough) {
+            finalArrivalConfirmSamples++;
+        } else {
+            finalArrivalConfirmSamples = 0;
+        }''',
+                'arrival proximity confirmation')
+
+          old_advance = '''    private void advancePastPassedSteps(Location location, RouteProgressTracker.Snapshot routeProgress) {
+        if (routeProgress == null || !routeProgress.onRoute || !accuracyOk(location)
+                || nextStep >= route.steps.size() - 1 || nextStep >= stepProgressMeters.length) {
+            passedStepConfirmSamples = 0;
+            return;
+        }
+        RouteStep target = route.steps.get(nextStep);
+        if (target.waypointOrdinal >= 0 || Double.isNaN(stepProgressMeters[nextStep])
+                || routeProgress.progressMeters < stepProgressMeters[nextStep] + PASSED_STEP_BUFFER_METERS) {
+            passedStepConfirmSamples = 0;
+            return;
+        }
+        passedStepConfirmSamples++;
+        if (passedStepConfirmSamples < STEP_ADVANCE_CONFIRM_SAMPLES) return;
+        passedStepConfirmSamples = 0;
+        // Advance one maneuver per accepted GPS update. A mocked or delayed location stream can
+        // leap across several short city blocks; advancing them all in a loop skips every spoken
+        // left/right/roundabout instruction and leaves only the final generic message.
+        nextStep = Math.min(nextStep + 1, route.steps.size() - 1);
+        currentInstructionAnnounced = false;
+        advanceConfirmSamples = 0;
+        updateTargetReference(location);
+        if (instructionAnnouncementsEnabled) announceCurrentInstruction();
+    }
+'''
+          new_advance = '''    private void advancePastPassedSteps(Location location, RouteProgressTracker.Snapshot routeProgress) {
+        if (routeProgress == null || !routeProgress.onRoute || !accuracyOk(location)
+                || nextStep >= route.steps.size() - 1 || nextStep >= stepProgressMeters.length) {
+            passedStepConfirmSamples = 0;
+            return;
+        }
+        int furthestNextStep = nextStep;
+        for (int index = nextStep; index < route.steps.size() - 1; index++) {
+            RouteStep step = route.steps.get(index);
+            if (step.waypointOrdinal >= 0 || index >= stepProgressMeters.length
+                    || Double.isNaN(stepProgressMeters[index])) break;
+            if (routeProgress.progressMeters >= stepProgressMeters[index] + PASSED_STEP_BUFFER_METERS) {
+                furthestNextStep = index + 1;
+            } else {
+                break;
+            }
+        }
+        if (furthestNextStep <= nextStep) {
+            passedStepConfirmSamples = 0;
+            return;
+        }
+        passedStepConfirmSamples++;
+        if (passedStepConfirmSamples < STEP_ADVANCE_CONFIRM_SAMPLES) return;
+        passedStepConfirmSamples = 0;
+        // A fake/delayed GPS update can cross several maneuver endpoints at once. Synchronize to
+        // the first maneuver that is still ahead instead of replaying already-passed turns and
+        // getting stuck on the old instruction. The next actionable instruction is still announced.
+        nextStep = Math.min(furthestNextStep, route.steps.size() - 1);
+        currentInstructionAnnounced = false;
+        advanceConfirmSamples = 0;
+        updateTargetReference(location);
+        if (instructionAnnouncementsEnabled) announceCurrentInstruction();
+    }
+'''
+          patch(nav, old_advance, new_advance, 'multi-maneuver GPS synchronization')
+          patch(nav,
+                'float corridorMeters = Math.max(80f, location.getAccuracy() * 2.5f);',
+                'float corridorMeters = Math.max(100f, location.getAccuracy() * 3.0f);',
+                'off-route corridor')
+
+          # 2) map.ir: preserve explicit roundabout metadata even when the generic instruction says turn right.
+          mir = 'app/src/main/java/ai/drivemate/routing/MapIrRoutingProvider.java'
+          patch(mir,
+                '''        android.util.Log.d("DriveMateManeuver", "type=" + type + " modifier=" + modifier
+                + " exit=" + maneuver.optInt("exit", maneuver.optInt("roundaboutExitNumber", -1))
+                + " road=" + road);
+        if (type.isEmpty()) return explicit.isEmpty() ? "در مسیر ادامه دهید" : explicit;''',
+                '''        int roundaboutExit = extractRoundaboutExit(maneuver);
+        String junctionType = maneuver.optString("junctionType", "").toLowerCase(java.util.Locale.ROOT);
+        String maneuverCode = maneuver.optString("maneuver", "").toLowerCase(java.util.Locale.ROOT);
+        boolean roundabout = type.contains("roundabout") || type.contains("rotary")
+                || junctionType.contains("roundabout") || junctionType.contains("rotary")
+                || maneuverCode.contains("roundabout") || maneuverCode.contains("rotary")
+                || (road.contains("میدان") && ("turn".equals(type) || "end of road".equals(type) || "fork".equals(type)));
+        android.util.Log.d("DriveMateManeuver", "type=" + type + " modifier=" + modifier
+                + " junctionType=" + junctionType + " maneuver=" + maneuverCode
+                + " exit=" + roundaboutExit + " road=" + road);
+        if (roundabout) {
+            if (roundaboutExit > 0) return "وارد میدان شوید و از خروجی " + persianDigits(roundaboutExit) + " خارج شوید";
+            return road.isEmpty() ? "وارد میدان شوید" : "در " + road + " وارد میدان شوید";
+        }
+        if (type.isEmpty()) return explicit.isEmpty() ? "در مسیر ادامه دهید" : explicit;''',
+                'map.ir roundabout precedence')
+          patch(mir,
+                '''    private String turnInstruction(String modifier, boolean endOfRoad) {''',
+                '''    private int extractRoundaboutExit(JSONObject maneuver) {
+        String[] keys = {"exit", "roundaboutExitNumber", "exitNumber", "roundabout_exit", "roundaboutExit"};
+        for (String key : keys) {
+            if (!maneuver.has(key)) continue;
+            int value = maneuver.optInt(key, 0);
+            if (value > 0 && value <= 20) return value;
+        }
+        JSONObject nested = maneuver.optJSONObject("maneuver");
+        if (nested != null) {
+            for (String key : keys) {
+                if (!nested.has(key)) continue;
+                int value = nested.optInt(key, 0);
+                if (value > 0 && value <= 20) return value;
+            }
+        }
+        return 0;
+    }
+
+    private String turnInstruction(String modifier, boolean endOfRoad) {''',
+                'map.ir roundabout exit extraction')
+
+          # 3) Neshan: defensively consume hidden OSRM/TomTom-style maneuver fields if present,
+          # and never convert a roundabout into a generic right turn just because its text says so.
+          nesh = 'app/src/main/java/ai/drivemate/routing/NeshanRoutingProvider.java'
+          patch(nesh,
+                '''                    steps.add(new RouteStep(latitude, longitude, step.optString("instruction"),
+                            stepDistance == null ? 0 : stepDistance.optInt("value"), parseLaneGuidance(step)));''',
+                '''                    steps.add(new RouteStep(latitude, longitude, persianInstruction(step),
+                            stepDistance == null ? 0 : stepDistance.optInt("value"), parseLaneGuidance(step)));''',
+                'Neshan instruction normalization')
+          patch(nesh,
+                '''    /** The documented Neshan response does not currently expose maxspeed. This parses only an
+     * explicit numeric field if a future response adds one; no value is derived from ETA or road type. */''',
+                '''    /** Normalize roundabout metadata before the generic provider instruction reaches voice guidance. */
+    private String persianInstruction(JSONObject step) {
+        String instruction = step.optString("instruction", "").trim();
+        JSONObject maneuver = step.optJSONObject("maneuver");
+        String type = step.optString("type", "").toLowerCase(java.util.Locale.ROOT);
+        String junctionType = step.optString("junctionType", "").toLowerCase(java.util.Locale.ROOT);
+        String maneuverType = step.optString("maneuverType", "").toLowerCase(java.util.Locale.ROOT);
+        if (maneuver != null) {
+            if (type.isEmpty()) type = maneuver.optString("type", "").toLowerCase(java.util.Locale.ROOT);
+            if (junctionType.isEmpty()) junctionType = maneuver.optString("junctionType", "").toLowerCase(java.util.Locale.ROOT);
+            if (maneuverType.isEmpty()) maneuverType = maneuver.optString("maneuver", "").toLowerCase(java.util.Locale.ROOT);
+        }
+        String road = step.optString("name", step.optString("streetName", "")).trim();
+        boolean roundabout = type.contains("roundabout") || type.contains("rotary")
+                || junctionType.contains("roundabout") || junctionType.contains("rotary")
+                || maneuverType.contains("roundabout") || maneuverType.contains("rotary")
+                || (road.contains("میدان") && (instruction.contains("راست") || instruction.contains("چپ")
+                || instruction.toLowerCase(java.util.Locale.ROOT).contains("right")
+                || instruction.toLowerCase(java.util.Locale.ROOT).contains("left")));
+        if (!roundabout) return instruction;
+        int exit = extractRoundaboutExit(step, maneuver);
+        if (exit > 0) return "وارد میدان شوید و از خروجی " + persianDigits(exit) + " خارج شوید";
+        return road.isEmpty() ? "وارد میدان شوید" : "در " + road + " وارد میدان شوید";
+    }
+
+    private int extractRoundaboutExit(JSONObject step, JSONObject maneuver) {
+        String[] keys = {"exit", "roundaboutExitNumber", "exitNumber", "roundabout_exit", "roundaboutExit"};
+        for (String key : keys) {
+            int value = step.optInt(key, 0);
+            if (value > 0 && value <= 20) return value;
+            if (maneuver != null) {
+                value = maneuver.optInt(key, 0);
+                if (value > 0 && value <= 20) return value;
+            }
+        }
+        return 0;
+    }
+
+    private static String persianDigits(int value) {
+        String latin = String.valueOf(value);
+        StringBuilder result = new StringBuilder(latin.length());
+        for (int index = 0; index < latin.length(); index++) {
+            char character = latin.charAt(index);
+            result.append(character >= '0' && character <= '9'
+                    ? (char) ('۰' + character - '0') : character);
+        }
+        return result.toString();
+    }
+
+    /** The documented Neshan response does not currently expose maxspeed. This parses only an
+     * explicit numeric field if a future response adds one; no value is derived from ETA or road type. */''',
+                'Neshan roundabout helpers')
+
+          # 4) TomTom: junctionType/exit metadata wins over a generic turn code.
+          tom = 'app/src/main/java/ai/drivemate/routing/TomTomRoutingProvider.java'
+          patch(tom,
+                '''        String text;
+        if (maneuver.contains("ARRIVE")) return "به مقصد می‌رسید";''',
+                '''        String junctionType = instruction.optString("junctionType", "").toUpperCase(java.util.Locale.US);
+        int explicitRoundaboutExit = instruction.optInt("roundaboutExitNumber", 0);
+        boolean roundabout = maneuver.contains("ROUNDABOUT") || junctionType.contains("ROUNDABOUT")
+                || explicitRoundaboutExit > 0;
+        String text;
+        if (maneuver.contains("ARRIVE")) return "به مقصد می‌رسید";''',
+                'TomTom roundabout metadata')
+          patch(tom,
+                '''        else if (maneuver.contains("ROUNDABOUT")) {
+            int exit = instruction.optInt("roundaboutExitNumber", 0);
+            text = exit > 0 ? "وارد میدان شوید و از خروجی " + persianDigits(exit) + " خارج شوید" : "وارد میدان شوید";
+        } else if (maneuver.contains("LEFT"))''',
+                '''        else if (roundabout) {
+            int exit = explicitRoundaboutExit;
+            text = exit > 0 ? "وارد میدان شوید و از خروجی " + persianDigits(exit) + " خارج شوید" : "وارد میدان شوید";
+        } else if (maneuver.contains("LEFT"))''',
+                'TomTom roundabout precedence')
+
+          # 5) MainActivity: roundabout classification must happen before left/right classification.
+          main = 'app/src/main/java/ai/drivemate/MainActivity.java'
+          patch(main,
+                '''        if (lower.contains("left") || text.contains("چپ")) lastInstruction = "turn_left";
+        else if (lower.contains("right") || text.contains("راست")) lastInstruction = "turn_right";
+        else if (lower.contains("arriv") || text.contains("مقصد")) lastInstruction = "destination_arrived";
+        else if (lower.contains("uturn") || lower.contains("u-turn") || text.contains("دور بزنید")) lastInstruction = "make_u_turn";
+        else if (text.contains("میدان") || lower.contains("roundabout")) {''',
+                '''        if (text.contains("میدان") || lower.contains("roundabout") || lower.contains("rotary")) {
+            int exitNumber = extractExitNumber(text);
+            lastInstruction = exitNumber >= 1 && exitNumber <= 3 ? "roundabout_exit_" + exitNumber : "roundabout_custom";
+        } else if (lower.contains("left") || text.contains("چپ")) lastInstruction = "turn_left";
+        else if (lower.contains("right") || text.contains("راست")) lastInstruction = "turn_right";
+        else if (lower.contains("arriv") || text.contains("مقصد")) lastInstruction = "destination_arrived";
+        else if (lower.contains("uturn") || lower.contains("u-turn") || text.contains("دور بزنید")) lastInstruction = "make_u_turn";
+        else {''',
+                'MainActivity roundabout voice classification')
+          patch(main,
+                '''    private boolean playDrivingFallback(String clipName, String fallback) {
+        onlineSpeechClient.stopPlayback();
+        voicePlayer.interrupt();
+        return clipName != null ? voicePlayer.announce(clipName, fallback) : voicePlayer.speak(fallback);
+    }''',
+                '''    private boolean playDrivingFallback(String clipName, String fallback) {
+        onlineSpeechClient.stopPlayback();
+        voicePlayer.interrupt();
+        return clipName != null ? voicePlayer.announce(clipName, fallback) : voicePlayer.speak(fallback);
+    }''',
+                'MainActivity fallback guard')
+
+          # Ordinary navigation announcements must queue; only SAFETY is allowed to preempt them.
+          patch(main,
+                '''        voicePlayer.interrupt();
+        onlineSpeechClient.stopPlayback();
+        if (isFullIntelligenceMode()) {''',
+                '''        if (priority == DrivingIntelligenceCoordinator.Priority.SAFETY) {
+            voicePlayer.interrupt();
+            onlineSpeechClient.stopPlayback();
+        }
+        if (isFullIntelligenceMode()) {''',
+                'MainActivity ordinary announcement non-interruption')
+
+          # Keep all ordinary announcements that arrive during a safety queue, not just the last one.
+          patch(main,
+                '    private DrivingAnnouncement pendingDrivingAnnouncement;\n',
+                '    private final ArrayDeque<DrivingAnnouncement> pendingDrivingAnnouncements = new ArrayDeque<>();\n',
+                'MainActivity pending announcement queue')
+          patch(main,
+                '''        pendingDrivingAnnouncement = null;
+        intelligenceCoordinator.cancelAll();''',
+                '''        pendingDrivingAnnouncements.clear();
+        intelligenceCoordinator.cancelAll();''',
+                'MainActivity guidance reset queue')
+          patch(main,
+                '''        if (safetyAnnouncementPlaying || !safetyAnnouncementQueue.isEmpty()) {
+            pendingDrivingAnnouncement = announcement;
+            return;
+        }''',
+                '''        if (safetyAnnouncementPlaying || !safetyAnnouncementQueue.isEmpty()) {
+            pendingDrivingAnnouncements.addLast(announcement);
+            return;
+        }''',
+                'MainActivity safety queue preservation')
+          patch(main,
+                '''        if (announcement == null) {
+            DrivingAnnouncement pending = pendingDrivingAnnouncement;
+            pendingDrivingAnnouncement = null;
+            if (pending != null && pending.expiresAt >= System.currentTimeMillis()) {
+                playDrivingAnnouncement(pending);
+            }
+            return;
+        }''',
+                '''        if (announcement == null) {
+            long now = System.currentTimeMillis();
+            while (!pendingDrivingAnnouncements.isEmpty()) {
+                DrivingAnnouncement pending = pendingDrivingAnnouncements.pollFirst();
+                if (pending != null && pending.expiresAt >= now) playDrivingAnnouncement(pending);
+            }
+            return;
+        }''',
+                'MainActivity drain all pending announcements')
+
+          # 6) Online TTS: serialize synthesis/playback so one normal generated announcement cannot
+          # stop another generated announcement. stopPlayback remains the explicit hard-preemption path.
+          online = 'app/src/main/java/ai/drivemate/ai/OnlineSpeechClient.java'
+          patch(online,
+                'import java.util.UUID;\n',
+                'import java.util.UUID;\nimport java.util.ArrayDeque;\n',
+                'OnlineSpeechClient queue import')
+          patch(online,
+                '''    private volatile String transcriptionHint = "";
+    /** Bumped by stopPlayback()''',
+                '''    private volatile String transcriptionHint = "";
+    private final ArrayDeque<SpeechRequest> speechQueue = new ArrayDeque<>();
+    private boolean speechSynthesisInFlight;
+    /** Bumped by stopPlayback()''',
+                'OnlineSpeechClient speech queue fields')
+
+          start = s = Path(online).read_text(encoding='utf-8')
+          old_start = s.index('    public void speak(String text) {')
+          old_end = s.index('    private File synthesizeGeminiTts(', old_start)
+          new_method = '''    public void speak(String text) {
+        speak(text, null);
+    }
+
+    /** Serializes online TTS requests. Navigation and AI callbacks may arrive close together;
+     *  only an explicit stopPlayback() is allowed to discard the current/queued speech. */
+    public synchronized void speak(String text, SpeechCallback callback) {
+        if (gapKey() == null || text == null || text.trim().isEmpty()) {
+            if (callback != null) callback.onError();
+            return;
+        }
+        speechQueue.addLast(new SpeechRequest(text, callback));
+        drainSpeechQueue();
+    }
+
+    private synchronized void drainSpeechQueue() {
+        if (speechSynthesisInFlight || speechQueue.isEmpty()) return;
+        final SpeechRequest request = speechQueue.peekFirst();
+        final int requestGeneration = playGeneration;
+        speechSynthesisInFlight = true;
+        new Thread(() -> {
+            try {
+                File output;
+                String key = gapKey();
+                try {
+                    output = synthesizeOpenAiTts(request.text, key, "gpt-4o-mini-tts", "answer-gpt4o-mini-tts.mp3");
+                    lastTtsProvider = "GapGPT gpt-4o-mini-tts";
+                } catch (Exception gptError) {
+                    Log.w(TAG, "gpt-4o-mini-tts failed; trying Gemini TTS", gptError);
+                    try {
+                        output = synthesizeGeminiTts(request.text, key, true);
+                        lastTtsProvider = "Gemini TTS";
+                    } catch (Exception documentedError) {
+                        Log.w(TAG, "Documented Gemini TTS request failed; trying compatible request", documentedError);
+                        try {
+                            output = synthesizeGeminiTts(request.text, key, false);
+                            lastTtsProvider = "Gemini TTS";
+                        } catch (Exception compatibleError) {
+                            Log.w(TAG, "Gemini TTS unavailable; falling back to tts-1", compatibleError);
+                            output = synthesizeTts1(request.text, key);
+                            lastTtsProvider = "GapGPT tts-1";
+                        }
+                    }
+                }
+                final File playableOutput = output;
+                new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                    synchronized (OnlineSpeechClient.this) {
+                        if (speechQueue.peekFirst() != request) return;
+                        if (requestGeneration != playGeneration) {
+                            speechQueue.removeFirst();
+                            speechSynthesisInFlight = false;
+                            if (request.callback != null) request.callback.onError();
+                            drainSpeechQueue();
+                            return;
+                        }
+                        speechQueue.removeFirst();
+                        boolean played = play(playableOutput);
+                        if (request.callback != null) {
+                            if (played) request.callback.onPlayed(); else request.callback.onError();
+                        }
+                        speechSynthesisInFlight = false;
+                        if (!played) drainSpeechQueue();
+                    }
+                });
+            } catch (Exception error) {
+                Log.e(TAG, "All online TTS providers failed", error);
+                new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                    synchronized (OnlineSpeechClient.this) {
+                        if (speechQueue.peekFirst() != request) return;
+                        speechQueue.removeFirst();
+                        speechSynthesisInFlight = false;
+                        if (request.callback != null) request.callback.onError();
+                        drainSpeechQueue();
+                    }
+                });
+            }
+        }).start();
+    }
+
+'''
+          Path(online).write_text(s[:old_start] + new_method + s[old_end:], encoding='utf-8')
+          print('patched OnlineSpeechClient speak serialization')
+
+          patch(online,
+                '''    private boolean play(File file) {
+        stopPlayback();
+        player = new MediaPlayer();
+        try { player.setDataSource(file.getAbsolutePath()); player.prepare(); player.start(); return true; }
+        catch (Exception ignored) { player.release(); player = null; return false; }
+    }
+
+    /** Must be called before a more important local alert so online speech cannot overlap it.''',
+                '''    private boolean play(File file) {
+        player = new MediaPlayer();
+        try {
+            player.setDataSource(file.getAbsolutePath());
+            player.prepare();
+            player.setOnCompletionListener(completed -> {
+                synchronized (OnlineSpeechClient.this) {
+                    try { completed.release(); } catch (Exception ignored) { }
+                    if (player == completed) player = null;
+                    drainSpeechQueue();
+                }
+            });
+            player.setOnErrorListener((mp, what, extra) -> {
+                synchronized (OnlineSpeechClient.this) {
+                    try { mp.release(); } catch (Exception ignored) { }
+                    if (player == mp) player = null;
+                    drainSpeechQueue();
+                }
+                return true;
+            });
+            player.start();
+            return true;
+        } catch (Exception ignored) {
+            try { player.release(); } catch (Exception ignoredToo) { }
+            player = null;
+            return false;
+        }
+    }
+
+    /** Must be called before a more important local alert so online speech cannot overlap it.''',
+                'OnlineSpeechClient serialized playback')
+          patch(online,
+                '''    public void stopPlayback() {
+        playGeneration++;
+        if (player != null) {
+            try { player.stop(); } catch (IllegalStateException ignored) { }
+            player.release();
+            player = null;
+        }
+    }''',
+                '''    public synchronized void stopPlayback() {
+        playGeneration++;
+        speechQueue.clear();
+        speechSynthesisInFlight = false;
+        if (player != null) {
+            try { player.stop(); } catch (IllegalStateException ignored) { }
+            try { player.release(); } catch (Exception ignored) { }
+            player = null;
+        }
+    }''',
+                'OnlineSpeechClient hard stop')
+          patch(online,
+                '''    private void releaseRecorder() {''',
+                '''    private static final class SpeechRequest {
+        final String text;
+        final SpeechCallback callback;
+        SpeechRequest(String text, SpeechCallback callback) {
+            this.text = text;
+            this.callback = callback;
+        }
+    }
+
+    private void releaseRecorder() {''',
+                'OnlineSpeechClient request model')
+          PY
+
+      - name: Build debug APK
+        run: gradle --no-daemon assembleDebug
+
+      - name: Commit fixes and remove one-time workflow
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/src/main/java/ai/drivemate/routing/NavigationEngine.java \
+                  app/src/main/java/ai/drivemate/routing/MapIrRoutingProvider.java \
+                  app/src/main/java/ai/drivemate/routing/NeshanRoutingProvider.java \
+                  app/src/main/java/ai/drivemate/routing/TomTomRoutingProvider.java \
+                  app/src/main/java/ai/drivemate/MainActivity.java \
+                  app/src/main/java/ai/drivemate/ai/OnlineSpeechClient.java
+          git commit -m 'fix: harden navigation, roundabouts and voice queue'
+          git push origin HEAD:fix/navigation-robustness-2026-08-14
+          git rm .github/workflows/one-time-navigation-fix-2026-08-14.yml
+          git commit -m 'chore: remove one-time navigation repair workflow'
+          git push origin HEAD:fix/navigation-robustness-2026-08-14
