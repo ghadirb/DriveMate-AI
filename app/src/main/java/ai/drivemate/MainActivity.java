@@ -2504,8 +2504,8 @@ public class MainActivity extends Activity {
 
     private void scheduleTrafficCheck() {
         voiceHandler.removeCallbacks(trafficCheck);
-        // Version 1 keeps the active route until confirmed off-route navigation requests a reroute.
-        // This avoids periodic paid route requests while GPS and local route progress continue normally.
+        if (!navigationEngine.isNavigating() || activeDestination == null) return;
+        voiceHandler.postDelayed(trafficCheck, TRAFFIC_CHECK_INTERVAL_MS);
     }
 
     /**
@@ -2539,9 +2539,9 @@ public class MainActivity extends Activity {
                             && gainSeconds * 100 >= expectedRemaining * 12;
                     lastTrafficEtaSeconds = route.durationSeconds;
                     lastTrafficEtaMeasuredAt = now;
-                    if (materiallyFaster) {
-                        setStatus("برآورد ترافیک نشان: مسیر فعلی حدود "
-                                + Math.max(1, gainSeconds / 60) + " دقیقه زمان بیشتری دارد.");
+                    if (materiallyFaster && !rerouteInFlight) {
+                        replaceRouteForTraffic(route, destination, gainSeconds);
+                        return;
                     }
                     scheduleTrafficCheck();
                 });
@@ -2885,8 +2885,8 @@ public class MainActivity extends Activity {
 
     private void scheduleTrafficIncidentCheck() {
         voiceHandler.removeCallbacks(trafficIncidentCheck);
-        // A live incident snapshot is fetched once for a newly calculated route. Repeating this
-        // request every few minutes adds key usage without changing turn-by-turn GPS guidance.
+        if (!navigationEngine.isNavigating() || activeRoute == null || !trafficIncidentProvider.hasKey()) return;
+        voiceHandler.postDelayed(trafficIncidentCheck, TRAFFIC_INCIDENT_CHECK_INTERVAL_MS);
     }
 
     /** Live point traffic-incident counterpart to checkRouteHazards/checkRouteSafetyAlerts: same
@@ -2903,6 +2903,9 @@ public class MainActivity extends Activity {
             incidentLocation.setLongitude(incident.longitude);
             float meters = location.distanceTo(incidentLocation);
             if (meters > 700f) continue;
+            boolean ahead = isAlertAheadAndRelevant(location, isCurrentlyMoving(location),
+                    incident.latitude, incident.longitude);
+            if (!ahead) continue;
             announcedTrafficIncidentIds.add(incident.id);
             announceTrafficIncident(incident, Math.round(meters));
         }
@@ -3188,6 +3191,8 @@ public class MainActivity extends Activity {
      *  threshold already used elsewhere for the same purpose. */
     private static final float ALERT_MIN_MOVING_SPEED_MPS = 0.8f;
     private static final float ALERT_TRIGGER_RADIUS_METERS = 350f;
+    private static final float ALERT_MIN_TRIGGER_METERS = 220f;
+    private static final float ALERT_MAX_TRIGGER_METERS = 650f;
     /** How far off the current heading a point can be and still count as "ahead", so alerts
      *  behind or off to the side of the direction of travel are not announced as upcoming. */
     private static final float ALERT_AHEAD_TOLERANCE_DEGREES = 60f;
@@ -3200,9 +3205,10 @@ public class MainActivity extends Activity {
      *  warnings while stationary. */
     private boolean isAlertAheadAndRelevant(Location location, boolean movingNow, double alertLatitude, double alertLongitude) {
         if (!movingNow || location.hasAccuracy() && location.getAccuracy() > 45f) return false;
+        float triggerMeters = alertTriggerDistanceMeters(location);
         if (activeRoute != null && activeRoute.geometry != null && activeRoute.geometry.size() >= 2) {
             return navigationEngine.isPointAhead(alertLatitude, alertLongitude, -20d,
-                    ALERT_TRIGGER_RADIUS_METERS + 150d, 120f);
+                    triggerMeters + 150d, 120f);
         }
         Location alertLocation = new Location("route_alert_check");
         alertLocation.setLatitude(alertLatitude);
@@ -3214,6 +3220,12 @@ public class MainActivity extends Activity {
             if (headingDiff > ALERT_AHEAD_TOLERANCE_DEGREES) return false;
         }
         return true;
+    }
+
+    private float alertTriggerDistanceMeters(Location location) {
+        float kph = location != null && location.hasSpeed() ? location.getSpeed() * 3.6f : 35f;
+        float horizon = 180f + kph * 3.0f;
+        return Math.max(ALERT_MIN_TRIGGER_METERS, Math.min(ALERT_MAX_TRIGGER_METERS, horizon));
     }
 
     private static double angleDifferenceDegrees(float from, float to) {

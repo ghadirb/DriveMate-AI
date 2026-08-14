@@ -19,13 +19,8 @@ public class DrivingIntelligenceCoordinator {
     public interface Listener { void onText(String requestId, String text, boolean online); }
 
     private enum State { PENDING, RUNNING, FALLBACK, CANCELLED, READY }
-    private static final long FULL_MODE_SAFETY_WAIT_MS = 1500L;
-    /** Turn-by-turn directions are time-critical in a way conversational answers are not: the
-     *  perfectly good local instruction text is available instantly, so waiting up to 3 seconds
-     *  hoping the AI phrases it more naturally is a bad trade when turns come every few seconds in
-     *  a dense street network - the announcement can end up arriving late (after the turn) or get
-     *  pre-empted by the next instruction's own request before it was ever heard. */
-    private static final long FULL_MODE_DRIVING_WAIT_MS = 1200L;
+    private static final long FULL_MODE_SAFETY_WAIT_MS = 0L;
+    private static final long FULL_MODE_DRIVING_WAIT_MS = 0L;
     private static final long FULL_MODE_STANDARD_WAIT_MS = 3000L;
     private static final long ECONOMY_ONLINE_COOLDOWN_MS = 45_000L; // 45-60s suggested
     private static final long ECONOMY_ONLINE_WAIT_MS = 2_500L;
@@ -65,7 +60,13 @@ public class DrivingIntelligenceCoordinator {
             queue.add(request);
             startDrainLocked();
             if (mode == Mode.FULL && fallback != null && !fallback.trim().isEmpty()) {
-                timer.schedule(() -> fallbackAfterBudget(request.id), waitBudget(request.priority), TimeUnit.MILLISECONDS);
+                long budget = waitBudget(request.priority);
+                if (budget <= 0L && (request.priority == Priority.SAFETY || request.priority == Priority.DRIVING)) {
+                    request.state = State.FALLBACK;
+                    dispatch(request, fallback, false);
+                } else {
+                    timer.schedule(() -> fallbackAfterBudget(request.id), budget, TimeUnit.MILLISECONDS);
+                }
             } else if (economyOnlineAllowed && fallback != null && !fallback.trim().isEmpty()) {
                 timer.schedule(() -> fallbackAfterBudget(request.id), ECONOMY_ONLINE_WAIT_MS, TimeUnit.MILLISECONDS);
             }
