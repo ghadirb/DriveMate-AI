@@ -73,7 +73,7 @@ public class NavigationEngine {
     /** Modestly wider than the maneuver-advance radius: this is a one-shot check (no multi-sample
      *  confirmation, since a parked/stopped driver may only ever produce one fix inside it), so it
      *  needs its own buffer against GPS noise rather than sharing the tighter per-maneuver radius. */
-    private static final float FINAL_ARRIVAL_RADIUS_METERS = 55f;
+    private static final float FINAL_ARRIVAL_RADIUS_METERS = 100f;
 
     public void start(RouteResult route, Listener listener) {
         start(route, listener, null);
@@ -183,7 +183,10 @@ public class NavigationEngine {
         RouteStep destinationStep = route.steps.get(route.steps.size() - 1);
         float metersToDestination = location.distanceTo(finalDestination == null
                 ? asLocation(destinationStep) : asLocation(finalDestination));
-        if (accuracyOkFor(location, MAX_ACCURACY_FOR_ARRIVAL_METERS) && metersToDestination < FINAL_ARRIVAL_RADIUS_METERS) {
+        boolean destinationCloseEnough = metersToDestination <= FINAL_ARRIVAL_RADIUS_METERS
+                || (routeProgress != null && routeProgress.onRoute
+                && routeProgress.remainingMeters <= 120 && metersToDestination <= 140f);
+        if (accuracyOkFor(location, MAX_ACCURACY_FOR_ARRIVAL_METERS) && destinationCloseEnough) {
             finalArrivalConfirmSamples++;
         } else {
             finalArrivalConfirmSamples = 0;
@@ -319,7 +322,7 @@ public class NavigationEngine {
         // one bad network-location sample from repeatedly re-routing a driver on narrow streets.
         float routeDistance = routeProgress == null ? distanceToRoute(location) : routeProgress.distanceToRouteMeters;
         float movedFromReference = location.distanceTo(targetReference);
-        float corridorMeters = Math.max(80f, location.getAccuracy() * 2.5f);
+        float corridorMeters = Math.max(100f, location.getAccuracy() * 3.0f);
         if (routeDistance > corridorMeters && movedFromReference >= 25f) {
             offRouteSamples++;
             return offRouteSamples >= 3;
@@ -405,19 +408,27 @@ public class NavigationEngine {
             passedStepConfirmSamples = 0;
             return;
         }
-        RouteStep target = route.steps.get(nextStep);
-        if (target.waypointOrdinal >= 0 || Double.isNaN(stepProgressMeters[nextStep])
-                || routeProgress.progressMeters < stepProgressMeters[nextStep] + PASSED_STEP_BUFFER_METERS) {
+        int furthestNextStep = nextStep;
+        for (int index = nextStep; index < route.steps.size() - 1; index++) {
+            RouteStep step = route.steps.get(index);
+            if (step.waypointOrdinal >= 0 || index >= stepProgressMeters.length
+                    || Double.isNaN(stepProgressMeters[index])) break;
+            if (routeProgress.progressMeters >= stepProgressMeters[index] + PASSED_STEP_BUFFER_METERS) {
+                furthestNextStep = index + 1;
+            } else {
+                break;
+            }
+        }
+        if (furthestNextStep <= nextStep) {
             passedStepConfirmSamples = 0;
             return;
         }
         passedStepConfirmSamples++;
         if (passedStepConfirmSamples < STEP_ADVANCE_CONFIRM_SAMPLES) return;
         passedStepConfirmSamples = 0;
-        // Advance one maneuver per accepted GPS update. A mocked or delayed location stream can
-        // leap across several short city blocks; advancing them all in a loop skips every spoken
-        // left/right/roundabout instruction and leaves only the final generic message.
-        nextStep = Math.min(nextStep + 1, route.steps.size() - 1);
+        // Fake/delayed GPS can cross several maneuver endpoints at once. Synchronize to the first
+        // maneuver that is still ahead, then announce that actionable maneuver immediately.
+        nextStep = Math.min(furthestNextStep, route.steps.size() - 1);
         currentInstructionAnnounced = false;
         advanceConfirmSamples = 0;
         updateTargetReference(location);

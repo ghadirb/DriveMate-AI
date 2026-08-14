@@ -17,6 +17,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
+import java.util.ArrayDeque;
 
 /** GapGPT speech-to-text and text-to-speech client. All network calls run off the UI thread. */
 public class OnlineSpeechClient {
@@ -32,6 +33,8 @@ public class OnlineSpeechClient {
     private MediaPlayer player;
     private volatile String lastTtsProvider = "";
     private volatile String transcriptionHint = "";
+    private final ArrayDeque<SpeechRequest> speechQueue = new ArrayDeque<>();
+    private boolean speechSynthesisInFlight;
     /** Bumped by stopPlayback() so a speak() request still synthesizing on its background thread
      *  (the network round-trip can take a couple of seconds) can tell, once it returns, that it
      *  was superseded by a stop/mode-switch/newer announcement in the meantime and must not play
@@ -95,59 +98,73 @@ public class OnlineSpeechClient {
         speak(text, null);
     }
 
-    /** Uses gpt-4o-mini-tts first, then Gemini and tts-1 as online fallbacks. */
-    public void speak(String text, SpeechCallback callback) {
-        String key = gapKey();
-        if (key == null || text == null || text.trim().isEmpty()) {
+    /** Serializes online TTS requests so successive navigation messages cannot cut each other off. */
+    public synchronized void speak(String text, SpeechCallback callback) {
+        if (gapKey() == null || text == null || text.trim().isEmpty()) {
             if (callback != null) callback.onError();
             return;
         }
+        speechQueue.addLast(new SpeechRequest(text, callback));
+        drainSpeechQueue();
+    }
+
+    private synchronized void drainSpeechQueue() {
+        if (speechSynthesisInFlight || speechQueue.isEmpty()) return;
+        final SpeechRequest request = speechQueue.peekFirst();
         final int requestGeneration = playGeneration;
+        speechSynthesisInFlight = true;
         new Thread(() -> {
             try {
                 File output;
+                String key = gapKey();
                 try {
-                    output = synthesizeOpenAiTts(text, key, "gpt-4o-mini-tts", "answer-gpt4o-mini-tts.mp3");
+                    output = synthesizeOpenAiTts(request.text, key, "gpt-4o-mini-tts", "answer-gpt4o-mini-tts.mp3");
                     lastTtsProvider = "GapGPT gpt-4o-mini-tts";
-                    Log.i(TAG, "gpt-4o-mini-tts response ready");
                 } catch (Exception gptError) {
-                    Log.w(TAG, "gpt-4o-mini-tts failed; trying Gemini TTS", gptError);
                     try {
-                        output = synthesizeGeminiTts(text, key, true);
+                        output = synthesizeGeminiTts(request.text, key, true);
                         lastTtsProvider = "Gemini TTS";
-                        Log.i(TAG, "Gemini TTS response ready");
                     } catch (Exception documentedError) {
-                        Log.w(TAG, "Documented Gemini TTS request failed; trying compatible request", documentedError);
                         try {
-                            output = synthesizeGeminiTts(text, key, false);
+                            output = synthesizeGeminiTts(request.text, key, false);
                             lastTtsProvider = "Gemini TTS";
-                            Log.i(TAG, "Gemini TTS compatible response ready");
                         } catch (Exception compatibleError) {
-                            Log.w(TAG, "Gemini TTS unavailable; falling back to tts-1", compatibleError);
-                            output = synthesizeTts1(text, key);
+                            output = synthesizeTts1(request.text, key);
                             lastTtsProvider = "GapGPT tts-1";
                         }
                     }
                 }
                 final File playableOutput = output;
                 new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
-                    if (requestGeneration != playGeneration) {
-                        // stopPlayback() ran while this was synthesizing (stop pressed, mode
-                        // switched, or a newer announcement took over) - discard, don't play it.
-                        Log.i(TAG, "Discarding online TTS result superseded by a stop/newer request");
-                        if (callback != null) callback.onError();
-                        return;
-                    }
-                    if (play(playableOutput)) {
-                        if (callback != null) callback.onPlayed();
-                    } else {
-                        Log.w(TAG, "Downloaded online TTS audio could not be played");
-                        if (callback != null) callback.onError();
+                    synchronized (OnlineSpeechClient.this) {
+                        if (speechQueue.peekFirst() != request) return;
+                        if (requestGeneration != playGeneration) {
+                            speechQueue.removeFirst();
+                            speechSynthesisInFlight = false;
+                            if (request.callback != null) request.callback.onError();
+                            drainSpeechQueue();
+                            return;
+                        }
+                        speechQueue.removeFirst();
+                        boolean played = play(playableOutput);
+                        speechSynthesisInFlight = false;
+                        if (request.callback != null) {
+                            if (played) request.callback.onPlayed(); else request.callback.onError();
+                        }
+                        if (!played) drainSpeechQueue();
                     }
                 });
             } catch (Exception error) {
                 Log.e(TAG, "All online TTS providers failed", error);
-                notifySpeechError(callback);
+                new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                    synchronized (OnlineSpeechClient.this) {
+                        if (speechQueue.peekFirst() != request) return;
+                        speechQueue.removeFirst();
+                        speechSynthesisInFlight = false;
+                        if (request.callback != null) request.callback.onError();
+                        drainSpeechQueue();
+                    }
+                });
             }
         }).start();
     }
@@ -377,21 +394,55 @@ public class OnlineSpeechClient {
     }
 
     private boolean play(File file) {
-        stopPlayback();
         player = new MediaPlayer();
-        try { player.setDataSource(file.getAbsolutePath()); player.prepare(); player.start(); return true; }
-        catch (Exception ignored) { player.release(); player = null; return false; }
+        try {
+            player.setDataSource(file.getAbsolutePath());
+            player.prepare();
+            player.setOnCompletionListener(completed -> {
+                synchronized (OnlineSpeechClient.this) {
+                    try { completed.release(); } catch (Exception ignored) { }
+                    if (player == completed) player = null;
+                    drainSpeechQueue();
+                }
+            });
+            player.setOnErrorListener((mp, what, extra) -> {
+                synchronized (OnlineSpeechClient.this) {
+                    try { mp.release(); } catch (Exception ignored) { }
+                    if (player == mp) player = null;
+                    speechSynthesisInFlight = false;
+                    drainSpeechQueue();
+                }
+                return true;
+            });
+            player.start();
+            return true;
+        } catch (Exception ignored) {
+            try { player.release(); } catch (Exception ignoredToo) { }
+            player = null;
+            return false;
+        }
     }
 
     /** Must be called before a more important local alert so online speech cannot overlap it.
      *  Also invalidates any speak() request still synthesizing in the background so it won't
      *  start playing once it comes back (see playGeneration). */
-    public void stopPlayback() {
+    public synchronized void stopPlayback() {
         playGeneration++;
+        speechQueue.clear();
+        speechSynthesisInFlight = false;
         if (player != null) {
             try { player.stop(); } catch (IllegalStateException ignored) { }
-            player.release();
+            try { player.release(); } catch (Exception ignored) { }
             player = null;
+        }
+    }
+
+    private static final class SpeechRequest {
+        final String text;
+        final SpeechCallback callback;
+        SpeechRequest(String text, SpeechCallback callback) {
+            this.text = text;
+            this.callback = callback;
         }
     }
 

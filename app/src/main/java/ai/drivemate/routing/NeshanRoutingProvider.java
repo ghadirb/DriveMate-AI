@@ -128,7 +128,7 @@ public class NeshanRoutingProvider implements RoutingProvider {
                 double longitude = end != null ? end.optDouble("lng", Double.NaN)
                         : (start == null ? Double.NaN : start.optDouble(0, Double.NaN));
                 if (!Double.isNaN(latitude) && !Double.isNaN(longitude)) {
-                    steps.add(new RouteStep(latitude, longitude, step.optString("instruction"),
+                    steps.add(new RouteStep(latitude, longitude, persianInstruction(step),
                             stepDistance == null ? 0 : stepDistance.optInt("value"), parseLaneGuidance(step)));
                     int speedLimit = explicitSpeedLimit(step);
                     if (speedLimit > 0) speedLimits.add(new SpeedLimitPoint(latitude, longitude, speedLimit, name()));
@@ -170,6 +170,55 @@ public class NeshanRoutingProvider implements RoutingProvider {
             validForManeuver.add(lane.optBoolean("valid", false));
         }
         return indications.isEmpty() ? null : new LaneGuidance(indications, validForManeuver);
+    }
+
+    /** Normalize roundabout metadata before the generic provider instruction reaches voice guidance. */
+    private String persianInstruction(JSONObject step) {
+        String instruction = step.optString("instruction", "").trim();
+        JSONObject maneuver = step.optJSONObject("maneuver");
+        String type = step.optString("type", "").toLowerCase(java.util.Locale.ROOT);
+        String junctionType = step.optString("junctionType", "").toLowerCase(java.util.Locale.ROOT);
+        String maneuverType = step.optString("maneuverType", "").toLowerCase(java.util.Locale.ROOT);
+        if (maneuver != null) {
+            if (type.isEmpty()) type = maneuver.optString("type", "").toLowerCase(java.util.Locale.ROOT);
+            if (junctionType.isEmpty()) junctionType = maneuver.optString("junctionType", "").toLowerCase(java.util.Locale.ROOT);
+            if (maneuverType.isEmpty()) maneuverType = maneuver.optString("maneuver", "").toLowerCase(java.util.Locale.ROOT);
+        }
+        String road = step.optString("name", step.optString("streetName", "")).trim();
+        boolean roundabout = type.contains("roundabout") || type.contains("rotary")
+                || junctionType.contains("roundabout") || junctionType.contains("rotary")
+                || maneuverType.contains("roundabout") || maneuverType.contains("rotary")
+                || (road.contains("میدان") && (instruction.contains("راست") || instruction.contains("چپ")
+                || instruction.toLowerCase(java.util.Locale.ROOT).contains("right")
+                || instruction.toLowerCase(java.util.Locale.ROOT).contains("left")));
+        if (!roundabout) return instruction;
+        int exit = extractRoundaboutExit(step, maneuver);
+        if (exit > 0) return "وارد میدان شوید و از خروجی " + persianDigits(exit) + " خارج شوید";
+        return road.isEmpty() ? "وارد میدان شوید" : "در " + road + " وارد میدان شوید";
+    }
+
+    private int extractRoundaboutExit(JSONObject step, JSONObject maneuver) {
+        String[] keys = {"exit", "roundaboutExitNumber", "exitNumber", "roundabout_exit", "roundaboutExit"};
+        for (String key : keys) {
+            int value = step.optInt(key, 0);
+            if (value > 0 && value <= 20) return value;
+            if (maneuver != null) {
+                value = maneuver.optInt(key, 0);
+                if (value > 0 && value <= 20) return value;
+            }
+        }
+        return 0;
+    }
+
+    private static String persianDigits(int value) {
+        String latin = String.valueOf(value);
+        StringBuilder result = new StringBuilder(latin.length());
+        for (int index = 0; index < latin.length(); index++) {
+            char character = latin.charAt(index);
+            result.append(character >= '0' && character <= '9'
+                    ? (char) ('۰' + character - '0') : character);
+        }
+        return result.toString();
     }
 
     /** The documented Neshan response does not currently expose maxspeed. This parses only an

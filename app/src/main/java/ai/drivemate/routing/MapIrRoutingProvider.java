@@ -113,9 +113,20 @@ public class MapIrRoutingProvider implements RoutingProvider {
         // road data not tagging that junction as a roundabout at all - nothing to fix on our end -
         // or (b) a type/field value this method isn't recognizing, which would be. Cheap at debug
         // level; safe to leave in.
+        int roundaboutExit = extractRoundaboutExit(maneuver);
+        String junctionType = maneuver.optString("junctionType", "").toLowerCase(java.util.Locale.ROOT);
+        String maneuverCode = maneuver.optString("maneuver", "").toLowerCase(java.util.Locale.ROOT);
+        boolean roundabout = type.contains("roundabout") || type.contains("rotary")
+                || junctionType.contains("roundabout") || junctionType.contains("rotary")
+                || maneuverCode.contains("roundabout") || maneuverCode.contains("rotary")
+                || (road.contains("میدان") && ("turn".equals(type) || "end of road".equals(type) || "fork".equals(type)));
         android.util.Log.d("DriveMateManeuver", "type=" + type + " modifier=" + modifier
-                + " exit=" + maneuver.optInt("exit", maneuver.optInt("roundaboutExitNumber", -1))
-                + " road=" + road);
+                + " junctionType=" + junctionType + " maneuver=" + maneuverCode
+                + " exit=" + roundaboutExit + " road=" + road);
+        if (roundabout) {
+            if (roundaboutExit > 0) return "وارد میدان شوید و از خروجی " + persianDigits(roundaboutExit) + " خارج شوید";
+            return road.isEmpty() ? "وارد میدان شوید" : "در " + road + " وارد میدان شوید";
+        }
         if (type.isEmpty()) return explicit.isEmpty() ? "در مسیر ادامه دهید" : explicit;
         String instruction;
         if ("arrive".equals(type)) {
@@ -150,6 +161,24 @@ public class MapIrRoutingProvider implements RoutingProvider {
         }
         return road.isEmpty() || "به مقصد می‌رسید".equals(instruction)
                 ? instruction : instruction + " به سمت " + road;
+    }
+
+    private int extractRoundaboutExit(JSONObject maneuver) {
+        String[] keys = {"exit", "roundaboutExitNumber", "exitNumber", "roundabout_exit", "roundaboutExit"};
+        for (String key : keys) {
+            if (!maneuver.has(key)) continue;
+            int value = maneuver.optInt(key, 0);
+            if (value > 0 && value <= 20) return value;
+        }
+        JSONObject nested = maneuver.optJSONObject("maneuver");
+        if (nested != null) {
+            for (String key : keys) {
+                if (!nested.has(key)) continue;
+                int value = nested.optInt(key, 0);
+                if (value > 0 && value <= 20) return value;
+            }
+        }
+        return 0;
     }
 
     private String turnInstruction(String modifier, boolean endOfRoad) {
