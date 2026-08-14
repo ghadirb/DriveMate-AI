@@ -12,9 +12,10 @@ import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
 
-/** Serial, non-overlapping local guidance player. */
+/** Serial, non-overlapping local guidance player with safety priority and short-window dedupe. */
 public class VoiceGuidancePlayer {
     private static final String TAG = "DriveMateVoice";
+    private static final long DUPLICATE_WINDOW_MS = 20_000L;
     private static final Set<String> REAL_CLIPS = new HashSet<>(Arrays.asList(
             "alternative_route", "continue_route", "dangerous_curve_ahead", "danger_ahead", "delay_10_min",
             "destination_arrived", "fuel_station_1km", "fuel_station_5km", "heavy_traffic", "low_fuel_warning",
@@ -26,6 +27,10 @@ public class VoiceGuidancePlayer {
             "turn_right", "turn_right_100m", "turn_right_200m", "turn_right_300m", "turn_right_500m",
             "u_turn_100m", "u_turn_300m"
     ));
+    private static final Set<String> SAFETY_CLIPS = new HashSet<>(Arrays.asList(
+            "dangerous_curve_ahead", "danger_ahead", "speeding_danger", "speed_bump_warning",
+            "speed_camera", "sudden_stop_warning", "stop_ahead", "reduce_speed"
+    ));
 
     private final Context context;
     private final ArrayDeque<Item> queue = new ArrayDeque<>();
@@ -35,35 +40,51 @@ public class VoiceGuidancePlayer {
     private boolean ttsReady;
     private boolean ttsAvailable = true;
     private boolean playing;
+    private String lastGuidanceKey;
+    private long lastGuidanceAt;
 
     public VoiceGuidancePlayer(Context context) {
         this.context = context.getApplicationContext();
         textToSpeech = new TextToSpeech(this.context, status -> {
-            if (status != TextToSpeech.SUCCESS) {
-                ttsAvailable = false;
-                Log.w(TAG, "TextToSpeech engine could not be initialised on this device.");
+            synchronized (VoiceGuidancePlayer.this) {
+                if (status != TextToSpeech.SUCCESS) {
+                    ttsAvailable = false;
+                    Log.w(TAG, "TextToSpeech engine could not be initialised on this device.");
+                    drain();
+                    return;
+                }
+                int result = textToSpeech.setLanguage(new Locale("fa", "IR"));
+                if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    textToSpeech.setLanguage(Locale.getDefault());
+                    Log.w(TAG, "Persian TTS voice is unavailable; using the device default voice.");
+                }
+                textToSpeech.setSpeechRate(1.0f);
+                ttsReady = true;
                 drain();
-                return;
             }
-            int result = textToSpeech.setLanguage(new Locale("fa", "IR"));
-            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                textToSpeech.setLanguage(Locale.getDefault());
-                Log.w(TAG, "Persian TTS voice is unavailable; using the device default voice.");
-            }
-            textToSpeech.setSpeechRate(1.0f);
-            ttsReady = true;
-            drain();
         });
     }
 
     public synchronized boolean announce(String clipName, String fallbackText) {
         String resolved = resolveClipName(clipName);
         int resId = context.getResources().getIdentifier(resolved, "raw", context.getPackageName());
-        if (REAL_CLIPS.contains(resolved) && resId != 0) {
-            queue.addLast(Item.clip(resId, resolved));
-        } else if (fallbackText != null && !fallbackText.trim().isEmpty()) {
-            queue.addLast(Item.text(fallbackText));
-        } else return false;
+        boolean hasClip = REAL_CLIPS.contains(resolved) && resId != 0;
+        String key = hasClip ? "clip:" + resolved : "text:" + normalize(fallbackText);
+        if (isRecentDuplicate(key)) return false;
+
+        Item item;
+        if (hasClip) item = Item.clip(resId, resolved, isSafetyClip(resolved));
+        else if (fallbackText != null && !fallbackText.trim().isEmpty()) item = Item.text(fallbackText, false);
+        else return false;
+
+        if (item.priority) {
+            // Safety guidance is local and must not wait behind ordinary turn/TTS items.
+            removeNonSafetyQueuedItems();
+            queue.addFirst(item);
+        } else {
+            queue.addLast(item);
+        }
+        remember(key);
         drain();
         return true;
     }
@@ -72,13 +93,25 @@ public class VoiceGuidancePlayer {
         String resolved = resolveClipName(clipName);
         int resId = context.getResources().getIdentifier(resolved, "raw", context.getPackageName());
         if (!REAL_CLIPS.contains(resolved) || resId == 0) return;
-        queue.addLast(Item.clip(resId, resolved));
+        String key = "clip:" + resolved;
+        if (isRecentDuplicate(key)) return;
+        Item item = Item.clip(resId, resolved, isSafetyClip(resolved));
+        if (item.priority) {
+            removeNonSafetyQueuedItems();
+            queue.addFirst(item);
+        } else queue.addLast(item);
+        remember(key);
         drain();
     }
 
     public synchronized boolean speak(String text) {
         if (text == null || text.trim().isEmpty()) return false;
-        queue.addLast(Item.text(text));
+        String normalized = normalize(text);
+        if (normalized.isEmpty()) return false;
+        String key = "text:" + normalized;
+        if (isRecentDuplicate(key) || hasSimilarRecentText(normalized)) return false;
+        queue.addLast(Item.text(text, false));
+        remember(key);
         drain();
         return true;
     }
@@ -131,7 +164,14 @@ public class VoiceGuidancePlayer {
             }
             return true;
         });
-        player.start();
+        try {
+            player.start();
+        } catch (RuntimeException e) {
+            try { player.release(); } catch (Exception ignored) { }
+            player = null;
+            playing = false;
+            return false;
+        }
         return true;
     }
 
@@ -144,7 +184,6 @@ public class VoiceGuidancePlayer {
             @Override public void onDone(String id) { finishTts(); }
             @Override public void onError(String id) { finishTts(); }
         });
-        // The app owns the queue, so never flush a currently playing warning.
         int result = textToSpeech.speak(text, TextToSpeech.QUEUE_ADD, null, utteranceId);
         if (result != TextToSpeech.SUCCESS) {
             playing = false;
@@ -158,6 +197,45 @@ public class VoiceGuidancePlayer {
             playing = false;
             drain();
         }
+    }
+
+    private boolean isSafetyClip(String clip) { return SAFETY_CLIPS.contains(clip); }
+
+    private void removeNonSafetyQueuedItems() {
+        if (queue.isEmpty()) return;
+        ArrayDeque<Item> kept = new ArrayDeque<>();
+        for (Item item : queue) if (item.priority) kept.addLast(item);
+        queue.clear();
+        queue.addAll(kept);
+    }
+
+    private boolean isRecentDuplicate(String key) {
+        return key != null && key.equals(lastGuidanceKey)
+                && System.currentTimeMillis() - lastGuidanceAt <= DUPLICATE_WINDOW_MS;
+    }
+
+    private void remember(String key) {
+        lastGuidanceKey = key;
+        lastGuidanceAt = System.currentTimeMillis();
+    }
+
+    private boolean hasSimilarRecentText(String normalized) {
+        if (lastGuidanceKey == null || !lastGuidanceKey.startsWith("text:")
+                || System.currentTimeMillis() - lastGuidanceAt > DUPLICATE_WINDOW_MS) return false;
+        String previous = lastGuidanceKey.substring(5);
+        if (previous.equals(normalized)) return true;
+        String[] a = previous.split(" ");
+        String[] b = normalized.split(" ");
+        if (a.length < 3 || b.length < 3) return false;
+        int common = 0;
+        for (String x : a) for (String y : b) if (x.equals(y) && x.length() >= 3) { common++; break; }
+        return common >= Math.max(3, Math.min(a.length, b.length) * 2 / 3);
+    }
+
+    private String normalize(String text) {
+        if (text == null) return "";
+        return text.replace('\u200c', ' ').replace('\u064a', '\u06cc').replace('\u0643', '\u06a9')
+                .replaceAll("\\s+", " ").trim().toLowerCase(Locale.ROOT);
     }
 
     public synchronized void increaseVolume() { volume = Math.min(1f, volume + 0.15f); }
@@ -193,12 +271,14 @@ public class VoiceGuidancePlayer {
         final int clipResId;
         final String label;
         final String text;
-        private Item(int clipResId, String label, String text) {
+        final boolean priority;
+        private Item(int clipResId, String label, String text, boolean priority) {
             this.clipResId = clipResId;
             this.label = label;
             this.text = text;
+            this.priority = priority;
         }
-        static Item clip(int resId, String label) { return new Item(resId, label, null); }
-        static Item text(String text) { return new Item(0, null, text); }
+        static Item clip(int resId, String label, boolean priority) { return new Item(resId, label, null, priority); }
+        static Item text(String text, boolean priority) { return new Item(0, null, text, priority); }
     }
 }
