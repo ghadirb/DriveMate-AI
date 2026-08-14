@@ -1,0 +1,31 @@
+name: one-shot navigation regression repair
+
+on:
+  push:
+    paths:
+      - 'tools/repair_navigation_regressions.py'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch navigation regressions
+        run: python3 tools/repair_navigation_regressions.py
+      - name: Verify Java syntax anchors
+        run: |
+          grep -q 'Safety is deterministic and local-first' app/src/main/java/ai/drivemate/MainActivity.java
+          grep -q 'startPersonalRouteNavigation' app/src/main/java/ai/drivemate/MainActivity.java
+      - name: Commit repair
+        run: |
+          git config user.name 'DriveMate AI'
+          git config user.email 'ghadir.baraty@gmail.com'
+          git add app/src/main/java/ai/drivemate/MainActivity.java
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix: restore deterministic voice and personal route navigation'
+          git push
