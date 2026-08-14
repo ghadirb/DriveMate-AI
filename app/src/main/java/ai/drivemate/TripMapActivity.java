@@ -6,6 +6,7 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import java.util.ArrayList;
+import java.util.List;
 
 import ai.drivemate.map.LatLng;
 import ai.drivemate.map.Marker;
@@ -47,26 +48,26 @@ public final class TripMapActivity extends Activity {
             return;
         }
 
+        final List<RoutePoint> path = new ArrayList<>(record.traveledPath);
         ArrayList<LatLng> points = new ArrayList<>();
-        for (RoutePoint p : record.traveledPath) points.add(new LatLng(p.latitude, p.longitude));
+        for (RoutePoint p : path) points.add(new LatLng(p.latitude, p.longitude));
         map.addPolyline(new Polyline(points, true));
         map.addMarker(new Marker(new LatLng(record.originLatitude, record.originLongitude), null));
         map.addMarker(new Marker(new LatLng(record.destinationLatitude, record.destinationLongitude), null));
-        RoutePoint first = record.traveledPath.get(0);
+        RoutePoint first = path.get(0);
         map.moveCamera(new LatLng(first.latitude, first.longitude), 0);
         map.setZoom(15f, 0);
         try {
             org.osmdroid.util.GeoPoint center = new org.osmdroid.util.GeoPoint(first.latitude, first.longitude);
             map.getController().setCenter(center);
             map.postDelayed(() -> map.zoomToBoundingBox(new org.osmdroid.util.BoundingBox(
-                    maxLat(record.traveledPath), maxLon(record.traveledPath),
-                    minLat(record.traveledPath), minLon(record.traveledPath)), true, dp(40)), 250);
+                    maxLat(path), maxLon(path), minLat(path), minLon(path)), true, dp(40)), 250);
         } catch (Exception ignored) { }
     }
 
-    private double minLat(java.util.List<RoutePoint> p) { double v = Double.MAX_VALUE; for (RoutePoint x : p) v = Math.min(v, x.latitude); return v; }
-    private double maxLat(java.util.List<RoutePoint> p) { double v = -Double.MAX_VALUE; for (RoutePoint x : p) v = Math.max(v, x.latitude); return v; }
-    private double minLon(java.util.List<RoutePoint> p) { double v = Double.MAX_VALUE; for (RoutePoint x : p) v = Math.min(v, x.longitude); return v; }
-    private double maxLon(java.util.List<RoutePoint> p) { double v = -Double.MAX_VALUE; for (RoutePoint x : p) v = Math.max(v, x.longitude); return v; }
+    private double minLat(List<RoutePoint> p) { double v = Double.MAX_VALUE; for (RoutePoint x : p) v = Math.min(v, x.latitude); return v; }
+    private double maxLat(List<RoutePoint> p) { double v = -Double.MAX_VALUE; for (RoutePoint x : p) v = Math.max(v, x.latitude); return v; }
+    private double minLon(List<RoutePoint> p) { double v = Double.MAX_VALUE; for (RoutePoint x : p) v = Math.min(v, x.longitude); return v; }
+    private double maxLon(List<RoutePoint> p) { double v = -Double.MAX_VALUE; for (RoutePoint x : p) v = Math.max(v, x.longitude); return v; }
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
 }
