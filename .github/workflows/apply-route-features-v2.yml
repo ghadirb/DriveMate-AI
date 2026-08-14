@@ -1,4 +1,4 @@
-name: Verified navigation hardening
+name: Apply route features v2
 
 on:
   push:
@@ -8,13 +8,11 @@ permissions:
   contents: write
 
 jobs:
-  harden-build-commit:
-    if: "!contains(github.event.head_commit.message, '[navigation-final]')"
+  apply:
+    if: "!contains(github.event.head_commit.message, '[route-features]')"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -24,79 +22,27 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Apply navigation hardening
-        shell: python
+      - name: Extract and apply implementation script
         run: |
+          python3 - <<'PY'
           from pathlib import Path
-          p = Path('app/src/main/java/ai/drivemate/MainActivity.java')
-          s = p.read_text(encoding='utf-8')
-          s = s.replace('        promptEnableLocationIfNeeded();\n', '')
-          old = '''            long now = System.currentTimeMillis();
-            while (!pendingDrivingAnnouncements.isEmpty()) {
-                DrivingAnnouncement pending = pendingDrivingAnnouncements.pollFirst();
-                if (pending != null && pending.expiresAt >= now) playDrivingAnnouncement(pending);
-            }
-            return;'''
-          new = '''            long now = System.currentTimeMillis();
-            while (!pendingDrivingAnnouncements.isEmpty()) {
-                DrivingAnnouncement pending = pendingDrivingAnnouncements.pollFirst();
-                if (pending != null && pending.expiresAt >= now) {
-                    playDrivingAnnouncement(pending);
-                    break;
-                }
-            }
-            return;'''
-          if old not in s: raise SystemExit('voice queue block not found')
-          s = s.replace(old, new, 1)
-          old = '''    protected void onResume() {
-        super.onResume();
-        maybeShowPendingTripReport();
-        if (NightModeManager.refreshIfChanged(this)) return;
-        NightModeManager.applyWindowBrightness(this);
-    }'''
-          new = '''    protected void onResume() {
-        super.onResume();
-        maybeShowPendingTripReport();
-        if (pendingNavigationDestination != null && locationTracker != null
-                && locationTracker.isLocationEnabled()) {
-            SavedPlace destination = pendingNavigationDestination;
-            List<RoutePoint> waypoints = pendingNavigationWaypoints == null
-                    ? new ArrayList<>() : new ArrayList<>(pendingNavigationWaypoints);
-            pendingNavigationDestination = null;
-            pendingNavigationWaypoints = null;
-            startNavigation(destination, waypoints, false);
-        }
-        if (NightModeManager.refreshIfChanged(this)) return;
-        NightModeManager.applyWindowBrightness(this);
-    }'''
-          if old not in s: raise SystemExit('onResume block not found')
-          s = s.replace(old, new, 1)
-          old = '''                .setMessage("برای مسیریابی به \\\"" + destination.name + "\\\" باید مکان/GPS گوشی روشن باشد. "
-                        + "به محض روشن شدن، مسیریابی به‌طور خودکار شروع می‌شود.")
-                .setPositiveButton("روشن کردن GPS", (d, w) -> startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)))'''
-          new = '''                .setMessage("برای مسیریابی به \\\"" + destination.name + "\\\" باید مکان گوشی روشن باشد. "
-                        + "با زدن «فعال کردن موقعیت»، تنظیمات استاندارد Android باز می‌شود. "
-                        + "بعد از روشن کردن موقعیت و بازگشت به برنامه، مسیریابی خودکار ادامه پیدا می‌کند.")
-                .setPositiveButton("فعال کردن موقعیت", (d, w) -> startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)))'''
-          if old not in s: raise SystemExit('location dialog block not found')
-          s = s.replace(old, new, 1)
-          p.write_text(s, encoding='utf-8')
-          t = Path('app/src/test/java/ai/drivemate/traffic/TrafficIncidentProviderContractTest.java')
-          t.parent.mkdir(parents=True, exist_ok=True)
-          t.write_text('''package ai.drivemate.traffic;\n\nimport org.junit.Test;\nimport static org.junit.Assert.*;\n\npublic class TrafficIncidentProviderContractTest {\n    @Test public void providerDoesNotRequireAnApiKey() {\n        TrafficIncidentProvider provider = new TrafficIncidentProvider(\"\");\n        assertTrue(provider.hasKey());\n        provider.setApiKey(\"ignored\");\n        provider.setEnabled(false);\n        assertTrue(provider.hasKey());\n    }\n}\n''', encoding='utf-8')
-          import subprocess
-          subprocess.run(['git','diff','--check'], check=True)
-      - name: Build debug APK
+          source = Path('.github/workflows/apply-route-features.yml').read_text(encoding='utf-8')
+          start = source.index("          python3 <<'PY'\n") + len("          python3 <<'PY'\n")
+          end = source.index("          PY\n", start)
+          script = source[start:end]
+          Path('/tmp/apply_route_features.py').write_text(script, encoding='utf-8')
+          PY
+          python3 /tmp/apply_route_features.py
+      - name: Build after implementation
         env:
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           OPENWEATHERMAP_API_KEY: ${{ secrets.OPENWEATHERMAP_API_KEY }}
           KEYS_DECRYPTION_SECRET: ${{ secrets.KEYS_DECRYPTION_SECRET }}
         run: gradle assembleDebug --stacktrace
-      - name: Commit verified source and remove temporary workflow
+      - name: Commit implementation
         run: |
           git config user.name 'DriveMate AI'
           git config user.email 'ghadir.baraty@gmail.com'
-          git rm -f .github/workflows/apply-route-features-v2.yml
-          git add app/src/main/java/ai/drivemate/MainActivity.java app/src/test/java/ai/drivemate/traffic/TrafficIncidentProviderContractTest.java
-          git commit -m 'fix: harden navigation voice and location UX [navigation-final]'
-          git push origin main
+          git add app/src/main/java/ai/drivemate app/src/main/res/layout/activity_main.xml app/src/main/AndroidManifest.xml
+          git commit -m 'feat: add custom routes and traveled trip maps [route-features]'
+          git push
