@@ -54,7 +54,9 @@ public final class PersonalRouteActivity extends Activity {
         locationTracker = new DeviceLocationTracker(this);
         locationTracker.setUpdateListener(new DeviceLocationTracker.UpdateListener() {
             @Override public void onLocationUpdate(Location location) {
-                showMyLocation(location, true);
+                // Keep the live location marker updated, but DO NOT recenter the map on every GPS update.
+                // The user must be able to pan/zoom and place manual route points freely.
+                showMyLocation(location, false);
                 if (pendingNavigationRoute != null && locationTracker.isLocationEnabled()) {
                     PersonalRoute route = pendingNavigationRoute;
                     pendingNavigationRoute = null;
@@ -62,7 +64,7 @@ public final class PersonalRouteActivity extends Activity {
                 }
             }
             @Override public void onLocationAvailabilityChanged(boolean available) {
-                if (!available) showLocationDisabledDialog(false);
+                if (!available && pendingNavigationRoute != null) showLocationDisabledDialog(false);
             }
         });
         renderSavedRoutes();
@@ -74,7 +76,6 @@ public final class PersonalRouteActivity extends Activity {
         if (map != null) map.onResume();
         if (locationTracker != null && hasLocationPermission()) {
             if (!locationTracker.isLocationEnabled()) {
-                // Do not nag on every resume; only act when a route is waiting or the user taps the button.
                 if (pendingNavigationRoute != null) showLocationDisabledDialog(false);
             } else {
                 locationTracker.start();
@@ -165,6 +166,7 @@ public final class PersonalRouteActivity extends Activity {
         }
         Location location = locationTracker.getLastLocation();
         if (location != null) {
+            // Explicit user action: this is the ONLY place that recenters the editor map.
             showMyLocation(location, true);
         } else {
             draftInfo.setText("در حال دریافت موقعیت فعلی شما…");
@@ -183,9 +185,7 @@ public final class PersonalRouteActivity extends Activity {
 
     private void showLocationDisabledDialog(boolean fromButton) {
         String message = "موقعیت مکانی (GPS/Location) دستگاه خاموش است. برای نمایش موقعیت شما و شروع مسیریابی مسیر شخصی، Location را فعال کنید.";
-        new AlertDialog.Builder(this)
-                .setTitle("موقعیت مکانی خاموش است")
-                .setMessage(message)
+        new AlertDialog.Builder(this).setTitle("موقعیت مکانی خاموش است").setMessage(message)
                 .setNegativeButton("بعداً", null)
                 .setPositiveButton("فعال کردن موقعیت", (d, w) -> {
                     try { startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)); }
@@ -277,14 +277,8 @@ public final class PersonalRouteActivity extends Activity {
     private void startRoute(PersonalRoute r) {
         if (r.points.size() < 2) { Toast.makeText(this, "این مسیر نقطه کافی برای مسیریابی ندارد.", Toast.LENGTH_SHORT).show(); return; }
         pendingNavigationRoute = r;
-        if (!hasLocationPermission()) {
-            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION}, REQUEST_LOCATION);
-            return;
-        }
-        if (!locationTracker.isLocationEnabled()) {
-            showLocationDisabledDialog(false);
-            return;
-        }
+        if (!hasLocationPermission()) { requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION}, REQUEST_LOCATION); return; }
+        if (!locationTracker.isLocationEnabled()) { showLocationDisabledDialog(false); return; }
         startRouteNow(r);
     }
 
@@ -299,7 +293,7 @@ public final class PersonalRouteActivity extends Activity {
             i.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
             startActivity(i);
         } catch (org.json.JSONException e) {
-            Toast.makeText(this, "مسیر شخصی برای مسیریابی قابل خواندن نیست.", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "ذخیره مسیر برای مسیریابی قابل خواندن نیست.", Toast.LENGTH_LONG).show();
         }
     }
 
