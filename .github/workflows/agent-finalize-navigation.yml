@@ -1,0 +1,108 @@
+name: Apply final navigation fixes
+
+on:
+  push:
+    branches: [ agent/final-navigation-traffic-voice-location ]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply targeted fixes
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path("app/src/main/java/ai/drivemate/MainActivity.java")
+          s = p.read_text()
+
+          # Do not surprise the user by opening Android Location Settings on app launch.
+          # Location is requested at the moment it is actually needed (e.g. navigation).
+          s = s.replace('        promptEnableLocationIfNeeded();\n', '')
+
+          # A safety announcement must not be followed by a burst of normal announcements.
+          # The previous loop called playDrivingAnnouncement repeatedly while the first item was
+          # still marked as playing, allowing the last queued item to overwrite earlier guidance.
+          old = '''            long now = System.currentTimeMillis();
+            while (!pendingDrivingAnnouncements.isEmpty()) {
+                DrivingAnnouncement pending = pendingDrivingAnnouncements.pollFirst();
+                if (pending != null && pending.expiresAt >= now) playDrivingAnnouncement(pending);
+            }
+            return;'''
+          new = '''            long now = System.currentTimeMillis();
+            while (!pendingDrivingAnnouncements.isEmpty()) {
+                DrivingAnnouncement pending = pendingDrivingAnnouncements.pollFirst();
+                if (pending != null && pending.expiresAt >= now) {
+                    playDrivingAnnouncement(pending);
+                    break;
+                }
+            }
+            return;'''
+          if old not in s:
+              raise SystemExit('Expected safety announcement drain block not found')
+          s = s.replace(old, new, 1)
+
+          # Returning from Android Location Settings does not guarantee an immediate location
+          # callback. Re-check pending navigation onResume so the trip starts without requiring a
+          # second tap, while still requiring explicit user action to open Settings.
+          old = '''    protected void onResume() {
+        super.onResume();
+        maybeShowPendingTripReport();
+        if (NightModeManager.refreshIfChanged(this)) return;
+        NightModeManager.applyWindowBrightness(this);
+    }'''
+          new = '''    protected void onResume() {
+        super.onResume();
+        maybeShowPendingTripReport();
+        if (pendingNavigationDestination != null && locationTracker != null
+                && locationTracker.isLocationEnabled()) {
+            SavedPlace destination = pendingNavigationDestination;
+            List<RoutePoint> waypoints = pendingNavigationWaypoints == null
+                    ? new ArrayList<>() : new ArrayList<>(pendingNavigationWaypoints);
+            pendingNavigationDestination = null;
+            pendingNavigationWaypoints = null;
+            startNavigation(destination, waypoints, false);
+        }
+        if (NightModeManager.refreshIfChanged(this)) return;
+        NightModeManager.applyWindowBrightness(this);
+    }'''
+          if old not in s:
+              raise SystemExit('Expected onResume block not found')
+          s = s.replace(old, new, 1)
+
+          # The navigation-specific dialog is already user initiated. Make its wording explicit:
+          # DriveMate cannot toggle Android's protected Location switch itself; the user chooses
+          # the system setting after tapping the button, then DriveMate resumes automatically.
+          old = '''                .setMessage("برای مسیریابی به \\\"" + destination.name + "\\\" باید مکان/GPS گوشی روشن باشد. "
+                        + "به محض روشن شدن، مسیریابی به‌طور خودکار شروع می‌شود.")
+                .setPositiveButton("روشن کردن GPS", (d, w) -> startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)))'''
+          new = '''                .setMessage("برای مسیریابی به \\\"" + destination.name + "\\\" باید مکان گوشی روشن باشد. "
+                        + "با زدن «فعال کردن موقعیت»، تنظیمات استاندارد Android باز می‌شود. "
+                        + "بعد از روشن کردن موقعیت و بازگشت به برنامه، مسیریابی خودکار ادامه پیدا می‌کند.")
+                .setPositiveButton("فعال کردن موقعیت", (d, w) -> startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)))'''
+          if old not in s:
+              raise SystemExit('Expected navigation location dialog block not found')
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+
+          # Add a small deterministic utility regression test for the traffic provider's public
+          # contract without requiring an Android device.
+          t = Path("app/src/test/java/ai/drivemate/traffic/TrafficIncidentProviderContractTest.java")
+          t.parent.mkdir(parents=True, exist_ok=True)
+          t.write_text('''package ai.drivemate.traffic;\n\nimport org.junit.Test;\nimport static org.junit.Assert.*;\n\n/** Regression checks for the keyless public Iran traffic provider contract. */\npublic class TrafficIncidentProviderContractTest {\n    @Test public void providerDoesNotRequireAnApiKey() {\n        TrafficIncidentProvider provider = new TrafficIncidentProvider(\"\");\n        assertTrue(provider.hasKey());\n        provider.setApiKey(\"ignored\");\n        provider.setEnabled(false);\n        assertTrue(provider.hasKey());\n    }\n}\n''')
+
+      - name: Validate diff
+        run: git diff --check
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/ai/drivemate/MainActivity.java app/src/test/java/ai/drivemate/traffic/TrafficIncidentProviderContractTest.java .github/workflows/agent-finalize-navigation.yml
+          git commit -m "Harden navigation voice and location UX"
+          git push
