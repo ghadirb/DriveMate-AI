@@ -1,6 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Navigation is a user-initiated, ongoing foreground-service use case. On Android versions
+         that enforce background-location access for a foreground service, this permission keeps
+         the location stream alive after the Activity is backgrounded. The app must still request
+         it through Android's permission UI; declaring it never enables location silently. -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -49,7 +54,7 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
-            <activity android:name=".PersonalRouteActivity" android:exported="false" />
+        <activity android:name=".PersonalRouteActivity" android:exported="false" />
         <activity android:name=".TripMapActivity" android:exported="false" />
-</application>
+    </application>
 </manifest>
