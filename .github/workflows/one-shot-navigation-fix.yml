@@ -9,6 +9,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
       - name: Patch navigation timing and traffic refresh
         run: |
           python3 - <<'PY'
@@ -16,50 +25,50 @@ jobs:
           p=Path('app/src/main/java/ai/drivemate/MainActivity.java')
           s=p.read_text()
           old='''    private void scheduleTrafficCheck() {\n        voiceHandler.removeCallbacks(trafficCheck);\n        // Version 1 keeps the active route until confirmed off-route navigation requests a reroute.\n        // This avoids periodic paid route requests while GPS and local route progress continue normally.\n    }'''
-          new='''    private void scheduleTrafficCheck() {\n        voiceHandler.removeCallbacks(trafficCheck);\n        if (!navigationEngine.isNavigating() || activeDestination == null) return;\n        // Re-check live traffic periodically during an active trip. The bounded cadence avoids\n        // hammering routing providers while still allowing a materially faster route to be found.\n        voiceHandler.postDelayed(trafficCheck, TRAFFIC_CHECK_INTERVAL_MS);\n    }'''
-          assert old in s, 'scheduleTrafficCheck block not found'
+          new='''    private void scheduleTrafficCheck() {\n        voiceHandler.removeCallbacks(trafficCheck);\n        if (!navigationEngine.isNavigating() || activeDestination == null) return;\n        voiceHandler.postDelayed(trafficCheck, TRAFFIC_CHECK_INTERVAL_MS);\n    }'''
+          assert old in s
           s=s.replace(old,new)
           old='''                    if (materiallyFaster) {\n                        setStatus("برآورد ترافیک نشان: مسیر فعلی حدود "\n                                + Math.max(1, gainSeconds / 60) + " دقیقه زمان بیشتری دارد.");\n                    }'''
           new='''                    if (materiallyFaster && !rerouteInFlight) {\n                        replaceRouteForTraffic(route, destination, gainSeconds);\n                        return;\n                    }'''
-          assert old in s, 'traffic replacement block not found'
+          assert old in s
           s=s.replace(old,new)
           old='''    private void scheduleTrafficIncidentCheck() {\n        voiceHandler.removeCallbacks(trafficIncidentCheck);\n        // A live incident snapshot is fetched once for a newly calculated route. Repeating this\n        // request every few minutes adds key usage without changing turn-by-turn GPS guidance.\n    }'''
-          new='''    private void scheduleTrafficIncidentCheck() {\n        voiceHandler.removeCallbacks(trafficIncidentCheck);\n        if (!navigationEngine.isNavigating() || activeRoute == null || !trafficIncidentProvider.hasKey()) return;\n        // Refresh live incidents while driving; incidents can appear or clear without a reroute.\n        voiceHandler.postDelayed(trafficIncidentCheck, TRAFFIC_INCIDENT_CHECK_INTERVAL_MS);\n    }'''
-          assert old in s, 'incident schedule block not found'
+          new='''    private void scheduleTrafficIncidentCheck() {\n        voiceHandler.removeCallbacks(trafficIncidentCheck);\n        if (!navigationEngine.isNavigating() || activeRoute == null || !trafficIncidentProvider.hasKey()) return;\n        voiceHandler.postDelayed(trafficIncidentCheck, TRAFFIC_INCIDENT_CHECK_INTERVAL_MS);\n    }'''
+          assert old in s
           s=s.replace(old,new)
           old='''            float meters = location.distanceTo(incidentLocation);\n            if (meters > 700f) continue;\n            announcedTrafficIncidentIds.add(incident.id);'''
           new='''            float meters = location.distanceTo(incidentLocation);\n            if (meters > 700f) continue;\n            boolean ahead = isAlertAheadAndRelevant(location, isCurrentlyMoving(location),\n                    incident.latitude, incident.longitude);\n            if (!ahead) continue;\n            announcedTrafficIncidentIds.add(incident.id);'''
-          assert old in s, 'incident proximity block not found'
+          assert old in s
           s=s.replace(old,new)
           old='''    private static final float ALERT_TRIGGER_RADIUS_METERS = 350f;'''
           new='''    private static final float ALERT_TRIGGER_RADIUS_METERS = 350f;\n    private static final float ALERT_MIN_TRIGGER_METERS = 220f;\n    private static final float ALERT_MAX_TRIGGER_METERS = 650f;'''
-          assert old in s, 'alert constants not found'
+          assert old in s
           s=s.replace(old,new)
           old='''    private boolean isAlertAheadAndRelevant(Location location, boolean movingNow, double alertLatitude, double alertLongitude) {\n        if (!movingNow || location.hasAccuracy() && location.getAccuracy() > 45f) return false;\n        if (activeRoute != null && activeRoute.geometry != null && activeRoute.geometry.size() >= 2) {\n            return navigationEngine.isPointAhead(alertLatitude, alertLongitude, -20d,\n                    ALERT_TRIGGER_RADIUS_METERS + 150d, 120f);\n        }'''
           new='''    private boolean isAlertAheadAndRelevant(Location location, boolean movingNow, double alertLatitude, double alertLongitude) {\n        if (!movingNow || location.hasAccuracy() && location.getAccuracy() > 45f) return false;\n        float triggerMeters = alertTriggerDistanceMeters(location);\n        if (activeRoute != null && activeRoute.geometry != null && activeRoute.geometry.size() >= 2) {\n            return navigationEngine.isPointAhead(alertLatitude, alertLongitude, -20d,\n                    triggerMeters + 150d, 120f);\n        }'''
-          assert old in s, 'ahead gate block not found'
+          assert old in s
           s=s.replace(old,new)
           old='''        return true;\n    }\n\n    private static double angleDifferenceDegrees'''
-          new='''        return true;\n    }\n\n    /** Speed-aware alert horizon: at higher speeds the driver needs more warning distance, while\n     * slow urban driving keeps alerts close enough to avoid premature announcements. */\n    private float alertTriggerDistanceMeters(Location location) {\n        float kph = location != null && location.hasSpeed() ? location.getSpeed() * 3.6f : 35f;\n        float horizon = 180f + kph * 3.0f;\n        return Math.max(ALERT_MIN_TRIGGER_METERS, Math.min(ALERT_MAX_TRIGGER_METERS, horizon));\n    }\n\n    private static double angleDifferenceDegrees'''
-          assert old in s, 'alert horizon insertion point not found'
+          new='''        return true;\n    }\n\n    private float alertTriggerDistanceMeters(Location location) {\n        float kph = location != null && location.hasSpeed() ? location.getSpeed() * 3.6f : 35f;\n        float horizon = 180f + kph * 3.0f;\n        return Math.max(ALERT_MIN_TRIGGER_METERS, Math.min(ALERT_MAX_TRIGGER_METERS, horizon));\n    }\n\n    private static double angleDifferenceDegrees'''
+          assert old in s
           s=s.replace(old,new)
           p.write_text(s)
 
           p=Path('app/src/main/java/ai/drivemate/ai/DrivingIntelligenceCoordinator.java')
           s=p.read_text()
           old='''    private static final long FULL_MODE_SAFETY_WAIT_MS = 1500L;\n    /** Turn-by-turn directions are time-critical in a way conversational answers are not: the\n     *  perfectly good local instruction text is available instantly, so waiting up to 3 seconds\n     *  hoping the AI phrases it more naturally is a bad trade when turns come every few seconds in\n     *  a dense street network - the announcement can end up arriving late (after the turn) or get\n     *  pre-empted by the next instruction's own request before it was ever heard. */\n    private static final long FULL_MODE_DRIVING_WAIT_MS = 1200L;'''
-          new='''    // Safety and turn-by-turn audio are never allowed to wait for AI/network generation. The\n    // local fallback is authoritative for time-critical driving events; AI may still be used for\n    // non-critical conversation and prefetching.\n    private static final long FULL_MODE_SAFETY_WAIT_MS = 0L;\n    private static final long FULL_MODE_DRIVING_WAIT_MS = 0L;'''
-          assert old in s, 'coordinator timing block not found'
+          new='''    private static final long FULL_MODE_SAFETY_WAIT_MS = 0L;\n    private static final long FULL_MODE_DRIVING_WAIT_MS = 0L;'''
+          assert old in s
           s=s.replace(old,new)
           old='''            if (mode == Mode.FULL && fallback != null && !fallback.trim().isEmpty()) {\n                timer.schedule(() -> fallbackAfterBudget(request.id), waitBudget(request.priority), TimeUnit.MILLISECONDS);'''
           new='''            if (mode == Mode.FULL && fallback != null && !fallback.trim().isEmpty()) {\n                long budget = waitBudget(request.priority);\n                if (budget <= 0L && (request.priority == Priority.SAFETY || request.priority == Priority.DRIVING)) {\n                    request.state = State.FALLBACK;\n                    dispatch(request, fallback, false);\n                } else {\n                    timer.schedule(() -> fallbackAfterBudget(request.id), budget, TimeUnit.MILLISECONDS);\n                }'''
-          assert old in s, 'coordinator scheduling block not found'
+          assert old in s
           s=s.replace(old,new)
           p.write_text(s)
           PY
       - name: Verify and commit
         run: |
-          ./gradlew test --no-daemon
+          gradle test --no-daemon
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add app/src/main/java/ai/drivemate/MainActivity.java app/src/main/java/ai/drivemate/ai/DrivingIntelligenceCoordinator.java
@@ -67,6 +76,6 @@ jobs:
           git push
       - name: Remove one-shot workflow
         run: |
-          git rm .github/workflows/one-shot-navigation-fix.yml
+          git rm .github/workflows/one-shot-navigation-fix.yml NAVIGATION_FIX_TRIGGER.txt
           git commit -m 'Remove one-shot navigation repair workflow'
           git push
