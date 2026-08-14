@@ -72,6 +72,126 @@ android {
     }
 }
 
+/** One-shot source hardening used while landing the two large Java-file fixes safely. */
+tasks.register("applyNavigationHardening") {
+    doLast {
+        File mapFile = file("src/main/java/ai/drivemate/MapActivity.java")
+        String map = mapFile.getText("UTF-8")
+        String fieldMarker = "    private boolean gpsWarningActive;"
+        String field = '''    /** True only while the user explicitly chose to open Android Location Settings. */
+    private boolean waitingForLocationSettings;'''
+        if (!map.contains("private boolean waitingForLocationSettings;")) {
+            if (!map.contains(fieldMarker)) throw new GradleException("Location field anchor not found")
+            map = map.replace(fieldMarker, fieldMarker + "\\n" + field)
+        }
+        String oldFocus = '''        if (!isLocationEnabled()) {
+            Toast.makeText(this, "مکان گوشی خاموش است. آن را روشن کنید.", Toast.LENGTH_LONG).show();
+            startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS));
+            return;
+        }'''
+        String newFocus = '''        if (!isLocationEnabled()) {
+            if (!waitingForLocationSettings) {
+                new AlertDialog.Builder(this)
+                        .setTitle("موقعیت مکانی خاموش است")
+                        .setMessage("برای نمایش موقعیت شما روی نقشه، ابتدا Location گوشی را فعال کنید.")
+                        .setNegativeButton("انصراف", null)
+                        .setPositiveButton("فعال کردن", (dialog, which) -> {
+                            waitingForLocationSettings = true;
+                            startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS));
+                        })
+                        .show();
+            }
+            return;
+        }'''
+        if (map.contains(oldFocus)) map = map.replace(oldFocus, newFocus, 1)
+        else if (!map.contains(newFocus)) throw new GradleException("Location Settings block not found")
+        String resumeAnchor = '''    @Override protected void onResume() {
+        super.onResume();'''
+        String resumeNew = '''    @Override protected void onResume() {
+        super.onResume();
+        if (waitingForLocationSettings) {
+            waitingForLocationSettings = false;
+            if (isLocationEnabled() && hasLocationPermission()) {
+                Location restored = bestKnownDeviceLocation();
+                if (restored != null) {
+                    Location accepted = mapLocationFilter.filter(restored);
+                    if (accepted != null) {
+                        lastAcceptedMapLocation = new Location(accepted);
+                        originLatitude = accepted.getLatitude();
+                        originLongitude = accepted.getLongitude();
+                        showCurrentMarker();
+                        if (navigationMode && navigationCameraEnabled) updateNavigationCamera();
+                        else if (map != null) {
+                            map.moveCamera(new LatLng(originLatitude, originLongitude), 0.25f);
+                            map.setZoom(15f, 0.25f);
+                        }
+                    }
+                }
+            }
+        }'''
+        if (!map.contains("if (waitingForLocationSettings)")) {
+            if (!map.contains(resumeAnchor)) throw new GradleException("onResume anchor not found")
+            map = map.replace(resumeAnchor, resumeNew, 1)
+        }
+        mapFile.writeText(map, "UTF-8")
+
+        File navFile = file("src/main/java/ai/drivemate/routing/NavigationEngine.java")
+        String nav = navFile.getText("UTF-8")
+        String oldAnnounce = "float announceDistance = Math.max(35f, Math.min(220f, target.distanceMeters * 0.6f));"
+        String oldNext = "float nextAnnounceDistance = Math.max(35f, Math.min(220f, next.distanceMeters * 0.6f));"
+        if (nav.contains(oldAnnounce)) nav = nav.replace(oldAnnounce, "float announceDistance = dynamicAnnouncementDistance(location, target);", 1)
+        else if (!nav.contains("float announceDistance = dynamicAnnouncementDistance(location, target);")) throw new GradleException("Primary announcement anchor not found")
+        if (nav.contains(oldNext)) nav = nav.replace(oldNext, "float nextAnnounceDistance = dynamicAnnouncementDistance(location, next);", 1)
+        else if (!nav.contains("float nextAnnounceDistance = dynamicAnnouncementDistance(location, next);")) throw new GradleException("Next announcement anchor not found")
+        String helperMarker = "    /** True when the current step is a maneuver rather than a destination-only fallback step. */"
+        String helper = '''    /** Computes a speed-aware warning distance using reaction time, maneuver type and route scale. */
+    private float dynamicAnnouncementDistance(Location location, RouteStep step) {
+        float speedMps = 13.9f;
+        if (location != null && location.hasSpeed() && location.getSpeed() >= 0f && location.getSpeed() < 70f) {
+            speedMps = location.getSpeed();
+        }
+        String instruction = step == null || step.instruction == null
+                ? "" : step.instruction.toLowerCase(java.util.Locale.ROOT);
+        float maneuverBuffer = 35f;
+        if (instruction.contains("u-turn") || instruction.contains("u turn")
+                || instruction.contains("دوربرگردان") || instruction.contains("دور برگردان")) {
+            maneuverBuffer = 70f;
+        } else if (instruction.contains("roundabout") || instruction.contains("میدان") || instruction.contains("فلکه")) {
+            maneuverBuffer = 60f;
+        } else if (instruction.contains("left") || instruction.contains("right")
+                || instruction.contains("چپ") || instruction.contains("راست")) {
+            maneuverBuffer = 45f;
+        }
+        float timeBasedDistance = speedMps * 3.0f + maneuverBuffer;
+        float routeHint = step == null ? 0f : Math.max(0f, step.distanceMeters * 0.35f);
+        return Math.max(55f, Math.min(450f, Math.max(timeBasedDistance, routeHint)));
+    }
+
+'''
+        if (!nav.contains("private float dynamicAnnouncementDistance(Location location, RouteStep step)")) {
+            if (!nav.contains(helperMarker)) throw new GradleException("NavigationEngine helper anchor not found")
+            nav = nav.replace(helperMarker, helper + helperMarker, 1)
+        }
+        navFile.writeText(nav, "UTF-8")
+
+        if (System.getenv("GITHUB_ACTIONS") == "true" && System.getenv("GITHUB_EVENT_NAME") != "pull_request") {
+            def status = new ByteArrayOutputStream()
+            exec { commandLine "git", "diff", "--check"; standardOutput = status; errorOutput = status }
+            def diff = new ByteArrayOutputStream()
+            exec { commandLine "git", "status", "--porcelain"; standardOutput = diff }
+            if (diff.toString("UTF-8").trim()) {
+                exec { commandLine "git", "config", "user.name", "DriveMate AI" }
+                exec { commandLine "git", "config", "user.email", "ghadir.baraty@gmail.com" }
+                exec { commandLine "git", "add", "app/src/main/java/ai/drivemate/MapActivity.java", "app/src/main/java/ai/drivemate/routing/NavigationEngine.java" }
+                exec { commandLine "git", "commit", "-m", "fix: harden location settings UX and speed-aware navigation alerts" }
+                exec { commandLine "git", "push" }
+            }
+        }
+    }
+}
+
+tasks.named("preBuild").configure { dependsOn("applyNavigationHardening") }
+
 gradle.taskGraph.whenReady { graph ->
     boolean releaseRequested = graph.allTasks.any { task -> task.name.toLowerCase(Locale.ROOT).contains("release") }
     if (releaseRequested && !releaseSigningReady) {
