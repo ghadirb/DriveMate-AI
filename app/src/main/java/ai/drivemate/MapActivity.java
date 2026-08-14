@@ -159,6 +159,15 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private LocationManager locationManager;
     private boolean navigationMode;
     private boolean followVehicle = true;
+    /** Tracks the "کاربر زد موقعیت من ولی GPS خاموش بود" flow end-to-end so returning from
+     *  Settings can react correctly without ever looping back into Settings or the dialog on its
+     *  own: LOCATION_DISABLED (dialog just shown) -> LOCATION_SETTINGS_OPENED (driver tapped
+     *  "فعال کردن") -> resolved to LOCATION_ENABLED or back to LOCATION_DISABLED once onResume
+     *  re-checks, or LOCATION_CANCELLED if the driver dismissed the dialog instead. Only an actual
+     *  tap on "موقعیت من" (or the settings launch it leads to) ever changes this - onResume merely
+     *  reads it, it never opens Settings or a dialog by itself. */
+    private enum LocationGateState { LOCATION_ENABLED, LOCATION_DISABLED, LOCATION_SETTINGS_OPENED, LOCATION_CANCELLED }
+    private LocationGateState locationGateState = LocationGateState.LOCATION_ENABLED;
     /** Set while the driver has manually panned/zoomed away from the follow camera mid-navigation
      *  (see resumeFollowVehicle), so incoming location updates skip re-centering until the timer
      *  below fires - otherwise every ~1s GPS update snapped the view straight back to the vehicle
@@ -2417,10 +2426,20 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             return;
         }
         if (!isLocationEnabled()) {
-            Toast.makeText(this, "مکان گوشی خاموش است. آن را روشن کنید.", Toast.LENGTH_LONG).show();
-            startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS));
+            locationGateState = LocationGateState.LOCATION_DISABLED;
+            new AlertDialog.Builder(this)
+                    .setTitle("موقعیت مکانی خاموش است")
+                    .setMessage("برای نمایش موقعیت شما روی نقشه، ابتدا موقعیت مکانی دستگاه را فعال کنید.")
+                    .setPositiveButton("فعال کردن", (d, w) -> {
+                        locationGateState = LocationGateState.LOCATION_SETTINGS_OPENED;
+                        startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS));
+                    })
+                    .setNegativeButton("انصراف", (d, w) -> locationGateState = LocationGateState.LOCATION_CANCELLED)
+                    .setOnCancelListener(d -> locationGateState = LocationGateState.LOCATION_CANCELLED)
+                    .show();
             return;
         }
+        locationGateState = LocationGateState.LOCATION_ENABLED;
         if (navigationMode) {
             followVehicle = true;
             navigationCameraEnabled = true;
@@ -2825,6 +2844,21 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         if (!isLocationEnabled() && !gpsWarningActive) {
             gpsWarningActive = true;
             Toast.makeText(this, "موقعیت مکانی در دسترس نیست، لطفاً GPS را روشن کنید.", Toast.LENGTH_LONG).show();
+        }
+        // Only react here if a Settings trip was actually launched from the dialog above - never
+        // open Settings or show the dialog again on our own, and never assume the driver actually
+        // turned it on just because we're back. If it's on now, this reuses focusOrigin() to
+        // recenter the marker/camera on the latest fix - it never touches navigationEngine, so an
+        // in-progress trip's route/timer/voice queue are completely untouched. If it's still off,
+        // do nothing further; the driver can tap "موقعیت من" again whenever they're ready.
+        if (locationGateState == LocationGateState.LOCATION_SETTINGS_OPENED) {
+            if (isLocationEnabled()) {
+                locationGateState = LocationGateState.LOCATION_ENABLED;
+                gpsWarningActive = false;
+                focusOrigin();
+            } else {
+                locationGateState = LocationGateState.LOCATION_DISABLED;
+            }
         }
     }
 

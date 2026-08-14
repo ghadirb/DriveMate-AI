@@ -1040,6 +1040,9 @@ public class MainActivity extends Activity {
                         @Override public void onWaypointSkipped(RouteStep step, int ordinal) {
                             runOnUiThread(() -> announceWaypointSkipped(step, ordinal));
                         }
+                        @Override public void onInstructionStage(RouteStep step, NavigationEngine.AnnouncementStage stage, int metersRemaining) {
+                            runOnUiThread(() -> announceInstructionStage(step, stage, metersRemaining));
+                        }
                     }, origin, new RoutePoint(destination.latitude, destination.longitude));
                     rerouteInFlight = false;
                     navigationEngine.setInstructionAnnouncementsEnabled(false);
@@ -2567,6 +2570,9 @@ public class MainActivity extends Activity {
             }
             @Override public void onWaypointReached(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointReached(step, ordinal)); }
             @Override public void onWaypointSkipped(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointSkipped(step, ordinal)); }
+            @Override public void onInstructionStage(RouteStep step, NavigationEngine.AnnouncementStage stage, int metersRemaining) {
+                runOnUiThread(() -> announceInstructionStage(step, stage, metersRemaining));
+            }
         }, locationTracker.getLastLocation(), new RoutePoint(destination.latitude, destination.longitude));
         setStatus("مسیر با ترافیک به‌روزرسانی شد؛ حدود " + Math.max(1, gainSeconds / 60) + " دقیقه سریع‌تر است.");
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
@@ -3398,6 +3404,37 @@ public class MainActivity extends Activity {
         if (value.contains("right")) return "راست";
         if (value.contains("straight")) return "مستقیم";
         return null;
+    }
+
+    /** The earlier INITIAL/APPROACHING heads-up cues (see NavigationEngine.evaluateInstructionCascade) -
+     *  the maneuver's actual full instruction still goes through announceRouteStep() below as
+     *  before. clipName intentionally matches no pre-recorded clip since the distance is live and
+     *  can never be pre-recorded, so this always speaks the literal phrase via TTS - in both economy
+     *  and smart mode - rather than ever being silently replaced by a generic clip. */
+    private void announceInstructionStage(RouteStep step, NavigationEngine.AnnouncementStage stage, int metersRemaining) {
+        String text = step.instruction == null ? "" : step.instruction.trim();
+        if (text.isEmpty()) return;
+        String lower = text.toLowerCase(Locale.ROOT);
+        boolean arrival = lower.contains("arriv") || text.contains("مقصد");
+        String phrase;
+        if (arrival) {
+            phrase = stage == NavigationEngine.AnnouncementStage.INITIAL
+                    ? "به مقصد نزدیک می‌شوید" : "مقصد نزدیک است، آماده توقف باشید";
+        } else {
+            String distance = persianDistanceLabel(metersRemaining);
+            phrase = stage == NavigationEngine.AnnouncementStage.INITIAL
+                    ? "در " + distance + "، " + text : "تا " + distance + " دیگر، " + text;
+        }
+        speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING, phrase,
+                "instruction_stage_custom", phrase, 8_000L);
+    }
+
+    /** Rounds to the nearest 10m under 100m, nearest 50m beyond - a live GPS-derived distance read
+     *  out to the exact meter ("در ۱۹۳ متر") sounds unnatural and implies false precision. */
+    private String persianDistanceLabel(int meters) {
+        int rounded = meters < 100 ? Math.max(10, Math.round(meters / 10f) * 10)
+                : Math.max(50, Math.round(meters / 50f) * 50);
+        return rounded + " متر";
     }
 
     private void announceRouteStep(RouteStep step) {

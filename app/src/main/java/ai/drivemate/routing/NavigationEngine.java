@@ -26,7 +26,20 @@ public class NavigationEngine {
          * intermediate stop. The stop is removed from future reroutes instead of forcing a loop
          * back to a point the driver intentionally bypassed. */
         default void onWaypointSkipped(RouteStep step, int waypointOrdinal) { }
+        /** Early heads-up cues for the upcoming maneuver, fired at most once each per maneuver in
+         *  strict INITIAL -> APPROACHING order (see AnnouncementStage) as the live distance crosses
+         *  speed-based thresholds - never on a fixed meter value, and never twice for the same
+         *  maneuver even if GPS noise makes the reported distance briefly tick back up. The actual
+         *  full instruction still arrives through onInstruction() once the driver is right at the
+         *  maneuver; this is purely the earlier "در ۲۰۰ متر..." / "تا ۸۰ متر دیگر..." style warning.
+         *  Default no-op so existing Listener implementations keep compiling untouched. */
+        default void onInstructionStage(RouteStep step, AnnouncementStage stage, int metersRemaining) { }
     }
+
+    /** INITIAL: first distant heads-up. APPROACHING: closer follow-up. Both go through
+     *  onInstructionStage(); the maneuver's actual spoken instruction (onInstruction()) is the
+     *  implicit third/final stage and reuses the engine's existing currentInstructionAnnounced gate. */
+    public enum AnnouncementStage { INITIAL, APPROACHING }
 
     private RouteResult route;
     private int nextStep;
@@ -40,6 +53,23 @@ public class NavigationEngine {
     private int offRouteSamples;
     private long lastInstructionAt;
     private boolean currentInstructionAnnounced;
+    /** Which of INITIAL/APPROACHING has already fired for the current maneuver - strictly
+     *  monotonic (0=none, 1=INITIAL fired, 2=APPROACHING fired too) so GPS jitter bouncing the
+     *  reported distance up and down can never re-fire a stage or fire them out of order. Reset to
+     *  0 everywhere currentInstructionAnnounced is reset (new maneuver, waypoint advance/skip,
+     *  fresh start). */
+    private int announceStageReached;
+    /** Smoothed, plausibility-checked driving speed used only for announcement *timing* (distance
+     *  thresholds below) - never for route logic. Seeded with a conservative ~30km/h so the very
+     *  first maneuver of a trip (before any real GPS speed sample exists) still gets reasonable
+     *  lead time instead of the degenerate 0 m/s a fresh Location often reports. */
+    private float lastValidSpeedMps = 8.3f;
+    private static final float MIN_TIMING_SPEED_MPS = 2.8f;   // ~10km/h floor: stopped/crawling traffic must not collapse distances to ~0
+    private static final float MAX_TIMING_SPEED_MPS = 36f;    // ~130km/h ceiling: guards a GPS speed spike from inflating distances unrealistically
+    /** A single bad speed sample (multipath spike, brief loss of fix) must not be trusted outright -
+     *  same spirit as the location filter's own acceleration sanity check, scoped to just this
+     *  timing calculation: a jump larger than this from the last accepted speed is ignored. */
+    private static final float MAX_PLAUSIBLE_SPEED_JUMP_MPS = 15f;
     private int announcedWaypointIndex = -1;
     private boolean instructionAnnouncementsEnabled = true;
     private final RouteProgressTracker progressTracker = new RouteProgressTracker();
@@ -111,6 +141,7 @@ public class NavigationEngine {
         this.finalArrivalConfirmSamples = 0;
         this.lastInstructionAt = 0L;
         this.currentInstructionAnnounced = false;
+        this.announceStageReached = 0;
         this.announcedWaypointIndex = -1;
         this.instructionAnnouncementsEnabled = true;
         progressTracker.reset(route, currentLocation);
@@ -133,6 +164,7 @@ public class NavigationEngine {
         skippedWaypointConfirmSamples = 0;
         finalArrivalConfirmSamples = 0;
         currentInstructionAnnounced = false;
+        announceStageReached = 0;
         announcedWaypointIndex = -1;
         instructionAnnouncementsEnabled = true;
         stepProgressMeters = new double[0];
@@ -227,11 +259,7 @@ public class NavigationEngine {
         // Announce before reaching the maneuver. A no-map experience needs the next action in
         // advance, while route progression still waits until the maneuver endpoint is reached.
         boolean accuracyOk = accuracyOk(location);
-        boolean cooldownOk = System.currentTimeMillis() - lastInstructionAt >= MIN_MS_BETWEEN_INSTRUCTIONS;
-        float announceDistance = Math.max(35f, Math.min(220f, target.distanceMeters * 0.6f));
-        if (instructionAnnouncementsEnabled && accuracyOk && cooldownOk && !currentInstructionAnnounced && meters <= announceDistance) {
-            announceCurrentInstruction();
-        }
+        if (instructionAnnouncementsEnabled && accuracyOk) evaluateInstructionCascade(location, target, meters);
 
         float reachedDistance = Math.max(28f, Math.min(65f, target.distanceMeters * 0.15f));
         if (accuracyOk && meters <= reachedDistance) {
@@ -250,11 +278,11 @@ public class NavigationEngine {
             }
             nextStep = Math.min(nextStep + 1, route.steps.size() - 1);
             currentInstructionAnnounced = false;
+            announceStageReached = 0;
             updateTargetReference(location);
             RouteStep next = route.steps.get(Math.min(nextStep, route.steps.size() - 1));
             float nextDistance = location.distanceTo(asLocation(next));
-            float nextAnnounceDistance = Math.max(35f, Math.min(220f, next.distanceMeters * 0.6f));
-            if (instructionAnnouncementsEnabled && nextDistance <= nextAnnounceDistance) announceCurrentInstruction();
+            if (instructionAnnouncementsEnabled) evaluateInstructionCascade(location, next, nextDistance);
             return;
         }
         advanceConfirmSamples = 0;
@@ -312,6 +340,72 @@ public class NavigationEngine {
         instructionAnnouncementsEnabled = enabled;
     }
 
+    /** Replaces the old single fixed-fraction announce distance with three speed/reaction-time
+     *  based thresholds (INITIAL -> APPROACHING -> the maneuver's real instruction as the implicit
+     *  final stage), each fired at most once per maneuver via the strictly-monotonic
+     *  announceStageReached counter - GPS jitter bouncing the reported distance up and down can
+     *  never re-fire or reorder a stage, and a driver sitting still (traffic light, jam) simply
+     *  never crosses a threshold rather than having anything reset. */
+    private void evaluateInstructionCascade(Location location, RouteStep target, float meters) {
+        if (target == null || target.distanceMeters <= 0) return;
+        float speed = smoothedSpeedMps(location);
+        float reactionSeconds = reactionSecondsFor(target, speed);
+        float stepLen = Math.max(50f, target.distanceMeters);
+        // "اکنون": right at the maneuver - still speed-scaled (faster approach needs a slightly
+        // earlier cue even here) but capped well under the step length.
+        float finalMeters = Math.min(stepLen * 0.4f, clamp(30f, 90f, speed * reactionSeconds * 0.35f));
+        // "تا X متر دیگر": a closer follow-up reminder.
+        float approachMeters = Math.min(stepLen * 0.7f, Math.max(finalMeters + 20f,
+                clamp(70f, 180f, speed * reactionSeconds * 0.75f)));
+        // "در X متر": the first distant heads-up - this is where speed matters most, since it's the
+        // one a fast highway approach most needs pulled earlier.
+        float initialMeters = Math.min(stepLen * 0.95f, Math.max(approachMeters + 40f,
+                clamp(120f, 450f, speed * reactionSeconds * 1.6f)));
+
+        if (announceStageReached < 1 && meters <= initialMeters) {
+            announceStageReached = 1;
+            listener.onInstructionStage(target, AnnouncementStage.INITIAL, Math.round(meters));
+        }
+        if (announceStageReached < 2 && meters <= approachMeters) {
+            announceStageReached = 2;
+            listener.onInstructionStage(target, AnnouncementStage.APPROACHING, Math.round(meters));
+        }
+        boolean cooldownOk = System.currentTimeMillis() - lastInstructionAt >= MIN_MS_BETWEEN_INSTRUCTIONS;
+        if (!currentInstructionAnnounced && cooldownOk && meters <= finalMeters) {
+            announceCurrentInstruction();
+        }
+    }
+
+    /** Smoothed, plausibility-checked speed used only for the timing calculation above - never for
+     *  route/off-route logic, which relies on the already-filtered Location itself. A raw sample
+     *  more than MAX_PLAUSIBLE_SPEED_JUMP_MPS away from the last accepted value (multipath spike,
+     *  a fix reacquired after a brief loss) is ignored outright so one bad sample cannot suddenly
+     *  collapse or balloon every announcement distance for this tick. */
+    private float smoothedSpeedMps(Location location) {
+        float raw = location.hasSpeed() ? location.getSpeed() : -1f;
+        if (raw >= 0f && (lastValidSpeedMps <= 0f || Math.abs(raw - lastValidSpeedMps) <= MAX_PLAUSIBLE_SPEED_JUMP_MPS)) {
+            lastValidSpeedMps = raw;
+        }
+        return Math.max(MIN_TIMING_SPEED_MPS, Math.min(MAX_TIMING_SPEED_MPS, lastValidSpeedMps));
+    }
+
+    /** Reaction time (seconds) appropriate to the maneuver, longer for anything riskier than a
+     *  normal turn, and longer again at highway speed regardless of maneuver type - matching the
+     *  same classification MainActivity's voice layer already uses for these Persian instructions. */
+    private static float reactionSecondsFor(RouteStep step, float speedMps) {
+        String text = step.instruction == null ? "" : step.instruction;
+        float base = 6f;
+        if (text.contains("دور بزنید")) base = 9f;
+        else if (text.contains("میدان")) base = 8f;
+        else if (text.contains("تند")) base = 7f;
+        if (speedMps >= 22f) base += 3f;
+        return base;
+    }
+
+    private static float clamp(float min, float max, float value) {
+        return Math.max(min, Math.min(max, value));
+    }
+
     private boolean isReliablyOffRoute(Location location, float targetDistance,
                                        RouteProgressTracker.Snapshot routeProgress) {
         if (nextStep >= route.steps.size() - 1 || targetReference == null) return false;
@@ -357,12 +451,12 @@ public class NavigationEngine {
         nextStep = Math.min(waypointIndex + 1, route.steps.size() - 1);
         currentInstructionAnnounced = false;
         skippedWaypointConfirmSamples = 0;
+        announceStageReached = 0;
         updateTargetReference(location);
         listener.onWaypointReached(waypoint, waypoint.waypointOrdinal);
         RouteStep next = route.steps.get(Math.min(nextStep, route.steps.size() - 1));
         float nextDistance = location.distanceTo(asLocation(next));
-        float nextAnnounceDistance = Math.max(90f, Math.min(260f, Math.max(120f, next.distanceMeters * 0.65f)));
-        if (instructionAnnouncementsEnabled && nextDistance <= nextAnnounceDistance) announceCurrentInstruction();
+        if (instructionAnnouncementsEnabled) evaluateInstructionCascade(location, next, nextDistance);
     }
 
     private void skipWaypoint(int waypointIndex, Location location, RouteStep waypoint) {
@@ -370,13 +464,12 @@ public class NavigationEngine {
         currentInstructionAnnounced = false;
         skippedWaypointConfirmSamples = 0;
         announcedWaypointIndex = -1;
+        announceStageReached = 0;
         updateTargetReference(location);
         listener.onWaypointSkipped(waypoint, waypoint.waypointOrdinal);
         RouteStep next = route.steps.get(Math.min(nextStep, route.steps.size() - 1));
         float nextDistance = location.distanceTo(asLocation(next));
-        float nextAnnounceDistance = Math.max(90f, Math.min(260f,
-                Math.max(120f, next.distanceMeters * 0.65f)));
-        if (instructionAnnouncementsEnabled && nextDistance <= nextAnnounceDistance) announceCurrentInstruction();
+        if (instructionAnnouncementsEnabled) evaluateInstructionCascade(location, next, nextDistance);
     }
 
     private boolean waypointWasSkipped(Location location, RouteProgressTracker.Snapshot routeProgress,
@@ -433,6 +526,7 @@ public class NavigationEngine {
         advanceConfirmSamples = 0;
         updateTargetReference(location);
         if (instructionAnnouncementsEnabled) announceCurrentInstruction();
+        announceStageReached = 0;
     }
 
     private void buildStepProgress() {
