@@ -1,0 +1,355 @@
+name: Apply route features
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: !contains(github.event.head_commit.message, '[route-features]')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Apply implementation
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          root = Path('.')
+
+          custom_route = r'''package ai.drivemate.model;
+
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+          import java.util.ArrayList;
+          import java.util.Collections;
+          import java.util.List;
+
+          /** A user-created road trace. All stored points are treated as mandatory route anchors when navigation starts. */
+          public final class CustomRoute {
+              public final String name;
+              public final long createdAt;
+              public final List<RoutePoint> points;
+
+              public CustomRoute(String name, long createdAt, List<RoutePoint> points) {
+                  this.name = name == null || name.trim().isEmpty() ? "مسیر شخصی" : name.trim();
+                  this.createdAt = createdAt;
+                  ArrayList<RoutePoint> copy = new ArrayList<>();
+                  if (points != null) for (RoutePoint p : points) if (p != null) copy.add(p);
+                  this.points = Collections.unmodifiableList(copy);
+              }
+
+              public JSONObject toJson() throws org.json.JSONException {
+                  JSONArray values = new JSONArray();
+                  for (RoutePoint p : points) values.put(new JSONObject().put("lat", p.latitude).put("lng", p.longitude));
+                  return new JSONObject().put("name", name).put("createdAt", createdAt).put("points", values);
+              }
+
+              public static CustomRoute fromJson(JSONObject item) {
+                  ArrayList<RoutePoint> points = new ArrayList<>();
+                  JSONArray values = item.optJSONArray("points");
+                  if (values != null) for (int i = 0; i < values.length(); i++) {
+                      JSONObject p = values.optJSONObject(i);
+                      if (p != null) points.add(new RoutePoint(p.optDouble("lat"), p.optDouble("lng")));
+                  }
+                  return new CustomRoute(item.optString("name", "مسیر شخصی"), item.optLong("createdAt"), points);
+              }
+          }
+          '''
+          (root/'app/src/main/java/ai/drivemate/model/CustomRoute.java').write_text(custom_route, encoding='utf-8')
+
+          store = r'''package ai.drivemate.storage;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+          import org.json.JSONArray;
+          import java.util.ArrayList;
+          import java.util.List;
+          import ai.drivemate.model.CustomRoute;
+
+          /** Compact local storage for user-created routes. */
+          public final class CustomRouteStore {
+              private static final String PREFS = "drivemate_custom_routes";
+              private static final String KEY_ROUTES = "routes";
+              private final SharedPreferences preferences;
+              public CustomRouteStore(Context context) { preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE); }
+
+              public synchronized List<CustomRoute> recent() {
+                  ArrayList<CustomRoute> result = new ArrayList<>();
+                  try {
+                      JSONArray values = new JSONArray(preferences.getString(KEY_ROUTES, "[]"));
+                      for (int i = 0; i < values.length() && result.size() < 30; i++) result.add(CustomRoute.fromJson(values.getJSONObject(i)));
+                  } catch (Exception ignored) { }
+                  return result;
+              }
+
+              public synchronized void add(CustomRoute route) {
+                  if (route == null || route.points.size() < 2) return;
+                  List<CustomRoute> routes = recent();
+                  routes.add(0, route);
+                  while (routes.size() > 30) routes.remove(routes.size() - 1);
+                  persist(routes);
+              }
+
+              public synchronized void remove(long createdAt) {
+                  List<CustomRoute> routes = recent();
+                  for (int i = routes.size() - 1; i >= 0; i--) if (routes.get(i).createdAt == createdAt) routes.remove(i);
+                  persist(routes);
+              }
+
+              private void persist(List<CustomRoute> routes) {
+                  JSONArray values = new JSONArray();
+                  for (CustomRoute route : routes) try { values.put(route.toJson()); } catch (Exception ignored) { }
+                  preferences.edit().putString(KEY_ROUTES, values.toString()).apply();
+              }
+          }
+          '''
+          (root/'app/src/main/java/ai/drivemate/storage/CustomRouteStore.java').write_text(store, encoding='utf-8')
+
+          custom_activity = r'''package ai.drivemate;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.location.Location;
+          import android.location.LocationManager;
+          import android.os.Bundle;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+          import android.widget.Toast;
+          import java.util.ArrayList;
+          import java.util.List;
+          import ai.drivemate.map.LatLng;
+          import ai.drivemate.map.OsmMapView;
+          import ai.drivemate.map.Polyline;
+          import ai.drivemate.model.CustomRoute;
+          import ai.drivemate.model.RoutePoint;
+          import ai.drivemate.storage.CustomRouteStore;
+
+          /** Lets the driver draw a personal route. Every selected point is a mandatory routing anchor. */
+          public class CustomRouteActivity extends Activity {
+              private OsmMapView map;
+              private final List<RoutePoint> points = new ArrayList<>();
+              private final List<Polyline> lines = new ArrayList<>();
+              private CustomRouteStore store;
+              private TextView status;
+              private boolean mandatoryMode = true;
+
+              @Override protected void onCreate(Bundle state) {
+                  super.onCreate(state);
+                  store = new CustomRouteStore(this);
+                  FrameLayout root = new FrameLayout(this);
+                  map = new OsmMapView(this);
+                  root.addView(map, new FrameLayout.LayoutParams(-1, -1));
+
+                  LinearLayout panel = new LinearLayout(this);
+                  panel.setOrientation(LinearLayout.VERTICAL);
+                  panel.setPadding(18, 18, 18, 18);
+                  panel.setBackgroundColor(0xEEFFFFFF);
+                  FrameLayout.LayoutParams pp = new FrameLayout.LayoutParams(-1, -2, Gravity.TOP);
+                  pp.setMargins(16, 16, 16, 0);
+                  root.addView(panel, pp);
+
+                  TextView title = new TextView(this);
+                  title.setText("مسیر شخصی و نقاط اجباری"); title.setTextSize(19); title.setTextColor(0xFF202124);
+                  panel.addView(title);
+                  status = new TextView(this);
+                  status.setText("روی نقشه لمس کنید تا نقطه اجباری اضافه شود."); status.setTextSize(14); status.setPadding(0, 8, 0, 8);
+                  panel.addView(status);
+
+                  LinearLayout actions = new LinearLayout(this); actions.setOrientation(LinearLayout.HORIZONTAL);
+                  Button mode = new Button(this); mode.setText("نقاط اجباری: روشن");
+                  mode.setOnClickListener(v -> { mandatoryMode = !mandatoryMode; mode.setText(mandatoryMode ? "نقاط اجباری: روشن" : "ثبت مسیر: روشن"); status.setText(mandatoryMode ? "هر لمس یک نقطه اجباری برای مسیریابی است." : "هر لمس یک نقطه از مسیر شخصی را ثبت می‌کند."); });
+                  Button undo = new Button(this); undo.setText("واگرد"); undo.setOnClickListener(v -> { if (!points.isEmpty()) { points.remove(points.size()-1); redraw(); } });
+                  Button clear = new Button(this); clear.setText("پاک کردن"); clear.setOnClickListener(v -> { points.clear(); redraw(); });
+                  actions.addView(mode, new LinearLayout.LayoutParams(0, -2, 1)); actions.addView(undo, new LinearLayout.LayoutParams(0, -2, 1)); actions.addView(clear, new LinearLayout.LayoutParams(0, -2, 1));
+                  panel.addView(actions);
+
+                  LinearLayout bottom = new LinearLayout(this); bottom.setOrientation(LinearLayout.HORIZONTAL); bottom.setPadding(12, 6, 12, 12);
+                  Button saved = new Button(this); saved.setText("مسیرهای ذخیره‌شده"); saved.setOnClickListener(v -> showSavedRoutes());
+                  Button save = new Button(this); save.setText("ذخیره مسیر"); save.setOnClickListener(v -> saveCurrent());
+                  Button start = new Button(this); start.setText("شروع مسیریابی"); start.setOnClickListener(v -> startCurrent());
+                  bottom.addView(saved, new LinearLayout.LayoutParams(0, 56, 1)); bottom.addView(save, new LinearLayout.LayoutParams(0, 56, 1)); bottom.addView(start, new LinearLayout.LayoutParams(0, 56, 1));
+                  FrameLayout.LayoutParams bp = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM); root.addView(bottom, bp);
+
+                  setContentView(root);
+                  Location last = lastLocation();
+                  if (last != null) map.moveCamera(new LatLng(last.getLatitude(), last.getLongitude()), 0); else map.moveCamera(new LatLng(35.7219, 59.3347), 0);
+                  map.setZoom(14, 0);
+                  map.setOnMapLongClickListener(point -> { points.add(new RoutePoint(point.getLatitude(), point.getLongitude())); redraw(); });
+              }
+
+              private Location lastLocation() {
+                  if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED && checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) return null;
+                  LocationManager lm = (LocationManager)getSystemService(LOCATION_SERVICE); Location best = null;
+                  for (String p : new String[]{LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER}) try { Location l = lm.getLastKnownLocation(p); if (l != null && (best == null || l.getTime() > best.getTime())) best = l; } catch (Exception ignored) { }
+                  return best;
+              }
+
+              private void redraw() {
+                  for (Polyline line : lines) map.removePolyline(line); lines.clear();
+                  if (points.size() > 1) {
+                      ArrayList<LatLng> coords = new ArrayList<>(); for (RoutePoint p : points) coords.add(new LatLng(p.latitude, p.longitude));
+                      Polyline line = new Polyline(coords, true); lines.add(line); map.addPolyline(line);
+                  }
+                  status.setText("تعداد نقاط: " + points.size() + (points.size() >= 2 ? " — آماده ذخیره/مسیریابی" : ""));
+              }
+
+              private void saveCurrent() {
+                  if (points.size() < 2) { toast("حداقل دو نقطه لازم است."); return; }
+                  final android.widget.EditText input = new android.widget.EditText(this); input.setHint("مثلاً مسیر خانه تا محل کار");
+                  new AlertDialog.Builder(this).setTitle("نام مسیر شخصی").setView(input).setNegativeButton("انصراف", null).setPositiveButton("ذخیره", (d,w) -> { store.add(new CustomRoute(input.getText().toString(), System.currentTimeMillis(), points)); toast("مسیر ذخیره شد."); }).show();
+              }
+
+              private void showSavedRoutes() {
+                  List<CustomRoute> routes = store.recent(); if (routes.isEmpty()) { toast("هنوز مسیر شخصی ذخیره نشده است."); return; }
+                  String[] names = new String[routes.size()]; for (int i=0;i<routes.size();i++) names[i] = routes.get(i).name + " (" + routes.get(i).points.size() + " نقطه)";
+                  new AlertDialog.Builder(this).setTitle("مسیرهای شخصی").setItems(names, (d,which) -> loadRoute(routes.get(which))).setNegativeButton("بستن", null).show();
+              }
+
+              private void loadRoute(CustomRoute route) { points.clear(); points.addAll(route.points); redraw(); }
+
+              private void startCurrent() {
+                  if (points.size() < 2) { toast("حداقل دو نقطه برای مسیریابی لازم است."); return; }
+                  RoutePoint first = points.get(0), last = points.get(points.size()-1);
+                  Intent intent = new Intent(this, MapActivity.class);
+                  intent.putExtra(MapActivity.EXTRA_ORIGIN_LATITUDE, first.latitude);
+                  intent.putExtra(MapActivity.EXTRA_ORIGIN_LONGITUDE, first.longitude);
+                  intent.putExtra(MapActivity.EXTRA_NAVIGATION_MODE, true);
+                  intent.putExtra(MapActivity.EXTRA_DESTINATION_LATITUDE, last.latitude);
+                  intent.putExtra(MapActivity.EXTRA_DESTINATION_LONGITUDE, last.longitude);
+                  intent.putExtra(MapActivity.EXTRA_DESTINATION_NAME, "مقصد مسیر شخصی");
+                  ArrayList<String> waypoints = new ArrayList<>();
+                  for (int i=1;i<points.size()-1;i++) waypoints.add(points.get(i).latitude + "," + points.get(i).longitude + ",نقطه اجباری " + i);
+                  intent.putStringArrayListExtra(MapActivity.EXTRA_NAVIGATION_WAYPOINTS, waypoints);
+                  startActivity(intent);
+              }
+
+              private void toast(String text) { Toast.makeText(this, text, Toast.LENGTH_SHORT).show(); }
+          }
+          '''
+          (root/'app/src/main/java/ai/drivemate/CustomRouteActivity.java').write_text(custom_activity, encoding='utf-8')
+
+          trip_map = r'''package ai.drivemate;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.view.Gravity;
+          import android.widget.Button;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+          import java.util.ArrayList;
+          import ai.drivemate.map.LatLng;
+          import ai.drivemate.map.OsmMapView;
+          import ai.drivemate.map.Polyline;
+          import ai.drivemate.model.RoutePoint;
+          import ai.drivemate.model.TripRecord;
+          import org.json.JSONObject;
+
+          /** Shows the actual sampled GPS trace saved with a trip report. */
+          public class TripMapActivity extends Activity {
+              @Override protected void onCreate(Bundle state) {
+                  super.onCreate(state);
+                  FrameLayout root = new FrameLayout(this); OsmMapView map = new OsmMapView(this); root.addView(map, new FrameLayout.LayoutParams(-1,-1));
+                  LinearLayout panel = new LinearLayout(this); panel.setOrientation(LinearLayout.VERTICAL); panel.setPadding(16,16,16,16); panel.setBackgroundColor(0xEEFFFFFF);
+                  FrameLayout.LayoutParams pp = new FrameLayout.LayoutParams(-1,-2,Gravity.TOP); pp.setMargins(14,14,14,0); root.addView(panel,pp);
+                  TextView title = new TextView(this); title.setText("مسیر پیموده‌شده"); title.setTextSize(19); panel.addView(title);
+                  TextView info = new TextView(this); panel.addView(info);
+                  Button close = new Button(this); close.setText("بازگشت"); close.setOnClickListener(v -> finish()); panel.addView(close);
+                  setContentView(root);
+                  try {
+                      TripRecord record = TripRecord.fromJson(new JSONObject(getIntent().getStringExtra("trip_record_json")));
+                      info.setText(record.destinationName + "\n" + (record.completed ? "سفر کامل شده" : "سفر متوقف شده") + " — " + record.traveledPath.size() + " نمونه GPS");
+                      if (record.traveledPath.size() >= 2) {
+                          ArrayList<LatLng> coords = new ArrayList<>(); for (RoutePoint p : record.traveledPath) coords.add(new LatLng(p.latitude,p.longitude));
+                          map.addPolyline(new Polyline(coords,true));
+                          RoutePoint first = record.traveledPath.get(0); map.moveCamera(new LatLng(first.latitude,first.longitude),0); map.setZoom(14,0);
+                      } else {
+                          info.append("\nبرای این گزارش مسیر GPS واقعی ذخیره نشده است.");
+                          map.moveCamera(new LatLng(record.originLatitude,record.originLongitude),0); map.setZoom(13,0);
+                      }
+                  } catch (Exception e) { info.setText("گزارش سفر قابل نمایش نیست."); }
+              }
+          }
+          '''
+          (root/'app/src/main/java/ai/drivemate/TripMapActivity.java').write_text(trip_map, encoding='utf-8')
+
+          main = root/'app/src/main/java/ai/drivemate/MainActivity.java'
+          text = main.read_text(encoding='utf-8')
+          old = 'findViewById(R.id.mapButton).setOnClickListener(v -> openMap());'
+          new = old + '\n        findViewById(R.id.customRouteButton).setOnClickListener(v -> openCustomRoute());'
+          if old not in text: raise SystemExit('MainActivity map button anchor not found')
+          text = text.replace(old,new,1)
+          old = 'card.setOnClickListener(v -> showTripDetail(record, true));'
+          if old not in text: raise SystemExit('trip card click anchor not found')
+          text = text.replace(old,'card.setOnClickListener(v -> showTripMap(record));',1)
+          anchor = '    private void showTripDetail(TripRecord record, boolean allowDelete) {'
+          method = '''    private void showTripMap(TripRecord record) {
+              try {
+                  Intent intent = new Intent(this, TripMapActivity.class);
+                  intent.putExtra("trip_record_json", record.toJson().toString());
+                  startActivity(intent);
+              } catch (Exception e) {
+                  Toast.makeText(this, "نمایش مسیر این سفر ممکن نیست.", Toast.LENGTH_SHORT).show();
+              }
+          }
+
+          private void openCustomRoute() {
+              startActivity(new Intent(this, CustomRouteActivity.class));
+          }
+
+'''
+          if anchor not in text: raise SystemExit('trip detail anchor not found')
+          text = text.replace(anchor,method+anchor,1)
+          main.write_text(text,encoding='utf-8')
+
+          layout = root/'app/src/main/res/layout/activity_main.xml'
+          xml = layout.read_text(encoding='utf-8')
+          marker = '            android:text="نقشه و انتخاب مسیر" />\n\n        <LinearLayout'
+          replacement = '            android:text="نقشه و انتخاب مسیر" />\n\n        <Button\n            android:id="@+id/customRouteButton"\n            style="@style/HomeActionButton"\n            android:layout_width="match_parent"\n            android:layout_marginTop="8dp"\n            android:text="مسیر شخصی و نقاط اجباری روی نقشه" />\n\n        <LinearLayout'
+          if marker not in xml: raise SystemExit('activity_main map marker not found')
+          xml = xml.replace(marker,replacement,1)
+          layout.write_text(xml,encoding='utf-8')
+
+          manifest = root/'app/src/main/AndroidManifest.xml'
+          m = manifest.read_text(encoding='utf-8')
+          marker='    </application>'
+          entries='''        <activity android:name=".CustomRouteActivity" android:exported="false" />\n        <activity android:name=".TripMapActivity" android:exported="false" />\n'''
+          if '.CustomRouteActivity' not in m:
+              m=m.replace(marker,entries+marker,1)
+          manifest.write_text(m,encoding='utf-8')
+          PY
+      - name: Build after implementation
+        env:
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          OPENWEATHERMAP_API_KEY: ${{ secrets.OPENWEATHERMAP_API_KEY }}
+          KEYS_DECRYPTION_SECRET: ${{ secrets.KEYS_DECRYPTION_SECRET }}
+        run: gradle assembleDebug --stacktrace
+      - name: Commit implementation and remove one-shot workflow
+        run: |
+          git config user.name 'DriveMate AI'
+          git config user.email 'ghadir.baraty@gmail.com'
+          git rm .github/workflows/apply-route-features.yml
+          git add app/src/main/java/ai/drivemate app/src/main/res/layout/activity_main.xml app/src/main/AndroidManifest.xml
+          git commit -m 'feat: add custom routes and traveled trip maps [route-features]'
+          git push
