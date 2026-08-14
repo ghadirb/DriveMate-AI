@@ -1,0 +1,1 @@
+Temporary trigger for the final navigation hardening workflow; the workflow removes itself after applying the real source changes.
