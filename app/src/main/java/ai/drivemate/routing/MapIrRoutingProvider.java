@@ -82,7 +82,7 @@ public class MapIrRoutingProvider implements RoutingProvider {
                     JSONArray point = maneuver.optJSONArray("location");
                     double longitude = point == null ? destinationLng : point.optDouble(0, destinationLng);
                     double latitude = point == null ? destinationLat : point.optDouble(1, destinationLat);
-                    steps.add(new RouteStep(latitude, longitude, maneuver.optString("instruction"), step.optInt("distance"),
+                    steps.add(new RouteStep(latitude, longitude, persianInstruction(step, maneuver), step.optInt("distance"),
                             parseLaneGuidance(step)));
                     int speedLimit = explicitSpeedLimit(step);
                     if (speedLimit > 0) speedLimits.add(new SpeedLimitPoint(latitude, longitude, speedLimit, name()));
@@ -97,6 +97,110 @@ public class MapIrRoutingProvider implements RoutingProvider {
         if (steps.isEmpty()) steps.add(new RouteStep(destinationLat, destinationLng, "Arrive at destination", 0));
         return new RouteResult(name(), route.optInt("distance"), route.optInt("duration"), route.optString("weight_name"), steps,
                 RouteGeometry.fromRoute(route, steps, originLat, originLng, destinationLat, destinationLng), speedLimits);
+    }
+
+    /** map.ir is OSRM-style and commonly exposes maneuver type/modifier rather than a complete
+     * instruction string. Build the spoken Persian instruction from those stable fields so voice
+     * guidance never degenerates into a repeated generic "continue" message. */
+    private String persianInstruction(JSONObject step, JSONObject maneuver) {
+        String type = maneuver.optString("type", "").toLowerCase(java.util.Locale.ROOT);
+        String modifier = maneuver.optString("modifier", "").toLowerCase(java.util.Locale.ROOT);
+        String road = step.optString("name", maneuver.optString("name", "")).trim();
+        String explicit = maneuver.optString("instruction", step.optString("instruction", "")).trim();
+        // Diagnostic only: lets a logcat capture from a real drive show exactly what map.ir sent
+        // for every maneuver (type/modifier/exit), so a roundabout that got voiced as a plain
+        // "turn left" instead of "میدان ... خروجی" can be confirmed as either (a) map.ir's own
+        // road data not tagging that junction as a roundabout at all - nothing to fix on our end -
+        // or (b) a type/field value this method isn't recognizing, which would be. Cheap at debug
+        // level; safe to leave in.
+        int roundaboutExit = extractRoundaboutExit(maneuver);
+        String junctionType = maneuver.optString("junctionType", "").toLowerCase(java.util.Locale.ROOT);
+        String maneuverCode = maneuver.optString("maneuver", "").toLowerCase(java.util.Locale.ROOT);
+        boolean roundabout = type.contains("roundabout") || type.contains("rotary")
+                || junctionType.contains("roundabout") || junctionType.contains("rotary")
+                || maneuverCode.contains("roundabout") || maneuverCode.contains("rotary")
+                || (road.contains("میدان") && ("turn".equals(type) || "end of road".equals(type) || "fork".equals(type)));
+        android.util.Log.d("DriveMateManeuver", "type=" + type + " modifier=" + modifier
+                + " junctionType=" + junctionType + " maneuver=" + maneuverCode
+                + " exit=" + roundaboutExit + " road=" + road);
+        if (roundabout) {
+            if (roundaboutExit > 0) return "وارد میدان شوید و از خروجی " + persianDigits(roundaboutExit) + " خارج شوید";
+            return road.isEmpty() ? "وارد میدان شوید" : "در " + road + " وارد میدان شوید";
+        }
+        if (type.isEmpty()) return explicit.isEmpty() ? "در مسیر ادامه دهید" : explicit;
+        String instruction;
+        if ("arrive".equals(type)) {
+            return "به مقصد می‌رسید";
+        } else if ("depart".equals(type)) {
+            instruction = "به سمت مقصد حرکت کنید";
+        } else if (type.contains("roundabout") || type.contains("rotary")) {
+            int exit = maneuver.optInt("exit", maneuver.optInt("roundaboutExitNumber", 0));
+            instruction = exit > 0 ? "وارد میدان شوید و از خروجی " + persianDigits(exit) + " خارج شوید"
+                    : "وارد میدان شوید";
+        } else if (type.contains("u-turn") || type.contains("uturn") || modifier.contains("uturn")) {
+            instruction = "دور بزنید";
+        } else if ("turn".equals(type) || "end of road".equals(type) || "fork".equals(type)) {
+            instruction = turnInstruction(modifier, "end of road".equals(type));
+        } else if (type.contains("exit") || type.contains("off ramp")) {
+            instruction = "از خروجی خارج شوید";
+        } else if (type.contains("merge") || type.contains("on ramp")) {
+            instruction = "وارد مسیر شوید";
+        } else if ("new name".equals(type) || "continue".equals(type) || "notification".equals(type)) {
+            instruction = "در مسیر ادامه دهید";
+        } else {
+            instruction = turnInstruction(modifier, false);
+        }
+        // Iranian junctions that are actually roundabouts are very often carried in OSM only as a
+        // named place ("میدان آزادی", "میدان ولیعصر") rather than a junction=roundabout tag map.ir's
+        // engine recognizes, so this maneuver can arrive as a plain "turn" even though the road name
+        // itself says it's a میدان. Keep the direction (still correct) but frame it as the roundabout
+        // it actually is instead of a generic street-corner turn.
+        if (road.contains("میدان") && ("turn".equals(type) || "end of road".equals(type) || "fork".equals(type))) {
+            instruction = "در " + road + (modifier.contains("left") ? " از سمت چپ" : modifier.contains("right") ? " از سمت راست" : "") + " خارج شوید";
+            return instruction;
+        }
+        return road.isEmpty() || "به مقصد می‌رسید".equals(instruction)
+                ? instruction : instruction + " به سمت " + road;
+    }
+
+    private int extractRoundaboutExit(JSONObject maneuver) {
+        String[] keys = {"exit", "roundaboutExitNumber", "exitNumber", "roundabout_exit", "roundaboutExit"};
+        for (String key : keys) {
+            if (!maneuver.has(key)) continue;
+            int value = maneuver.optInt(key, 0);
+            if (value > 0 && value <= 20) return value;
+        }
+        JSONObject nested = maneuver.optJSONObject("maneuver");
+        if (nested != null) {
+            for (String key : keys) {
+                if (!nested.has(key)) continue;
+                int value = nested.optInt(key, 0);
+                if (value > 0 && value <= 20) return value;
+            }
+        }
+        return 0;
+    }
+
+    private String turnInstruction(String modifier, boolean endOfRoad) {
+        if (modifier.contains("sharp left")) return endOfRoad ? "در انتهای مسیر تند به چپ بپیچید" : "تند به چپ بپیچید";
+        if (modifier.contains("slight left")) return "کمی به چپ بپیچید";
+        if (modifier.contains("left")) return endOfRoad ? "در انتهای مسیر به چپ بپیچید" : "به چپ بپیچید";
+        if (modifier.contains("sharp right")) return endOfRoad ? "در انتهای مسیر تند به راست بپیچید" : "تند به راست بپیچید";
+        if (modifier.contains("slight right")) return "کمی به راست بپیچید";
+        if (modifier.contains("right")) return endOfRoad ? "در انتهای مسیر به راست بپیچید" : "به راست بپیچید";
+        if (modifier.contains("straight")) return "مستقیم ادامه دهید";
+        return "در مسیر ادامه دهید";
+    }
+
+    private static String persianDigits(int value) {
+        String latin = String.valueOf(value);
+        StringBuilder result = new StringBuilder(latin.length());
+        for (int index = 0; index < latin.length(); index++) {
+            char character = latin.charAt(index);
+            result.append(character >= '0' && character <= '9'
+                    ? (char) ('۰' + character - '0') : character);
+        }
+        return result.toString();
     }
 
     /** Parses map.ir's OSRM-style intersections[0].lanes when the response actually includes

@@ -160,11 +160,32 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private LocationManager locationManager;
     private boolean navigationMode;
     private boolean followVehicle = true;
+    /** Tracks the "کاربر زد موقعیت من ولی GPS خاموش بود" flow end-to-end so returning from
+     *  Settings can react correctly without ever looping back into Settings or the dialog on its
+     *  own: LOCATION_DISABLED (dialog just shown) -> LOCATION_SETTINGS_OPENED (driver tapped
+     *  "فعال کردن") -> resolved to LOCATION_ENABLED or back to LOCATION_DISABLED once onResume
+     *  re-checks, or LOCATION_CANCELLED if the driver dismissed the dialog instead. Only an actual
+     *  tap on "موقعیت من" (or the settings launch it leads to) ever changes this - onResume merely
+     *  reads it, it never opens Settings or a dialog by itself. */
+    private enum LocationGateState { LOCATION_ENABLED, LOCATION_DISABLED, LOCATION_SETTINGS_OPENED, LOCATION_CANCELLED }
+    private LocationGateState locationGateState = LocationGateState.LOCATION_ENABLED;
+    /** Set while the driver has manually panned/zoomed away from the follow camera mid-navigation
+     *  (see resumeFollowVehicle), so incoming location updates skip re-centering until the timer
+     *  below fires - otherwise every ~1s GPS update snapped the view straight back to the vehicle
+     *  before the driver had a chance to actually look at the road ahead. */
+    private final Runnable resumeFollowVehicle = () -> {
+        if (!navigationMode) return;
+        followVehicle = true;
+        navigationCameraEnabled = true;
+        updateNavigationCamera();
+    };
+    private static final long FOLLOW_VEHICLE_RESUME_DELAY_MS = 8_000L;
     private float lastBearing;
     private boolean hasHeading;
     private boolean navigationCameraEnabled;
     private int navigationRouteIndex;
-    private final NavigationEngine navigationEngine = new NavigationEngine();
+    /** Current turn/step index used only by the map UI renderer. */
+    private int displayedStepIndex;
     private final SimpleDateFormat etaFormat = new SimpleDateFormat("HH:mm", Locale.US);
     private long mapNavigationStartedAt;
     /** Snapshot of the origin at the true start of this trip (not updated by reroutes), used so
@@ -443,10 +464,36 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     private void returnToMainTab(String tab) {
+        Log.i("DriveMateSession", "Leaving navigation map for tab=" + tab
+                + "; main navigation remains active=" + navigationMode);
         Intent result = new Intent();
-        result.putExtra(RESULT_MAIN_TAB, tab);
+        // MainActivity checks RESULT_MAIN_TAB before destination extras. Therefore a live navigation
+        // handoff must NOT include RESULT_MAIN_TAB, otherwise MainActivity would return early and
+        // never restart its authoritative navigation/voice session. A normal non-navigation map
+        // exit still returns the requested tab as before.
+        if (navigationMode && destination != null) {
+            result.putExtra(RESULT_LATITUDE, destination.latitude);
+            result.putExtra(RESULT_LONGITUDE, destination.longitude);
+            result.putExtra(RESULT_NAME, destination.name);
+            result.putExtra(RESULT_ADDRESS, destination.address);
+            result.putExtra(RESULT_ROUTE_INDEX, Math.max(0, navigationRouteIndex));
+            result.putStringArrayListExtra(RESULT_WAYPOINTS, encodeWaypoints());
+        } else {
+            result.putExtra(RESULT_MAIN_TAB, tab);
+        }
         setResult(RESULT_OK, result);
         finish();
+    }
+
+    @Override
+    public void onBackPressed() {
+        // The Android back gesture/button must use the same handoff as the in-app map exit.
+        // Explicitly stopping navigation remains a separate user action.
+        if (navigationMode && destination != null) {
+            returnToMainTab("dashboard");
+            return;
+        }
+        super.onBackPressed();
     }
 
     private void initializeMap() {
@@ -469,6 +516,15 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                 map.setZoom(14f, 0f);
             });
             showCurrentMarker();
+            map.setOnUserGestureListener(() -> {
+                if (!navigationMode) return;
+                // The driver grabbed the map to pan or zoom ahead - stop re-centering under them
+                // until they've had a few seconds to actually look, then resume following on its
+                // own (or immediately if they tap the recenter button themselves).
+                followVehicle = false;
+                searchHandler.removeCallbacks(resumeFollowVehicle);
+                searchHandler.postDelayed(resumeFollowVehicle, FOLLOW_VEHICLE_RESUME_DELAY_MS);
+            });
             map.setOnMapLongClickListener(point -> {
                 final double latitude = point.getLatitude();
                 final double longitude = point.getLongitude();
@@ -1764,7 +1820,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         current.setLatitude(originLatitude);
         current.setLongitude(originLongitude);
         current.setBearing(lastBearing);
-        navigationEngine.start(route, this, current, new RoutePoint(destination.latitude, destination.longitude));
+        // MainActivity owns the single live NavigationEngine; MapActivity only renders the route.
+        displayedStepIndex = 0;
         // Guarded: refreshNavigationRouteFrom/recalculateActiveRoute also call this on every
         // reroute, which must not reset the true trip start time/origin/distance-so-far - only a
         // genuinely new trip (mapNavigationStartedAt == 0) initializes these.
@@ -1781,7 +1838,14 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         turnStepsExpanded = false;
         turnStepsScroll.setVisibility(View.GONE);
         turnExpandIcon.setText("▾");
-        if (!navigationEngine.announceCurrentInstruction()) {
+        displayedStepIndex = 0;
+        if (selectedRoute != null && selectedRoute.steps != null && !selectedRoute.steps.isEmpty()) {
+            RouteStep first = selectedRoute.steps.get(0);
+            turnInstructionText.setText(first.instruction == null || first.instruction.trim().isEmpty()
+                    ? "به سمت مقصد حرکت کنید" : first.instruction);
+            turnArrowText.setText(arrowForInstruction(first.instruction));
+            renderLaneGuidance(first.lanes);
+        } else {
             turnInstructionText.setText("به سمت مقصد حرکت کنید");
             turnArrowText.setText("↑");
             renderLaneGuidance(null);
@@ -1794,23 +1858,55 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
      *  instruction text itself only changes through onInstruction, so it never flickers between
      *  GPS samples. */
     private void updateTurnBanner(Location location) {
-        RouteStep step = navigationEngine.currentStep();
-        if (step == null) return;
+        if (selectedRoute == null || selectedRoute.steps == null || selectedRoute.steps.isEmpty()) return;
+        if (displayedStepIndex < 0) displayedStepIndex = 0;
+        if (displayedStepIndex >= selectedRoute.steps.size()) displayedStepIndex = selectedRoute.steps.size() - 1;
+        while (displayedStepIndex < selectedRoute.steps.size() - 1) {
+            RouteStep currentStep = selectedRoute.steps.get(displayedStepIndex);
+            Location currentTarget = new Location("route");
+            currentTarget.setLatitude(currentStep.latitude);
+            currentTarget.setLongitude(currentStep.longitude);
+            if (location.distanceTo(currentTarget) > 30f) break;
+            displayedStepIndex++;
+        }
+        RouteStep step = selectedRoute.steps.get(displayedStepIndex);
         Location target = new Location("route");
         target.setLatitude(step.latitude);
         target.setLongitude(step.longitude);
         float metersToTurn = location.distanceTo(target);
         turnDistanceText.setText(formatDistance(Math.round(metersToTurn)));
-        updateDrivingHud(metersToTurn);
+        updateDrivingHud(location, metersToTurn);
     }
 
     /** Approximates remaining distance/time by adding the live distance to the next maneuver to
      *  the provider's per-step distances for every maneuver still ahead, then scales the route's
      *  total duration by that same fraction. It is an estimate (no live traffic per segment), but
      *  it moves with the car instead of freezing at the numbers shown when the route was chosen. */
-    private void updateDrivingHud(float metersToCurrentTarget) {
+    private int estimateRemainingRouteMeters(Location location) {
+        if (selectedRoute == null || selectedRoute.steps == null || selectedRoute.steps.isEmpty()) return 0;
+        int start = Math.max(0, Math.min(displayedStepIndex, selectedRoute.steps.size() - 1));
+        Location previous = location;
+        double total = 0d;
+        for (int i = start; i < selectedRoute.steps.size(); i++) {
+            RouteStep step = selectedRoute.steps.get(i);
+            Location point = new Location("route");
+            point.setLatitude(step.latitude);
+            point.setLongitude(step.longitude);
+            total += previous.distanceTo(point);
+            previous = point;
+        }
+        if (destination != null) {
+            Location end = new Location("destination");
+            end.setLatitude(destination.latitude);
+            end.setLongitude(destination.longitude);
+            if (previous.distanceTo(end) > 5f) total += previous.distanceTo(end);
+        }
+        return (int) Math.max(0, Math.round(total));
+    }
+
+    private void updateDrivingHud(Location location, float metersToCurrentTarget) {
         if (selectedRoute == null || selectedRoute.steps.isEmpty()) return;
-        int remainingMeters = navigationEngine.remainingMeters();
+        int remainingMeters = estimateRemainingRouteMeters(location);
         if (remainingMeters <= 0) remainingMeters = Math.round(metersToCurrentTarget);
         int totalMeters = Math.max(1, selectedRoute.distanceMeters);
         double fraction = Math.max(0.02, Math.min(1.0, remainingMeters / (double) totalMeters));
@@ -2438,10 +2534,20 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             return;
         }
         if (!isLocationEnabled()) {
-            Toast.makeText(this, "مکان گوشی خاموش است. آن را روشن کنید.", Toast.LENGTH_LONG).show();
-            startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS));
+            locationGateState = LocationGateState.LOCATION_DISABLED;
+            new AlertDialog.Builder(this)
+                    .setTitle("موقعیت مکانی خاموش است")
+                    .setMessage("برای نمایش موقعیت شما روی نقشه، ابتدا موقعیت مکانی دستگاه را فعال کنید.")
+                    .setPositiveButton("فعال کردن", (d, w) -> {
+                        locationGateState = LocationGateState.LOCATION_SETTINGS_OPENED;
+                        startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS));
+                    })
+                    .setNegativeButton("انصراف", (d, w) -> locationGateState = LocationGateState.LOCATION_CANCELLED)
+                    .setOnCancelListener(d -> locationGateState = LocationGateState.LOCATION_CANCELLED)
+                    .show();
             return;
         }
+        locationGateState = LocationGateState.LOCATION_ENABLED;
         if (navigationMode) {
             followVehicle = true;
             navigationCameraEnabled = true;
@@ -2502,10 +2608,6 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     private LatLng drivingPosition() {
-        RoutePoint snapped = navigationEngine.snappedRoutePosition();
-        if (navigationMode && snapped != null) {
-            return new LatLng(snapped.latitude, snapped.longitude);
-        }
         if (selectedRoute == null || selectedRoute.geometry.isEmpty()) {
             return new LatLng(originLatitude, originLongitude);
         }
@@ -2544,6 +2646,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     /** Restores the driver-first viewport: the vehicle stays below center and the road points up. */
     private void enableNavigationCamera() {
         if (!navigationMode) return;
+        searchHandler.removeCallbacks(resumeFollowVehicle);
         navigationCameraEnabled = true;
         followVehicle = true;
         updateNavigationCamera();
@@ -2561,9 +2664,6 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     private float navigationHeading() {
-        if (navigationEngine.isNavigating() && navigationEngine.snappedRoutePosition() != null) {
-            return navigationEngine.routeHeading();
-        }
         LatLng position = drivingPosition();
         if (selectedRoute != null) {
             int nearestIndex = -1;
@@ -2616,7 +2716,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         if (turnStepsContent == null || selectedRoute == null) return;
         turnStepsContent.removeAllViews();
         int current = navigationMode
-                ? Math.min(navigationEngine.currentStepIndex(), selectedRoute.steps.size() - 1) : -1;
+                ? Math.min(displayedStepIndex, selectedRoute.steps.size() - 1) : -1;
         for (int i = 0; i < selectedRoute.steps.size(); i++) {
             RouteStep step = selectedRoute.steps.get(i);
             String instruction = step.instruction == null || step.instruction.trim().isEmpty()
@@ -2677,8 +2777,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private static final float MANUAL_STOP_COMPLETION_RADIUS_METERS = 200f;
 
     private void stopNavigationFromMap() {
-        boolean wasNavigating = navigationMode && navigationEngine.isNavigating();
-        navigationEngine.stop();
+        Log.i("DriveMateSession", "Navigation stop explicitly requested from the map screen.");
+        boolean wasNavigating = navigationMode && destination != null;
         navigationMode = false;
         followVehicle = false;
         navigationCameraEnabled = false;
@@ -2845,6 +2945,21 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             gpsWarningActive = true;
             Toast.makeText(this, "موقعیت مکانی در دسترس نیست، لطفاً GPS را روشن کنید.", Toast.LENGTH_LONG).show();
         }
+        // Only react here if a Settings trip was actually launched from the dialog above - never
+        // open Settings or show the dialog again on our own, and never assume the driver actually
+        // turned it on just because we're back. If it's on now, this reuses focusOrigin() to
+        // recenter the marker/camera on the latest fix - it never touches navigationEngine, so an
+        // in-progress trip's route/timer/voice queue are completely untouched. If it's still off,
+        // do nothing further; the driver can tap "موقعیت من" again whenever they're ready.
+        if (locationGateState == LocationGateState.LOCATION_SETTINGS_OPENED) {
+            if (isLocationEnabled()) {
+                locationGateState = LocationGateState.LOCATION_ENABLED;
+                gpsWarningActive = false;
+                focusOrigin();
+            } else {
+                locationGateState = LocationGateState.LOCATION_DISABLED;
+            }
+        }
     }
 
     private void redrawCachedPoiLayers() {
@@ -2923,7 +3038,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             lastBearing = accepted.getBearing();
             hasHeading = true;
         }
-        if (navigationMode && navigationEngine.isNavigating()) {
+        if (navigationMode && destination != null) {
             if (lastTripAccumLocation != null) tripTraveledDistanceMeters += lastTripAccumLocation.distanceTo(accepted);
             lastTripAccumLocation = new Location(accepted);
         }
@@ -2931,9 +3046,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             if (isFinishing() || isDestroyed() || map == null || !map.isReadyForOverlays()) return;
             showCurrentMarker();
             if (selectedRoute != null) updateRoadSpeedLimit(accepted.getLatitude(), accepted.getLongitude());
-            if (navigationMode && navigationEngine.isNavigating()) {
-                navigationEngine.onLocation(accepted);
-                if (navigationMode && navigationEngine.isNavigating()) {
+            if (navigationMode && destination != null) {
+                        if (navigationMode && destination != null) {
                     updateTurnBanner(accepted);
                     if (routeNeedsRefreshFromCurrentLocation) refreshNavigationRouteFrom(accepted, false);
                     if (shouldRedrawNavigationRoute(accepted)) drawAllRoutes();

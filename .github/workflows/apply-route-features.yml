@@ -1,0 +1,13 @@
+name: Legacy Route Features (disabled)
+
+# Historical automation retained only as an explicit manual archive. It must never run on push
+# and must never be considered a repository health check. Android Build is the canonical CI.
+on:
+  workflow_dispatch:
+
+jobs:
+  disabled:
+    if: ${{ false }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Legacy route feature automation is disabled. Use Android Build for CI."

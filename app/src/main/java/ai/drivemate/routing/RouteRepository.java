@@ -18,28 +18,19 @@ public class RouteRepository {
 
     private final List<RoutingProvider> providers;
 
-    public RouteRepository(RoutingProvider primary, RoutingProvider fallback) {
-        this(primary, fallback, null);
-    }
-
+    public RouteRepository(RoutingProvider primary, RoutingProvider fallback) { this(primary, fallback, null); }
     public RouteRepository(RoutingProvider primary, RoutingProvider fallback, RoutingProvider finalFallback) {
         this(new RoutingProvider[]{primary, fallback, finalFallback});
     }
 
-    /** Providers are tried in order. Disabled or unconfigured entries are skipped, so a missing
-     * middle-provider key never prevents a later configured provider from being used. */
     public RouteRepository(RoutingProvider... providers) {
         this.providers = new ArrayList<>();
         if (providers == null) return;
-        for (RoutingProvider provider : Arrays.asList(providers)) {
-            if (provider != null) this.providers.add(provider);
-        }
+        for (RoutingProvider provider : Arrays.asList(providers)) if (provider != null) this.providers.add(provider);
     }
 
     public boolean hasConfiguredProvider() {
-        for (RoutingProvider provider : providers) {
-            if (isConfigured(provider)) return true;
-        }
+        for (RoutingProvider provider : providers) if (isConfigured(provider)) return true;
         return false;
     }
 
@@ -51,12 +42,11 @@ public class RouteRepository {
 
     public void getRoutes(double originLat, double originLng, double destinationLat, double destinationLng,
                           RoutesCallback successCallback, ErrorCallback errorCallback) {
-        requestRoutes(provider -> provider.routes(originLat, originLng, destinationLat, destinationLng),
+        getRoutesValidated(originLat, originLng, null, destinationLat, destinationLng,
+                provider -> provider.routes(originLat, originLng, destinationLat, destinationLng),
                 successCallback, errorCallback);
     }
 
-    /** Multi-stop counterpart of getRoute: origin -> each waypoint in order -> destination, as one
-     * continuous route. Same ordered provider chain as the plain two-point request. */
     public void getRoute(double originLat, double originLng, List<RoutePoint> waypoints,
                          double destinationLat, double destinationLng,
                          SuccessCallback successCallback, ErrorCallback errorCallback) {
@@ -75,15 +65,27 @@ public class RouteRepository {
             getRoutes(originLat, originLng, destinationLat, destinationLng, successCallback, errorCallback);
             return;
         }
-        requestRoutes(provider -> provider.routesWithWaypoints(originLat, originLng, waypoints,
-                destinationLat, destinationLng), successCallback, errorCallback);
+        ArrayList<RoutePoint> cleanWaypoints = new ArrayList<>();
+        for (RoutePoint point : waypoints) if (validCoordinate(point)) cleanWaypoints.add(point);
+        if (cleanWaypoints.isEmpty()) {
+            getRoutes(originLat, originLng, destinationLat, destinationLng, successCallback, errorCallback);
+            return;
+        }
+        getRoutesValidated(originLat, originLng, cleanWaypoints, destinationLat, destinationLng,
+                provider -> provider.routesWithWaypoints(originLat, originLng, cleanWaypoints,
+                        destinationLat, destinationLng), successCallback, errorCallback);
     }
 
-    private interface RoutesRequest {
-        List<RouteResult> run(RoutingProvider provider) throws Exception;
-    }
+    private interface RoutesRequest { List<RouteResult> run(RoutingProvider provider) throws Exception; }
 
-    private void requestRoutes(RoutesRequest request, RoutesCallback successCallback, ErrorCallback errorCallback) {
+    private void getRoutesValidated(double originLat, double originLng, List<RoutePoint> waypoints,
+                                    double destinationLat, double destinationLng,
+                                    RoutesRequest request, RoutesCallback successCallback,
+                                    ErrorCallback errorCallback) {
+        if (!validCoordinate(originLat, originLng) || !validCoordinate(destinationLat, destinationLng)) {
+            reportFailure(new IllegalArgumentException("Invalid route coordinates"), errorCallback);
+            return;
+        }
         new Thread(() -> {
             Exception lastError = null;
             for (RoutingProvider provider : providers) {
@@ -93,12 +95,10 @@ public class RouteRepository {
                 }
                 try {
                     Log.i("DriveMateRoute", "request provider=" + provider.name());
-                    List<RouteResult> routes = request.run(provider);
-                    if (routes == null || routes.isEmpty()) {
-                        throw new IllegalStateException(provider.name() + " returned no routes.");
-                    }
-                    Log.i("DriveMateRoute", "success provider=" + provider.name()
-                            + " alternatives=" + routes.size());
+                    List<RouteResult> rawRoutes = request.run(provider);
+                    List<RouteResult> routes = usableRoutes(rawRoutes);
+                    if (routes.isEmpty()) throw new IllegalStateException(provider.name() + " returned no usable routes.");
+                    Log.i("DriveMateRoute", "success provider=" + provider.name() + " alternatives=" + routes.size());
                     successCallback.onSuccess(routes);
                     return;
                 } catch (Exception error) {
@@ -108,6 +108,32 @@ public class RouteRepository {
             }
             reportFailure(lastError, errorCallback);
         }).start();
+    }
+
+    private List<RouteResult> usableRoutes(List<RouteResult> routes) {
+        ArrayList<RouteResult> result = new ArrayList<>();
+        if (routes == null) return result;
+        for (RouteResult route : routes) {
+            if (route == null || route.steps == null || route.steps.isEmpty()) continue;
+            if (route.geometry != null && route.geometry.size() == 1) continue;
+            if (route.geometry != null && route.geometry.size() > 0) {
+                boolean valid = true;
+                for (RoutePoint point : route.geometry) if (!validCoordinate(point)) { valid = false; break; }
+                if (!valid) continue;
+            }
+            result.add(route);
+        }
+        return result;
+    }
+
+    private boolean validCoordinate(RoutePoint point) {
+        return point != null && validCoordinate(point.latitude, point.longitude);
+    }
+
+    private boolean validCoordinate(double lat, double lng) {
+        return !Double.isNaN(lat) && !Double.isNaN(lng) && !Double.isInfinite(lat) && !Double.isInfinite(lng)
+                && lat >= -90d && lat <= 90d && lng >= -180d && lng <= 180d
+                && !(Math.abs(lat) < 1e-9 && Math.abs(lng) < 1e-9);
     }
 
     private boolean isConfigured(RoutingProvider provider) {

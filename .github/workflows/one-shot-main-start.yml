@@ -1,0 +1,13 @@
+name: obsolete navigation repair (manual only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  disabled:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Obsolete repair workflow is intentionally disabled. Android Build is the repository health check."

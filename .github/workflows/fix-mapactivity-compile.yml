@@ -1,0 +1,80 @@
+name: Repair MapActivity compile
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept SDK licenses and install build dependencies
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Apply exact compile repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("app/src/main/java/ai/drivemate/MapActivity.java")
+          s = p.read_text()
+          # Previous repair accidentally committed the two-character literal \\n          # sequence instead of an actual newline. Repair that exact corruption first.
+          literal = "public class MapActivity extends Activity implements LocationListener, NavigationEngine.Listener {\\\\n    private int displayedStepIndex = 0;"
+          clean = "public class MapActivity extends Activity implements LocationListener, NavigationEngine.Listener {\\n    private int displayedStepIndex = 0;"
+          if literal in s:
+              s = s.replace(literal, clean, 1)
+          # If the declaration is still absent, insert it immediately after the class opening.
+          if "private int displayedStepIndex = 0;" not in s:
+              marker = "public class MapActivity extends Activity implements LocationListener, NavigationEngine.Listener {"
+              if marker not in s:
+                  raise SystemExit("MapActivity declaration anchor not found")
+              s = s.replace(marker, marker + "\\n    private int displayedStepIndex = 0;", 1)
+          # RouteStep exposes lane data as 'lanes', not 'laneGuidance'.
+          s = s.replace("first.laneGuidance", "first.lanes")
+          p.write_text(s)
+          PY
+          grep -q "private int displayedStepIndex = 0;" app/src/main/java/ai/drivemate/MapActivity.java
+          ! grep -q "first.laneGuidance" app/src/main/java/ai/drivemate/MapActivity.java
+          ! grep -Fq '\\n    private int displayedStepIndex = 0;' app/src/main/java/ai/drivemate/MapActivity.java
+
+      - name: Verify debug build
+        env:
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          OPENWEATHERMAP_API_KEY: ${{ secrets.OPENWEATHERMAP_API_KEY }}
+          KEYS_DECRYPTION_SECRET: ${{ secrets.KEYS_DECRYPTION_SECRET }}
+        run: gradle assembleDebug --stacktrace
+
+      - name: Commit repair and remove one-shot workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "DriveMate AI"
+          git config user.email "ghadir.baraty@gmail.com"
+          git add app/src/main/java/ai/drivemate/MapActivity.java
+          git rm -f .github/workflows/fix-mapactivity-build.yml .github/workflows/fix-mapactivity-compile.yml 2>/dev/null || true
+          git diff --cached --quiet && exit 0
+          git commit -m "fix: repair MapActivity compilation"
+          git push origin HEAD:main
