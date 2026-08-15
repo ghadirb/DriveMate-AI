@@ -10,15 +10,17 @@ import android.os.Build;
 import android.os.IBinder;
 
 /**
- * Keeps the navigation process in the foreground while a trip is active. The actual route/GPS
- * engine remains owned by MainActivity for now; this service is deliberately a small lifecycle
- * anchor and notification controller. It must therefore never stop itself merely because the
- * launcher task/activity was removed.
+ * Keeps the navigation session visible while a trip is active. MainActivity remains the
+ * authoritative GPS/navigation/voice owner in the current architecture; this service is the
+ * Android foreground-service anchor that keeps that process eligible to continue in background.
  */
 public class NavigationForegroundService extends Service {
     public static final String ACTION_STOP = "ai.drivemate.action.STOP_NAVIGATION";
     public static final String ACTION_STOP_BROADCAST = "ai.drivemate.action.STOP_NAVIGATION_BROADCAST";
-    private static final String CHANNEL_ID = "navigation_active";
+    // v2 intentionally avoids inheriting an old user/channel choice made for the previous LOW
+    // channel. Navigation is an ongoing user-visible task and must remain discoverable in the
+    // notification drawer; the user can still change the channel's behavior in system settings.
+    private static final String CHANNEL_ID = "navigation_active_v2";
     private static final int NOTIFICATION_ID = 410;
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
@@ -30,11 +32,8 @@ public class NavigationForegroundService extends Service {
         }
 
         createChannel();
-        // Must be called immediately after startForegroundService() on Android O+.
+        // Must happen immediately after startForegroundService() on Android O+.
         startForeground(NOTIFICATION_ID, buildNotification());
-        // Navigation is a user-visible, ongoing foreground task. If Android removes the task or
-        // briefly recreates the service, ask it to recreate the service instead of silently losing
-        // the foreground anchor that protects the Activity-owned GPS/navigation session.
         return START_STICKY;
     }
 
@@ -42,7 +41,7 @@ public class NavigationForegroundService extends Service {
         Intent openIntent = new Intent(this, MainActivity.class)
                 .setAction(MainActivity.ACTION_VOICE_FROM_NOTIFICATION)
                 .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        PendingIntent voice = PendingIntent.getActivity(this, 1, openIntent,
+        PendingIntent open = PendingIntent.getActivity(this, 1, openIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
         Intent stopIntent = new Intent(this, NavigationForegroundService.class).setAction(ACTION_STOP);
@@ -53,13 +52,15 @@ public class NavigationForegroundService extends Service {
                 .setSmallIcon(R.drawable.ic_launcher_foreground)
                 .setContentTitle("همراه راننده فعال است")
                 .setContentText("مسیریابی و راهنمای صوتی در پس‌زمینه ادامه دارد")
+                .setContentIntent(open)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .setCategory(Notification.CATEGORY_NAVIGATION)
                 .setVisibility(Notification.VISIBILITY_PUBLIC)
-                .addAction(new Notification.Action.Builder(null, "مقصد را بگویید", voice).build())
+                .addAction(new Notification.Action.Builder(null, "مقصد را بگویید", open).build())
                 .addAction(new Notification.Action.Builder(null, "توقف", stop).build());
         if (Build.VERSION.SDK_INT >= 21) builder.setShowWhen(false);
+        if (Build.VERSION.SDK_INT >= 31) builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE);
         return builder.build();
     }
 
@@ -68,26 +69,23 @@ public class NavigationForegroundService extends Service {
         if (manager == null) return;
         NotificationChannel existing = manager.getNotificationChannel(CHANNEL_ID);
         if (existing == null) {
-            // LOW keeps navigation from making a sound on every service refresh while still making
-            // the ongoing notification visible. A channel's importance cannot be raised after it
-            // has been created, so do not try to mutate an existing user choice.
             NotificationChannel channel = new NotificationChannel(
-                    CHANNEL_ID, "مسیریابی فعال", NotificationManager.IMPORTANCE_LOW);
-            channel.setDescription("کنترل و ادامه مسیریابی در پس‌زمینه");
+                    CHANNEL_ID, "مسیریابی فعال", NotificationManager.IMPORTANCE_DEFAULT);
+            channel.setDescription("اعلان دائمی برای ادامه مسیریابی و راهنمای صوتی در پس‌زمینه");
             channel.setShowBadge(false);
             manager.createNotificationChannel(channel);
         }
     }
 
     @Override public void onTaskRemoved(Intent rootIntent) {
-        // Do not stop the service when the driver swipes the app away from Recents. The foreground
-        // navigation session is explicitly allowed to continue until the driver taps "توقف".
+        // The user can stop navigation explicitly from the notification. Removing the launcher
+        // task alone must not terminate the active foreground navigation session.
         super.onTaskRemoved(rootIntent);
     }
 
     @Override public void onDestroy() {
-        // Do not broadcast a stop here: Android may destroy/recreate a START_STICKY foreground
-        // service for resource-management reasons while navigation is still active.
+        // Do not broadcast a stop here: START_STICKY allows Android to recreate the foreground
+        // anchor after resource pressure while the authoritative Activity/session is still alive.
         super.onDestroy();
     }
 
