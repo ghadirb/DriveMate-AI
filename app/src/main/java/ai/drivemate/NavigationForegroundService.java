@@ -142,6 +142,8 @@ public class NavigationForegroundService extends Service {
         activeMode = session.mode;
         tripStartedAt = session.tripStartAtMillis;
         activeTripDistanceMeters = Math.round(session.travelledMeters);
+        activeTripPath.clear();
+        if (session.tripPath != null) activeTripPath.addAll(session.tripPath);
         locationTracker.start();
         Location current = locationTracker.getLastLocation();
         RoutePoint finalDestination = activeDestination == null ? null
@@ -214,16 +216,39 @@ public class NavigationForegroundService extends Service {
         locationTracker.start();
         RoutePoint finalDestination = destination == null ? null
                 : new RoutePoint(destination.latitude, destination.longitude);
-        navigationEngine.start(route, engineListener, origin, finalDestination, 0);
+        int initialStepIndex = preserveTripProgress ? Math.max(0, navigationEngine.currentStepIndex()) : 0;
+        navigationEngine.start(route, engineListener, origin, finalDestination, initialStepIndex);
         ensureForeground();
         checkpointSession();
     }
 
     /** Explicit driver-initiated stop (not arrival) - e.g. cancelling a trip from the UI. */
-    public void stopNavigationSession() {
+    public TripRecord stopNavigationSession() {
+        TripRecord report = buildTripRecord(activeDestination, false);
+        if (report != null) tripStore.add(report);
         navigationEngine.stop();
         sessionStore.clear();
         clearTripState();
+        if (locationTracker != null) locationTracker.stop();
+        if (voicePlayer != null) voicePlayer.interrupt();
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        stopSelf();
+        return report;
+    }
+
+    /** Completes the active session from the service-owned arrival/Activity callback path. */
+    public TripRecord finishNavigationSession() {
+        SavedPlace destination = activeDestination;
+        TripRecord report = buildTripRecord(destination, true);
+        if (report != null) tripStore.add(report);
+        navigationEngine.stop();
+        sessionStore.clear();
+        clearTripState();
+        if (locationTracker != null) locationTracker.stop();
+        if (voicePlayer != null) voicePlayer.interrupt();
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        stopSelf();
+        return report;
     }
 
     private void clearTripState() {
@@ -241,7 +266,7 @@ public class NavigationForegroundService extends Service {
     private void checkpointSession() {
         if (activeRoute == null || !navigationEngine.isNavigating()) return;
         sessionStore.save(activeRoute, activeDestination, activeWaypoints, activeMode, tripStartedAt,
-                activeTripDistanceMeters, navigationEngine.currentStepIndex(), currentWaypointOrdinal());
+                activeTripDistanceMeters, navigationEngine.currentStepIndex(), currentWaypointOrdinal(), activeTripPath);
     }
 
     private int currentWaypointOrdinal() {
@@ -338,6 +363,10 @@ public class NavigationForegroundService extends Service {
             }
             sessionStore.clear();
             clearTripState();
+            if (locationTracker != null) locationTracker.stop();
+            if (voicePlayer != null) voicePlayer.interrupt();
+            stopForeground(STOP_FOREGROUND_REMOVE);
+            stopSelf();
         }
 
         @Override public void onWaypointApproaching(RouteStep step, int ordinal) {
@@ -362,13 +391,15 @@ public class NavigationForegroundService extends Service {
 
         @Override public void onInstructionStage(RouteStep step, NavigationEngine.AnnouncementStage stage, int metersRemaining) {
             SessionCallback current = callback;
-            if (current != null) current.onInstructionStage(step, stage, metersRemaining);
-            // No local-fallback clip here to match the pre-refactor behavior: MainActivity's own
-            // announceInstructionStage always spoke a live TTS phrase (never a pre-recorded clip),
-            // since the remaining-distance text can never be pre-recorded. With no Activity bound
-            // there is no AI/TTS-composition layer available at this stage to build that phrase
-            // safely offline, so this cue is skipped rather than guessed at; the maneuver's real
-            // instruction (onInstruction above) still always fires and is always announced.
+            if (current != null) {
+                current.onInstructionStage(step, stage, metersRemaining);
+            } else if (stage == NavigationEngine.AnnouncementStage.INITIAL
+                    || stage == NavigationEngine.AnnouncementStage.APPROACHING) {
+                String distance = Math.max(10, Math.round(metersRemaining / 10f) * 10) + " متر";
+                String prefix = stage == NavigationEngine.AnnouncementStage.INITIAL
+                        ? "در " + distance + "، " : "تا " + distance + " دیگر، ";
+                voicePlayer.speak(prefix + step.instruction);
+            }
         }
     };
 
@@ -419,9 +450,11 @@ public class NavigationForegroundService extends Service {
     }
 
     @Override public void onDestroy() {
-        // Do not stop navigation/GPS here: START_STICKY recreates this service and
-        // restoreSessionIfNeeded() resumes the session from NavigationSessionStore. Explicit stop
-        // only happens via ACTION_STOP (see onStartCommand) or stopNavigationSession().
+        // A normal service teardown releases resources. If Android is recreating a START_STICKY
+        // service after process death, the durable session remains in NavigationSessionStore and
+        // onCreate() starts the tracker/engine again; this cleanup therefore cannot lose the trip.
+        if (locationTracker != null) locationTracker.stop();
+        if (voicePlayer != null) voicePlayer.shutdown();
         super.onDestroy();
     }
 }

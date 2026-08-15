@@ -4,6 +4,8 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.ComponentName;
+import android.content.ServiceConnection;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.IntentFilter;
@@ -128,6 +130,9 @@ public class MainActivity extends Activity {
     private BackupManager backupManager;
     private VoiceGuidancePlayer voicePlayer;
     private DeviceLocationTracker locationTracker;
+    private NavigationForegroundService navigationService;
+    private boolean navigationServiceBound;
+    private boolean welcomeSpoken;
     /** True while the "GPS unavailable" status is showing, so repeated onProviderDisabled calls
      *  (GPS and network can each fire independently) don't spam setStatus. */
     private boolean gpsWarningActive;
@@ -149,7 +154,7 @@ public class MainActivity extends Activity {
     private OnlineSpeechClient onlineSpeechClient;
     private LocalSpeechRecognizer localSpeechRecognizer;
     private SmartDriveCompanion smartCompanion;
-    private final NavigationEngine navigationEngine = new NavigationEngine();
+    private NavigationEngine navigationEngine;
     private RouteResult activeRoute;
     /** Ordered intermediate stops for the active trip. Kept through reroutes and map reopening. */
     private List<RoutePoint> activeWaypoints = new ArrayList<>();
@@ -242,15 +247,6 @@ public class MainActivity extends Activity {
      *  is created for the UI. Static so every instance in this process shares one answer to "is a
      *  trip already running, and if so, whose is it". Cleared once that owner's own stopNavigation
      *  or finishTrip actually ends the trip. */
-    private static java.lang.ref.WeakReference<MainActivity> activeSessionOwner;
-    /** Strong owner while a foreground navigation service is active. This deliberately keeps the
-     * authoritative Activity instance alive while navigation is running so GPS/voice callbacks
-     * do not disappear when the task leaves the foreground. Cleared on a real navigation stop. */
-    private static MainActivity backgroundSessionOwner;
-    /** True on a freshly (re)created instance that found activeSessionOwner already driving a
-     *  trip in onCreate: this instance mirrors the destination/route for display and forwards the
-     *  map and stop actions to the real owner instead of running a second, duplicate trip. */
-    private boolean observingBackgroundSession;
 
     @Override
     protected void attachBaseContext(Context newBase) {
@@ -287,8 +283,6 @@ public class MainActivity extends Activity {
         tripStore = new TripStore(this);
         backupManager = new BackupManager(this, placeStore, tripStore);
         writeAutomaticBackup();
-        voicePlayer = new VoiceGuidancePlayer(this);
-        locationTracker = new DeviceLocationTracker(this);
         offlineRoadSafetyProvider = new OfflineRoadSafetyProvider(this);
         neshanRoutingProvider = new NeshanRoutingProvider("");
         mapIrRoutingProvider = new MapIrRoutingProvider("");
@@ -308,66 +302,8 @@ public class MainActivity extends Activity {
         wireButtons();
         requestCorePermissions();
         refreshList();
-        voicePlayer.announce("welcome", "به همراه راننده خوش آمدید.");
         loadRuntimeKeys();
-        promptEnableLocationIfNeeded();
-        locationTracker.setUpdateListener(new DeviceLocationTracker.UpdateListener() {
-            @Override public void onLocationUpdate(Location location) {
-                gpsWarningActive = false;
-                if (pendingNavigationDestination != null) {
-                    SavedPlace destination = pendingNavigationDestination;
-                    List<RoutePoint> waypoints = pendingNavigationWaypoints;
-                    pendingNavigationDestination = null;
-                    pendingNavigationWaypoints = null;
-                    startNavigation(destination, waypoints);
-                }
-                navigationEngine.onLocation(location);
-                smartCompanion.onLocation(location);
-                recordTripLocation(location);
-                updateTripStats(location);
-                maybeSuggestRecurringDestination(location);
-                boolean movingNow = isCurrentlyMoving(location);
-                // The old route is no longer authoritative once off-route recovery begins.
-                // Do not emit a stale hazard, speed or maneuver-derived alert while the new route
-                // is being fetched; the successful replacement repopulates all route-bound data.
-                if (!rerouteInFlight && navigationEngine.isNavigating()) {
-                    checkRouteHazards(location, movingNow);
-                    checkRouteSafetyAlerts(location, movingNow);
-                    checkTrafficIncidentsProximity(location);
-                    checkUpcomingSpeedZone(location);
-                    checkRouteSpeedLimit(location);
-                }
-            }
-
-            @Override public void onLocationAvailabilityChanged(boolean available) {
-                runOnUiThread(() -> {
-                    // Never stop navigationEngine here: it should keep tracking against the last
-                    // known fix so a GPS blip mid-trip doesn't end the trip or drop guidance.
-                    // While this instance is only mirroring a background trip driven by another,
-                    // older MainActivity instance (see resumeBackgroundSessionIfAny), that owner
-                    // instance has its own, separate DeviceLocationTracker and already reports GPS
-                    // loss/recovery for the real trip - reporting it again here from this mirror's
-                    // own, redundant location listener would just duplicate the toast/status for
-                    // the exact same physical GPS event (seen twice, ~16ms apart, in the 2026-08-02
-                    // reopen-during-background-trip test log).
-                    if (observingBackgroundSession) return;
-                    if (!available && !gpsWarningActive) {
-                        gpsWarningActive = true;
-                        setStatus("موقعیت مکانی در دسترس نیست، لطفاً GPS را روشن کنید.");
-                    } else if (available && gpsWarningActive) {
-                        gpsWarningActive = false;
-                        setStatus("موقعیت مکانی دوباره در دسترس است.");
-                    }
-                    if (available && pendingNavigationDestination != null) {
-                        SavedPlace destination = pendingNavigationDestination;
-                        List<RoutePoint> waypoints = pendingNavigationWaypoints;
-                        pendingNavigationDestination = null;
-                        pendingNavigationWaypoints = null;
-                        startNavigation(destination, waypoints);
-                    }
-                });
-            }
-        });
+        bindNavigationService();
         handleSharedIntent(getIntent());
         handlePersonalRouteIntent(getIntent());
         registerNavigationReceiver();
@@ -386,16 +322,92 @@ public class MainActivity extends Activity {
      *  GPS tracking), it mirrors the owner's destination/route for display and forwards "نقشه" and
      *  "توقف" to the real owner. If no background trip is running, this is a no-op and the app
      *  looks exactly as it always has. */
-    private void resumeBackgroundSessionIfAny() {
-        MainActivity owner = activeSessionOwner == null ? null : activeSessionOwner.get();
-        if (owner == null || owner == this || !owner.navigationEngine.isNavigating() || owner.activeDestination == null) return;
-        observingBackgroundSession = true;
-        activeDestination = owner.activeDestination;
-        activeRoute = owner.activeRoute;
-        activeWaypoints = new ArrayList<>(owner.activeWaypoints);
-        setStatus("مسیریابی به " + activeDestination.name + " همچنان در پس‌زمینه در حال اجراست.");
-        refreshList();
+    private void resumeBackgroundSessionIfAny() { syncNavigationStateFromService(); }
+
+    private void syncNavigationStateFromService() {
+        if (!navigationServiceBound || navigationService == null) return;
+        navigationEngine = navigationService.getNavigationEngine();
+        locationTracker = navigationService.getLocationTracker();
+        voicePlayer = navigationService.getVoicePlayer();
+        activeRoute = navigationService.getActiveRoute();
+        activeDestination = navigationService.getActiveDestination();
+        activeWaypoints = navigationService.getActiveWaypoints();
+        tripStartedAt = navigationService.getTripStartedAt();
+        activeTripDistanceMeters = navigationService.getTripDistanceMeters();
     }
+
+    private void startLocationIfBound() {
+        if (navigationServiceBound && locationTracker != null) locationTracker.start();
+    }
+
+    private void bindNavigationService() {
+        if (navigationServiceBound) return;
+        bindService(new Intent(this, NavigationForegroundService.class), navigationServiceConnection, Context.BIND_AUTO_CREATE);
+    }
+
+    private final ServiceConnection navigationServiceConnection = new ServiceConnection() {
+        @Override public void onServiceConnected(ComponentName name, android.os.IBinder service) {
+            navigationService = ((NavigationForegroundService.LocalBinder) service).getService();
+            navigationServiceBound = true;
+            navigationEngine = navigationService.getNavigationEngine();
+            locationTracker = navigationService.getLocationTracker();
+            voicePlayer = navigationService.getVoicePlayer();
+            navigationService.setCallback(sessionCallback);
+            startLocationIfBound();
+            syncNavigationStateFromService();
+            promptEnableLocationIfNeeded();
+            if (!welcomeSpoken && !navigationService.isNavigating()) {
+                welcomeSpoken = true;
+                voicePlayer.announce("welcome", "به همراه راننده خوش آمدید.");
+            }
+        }
+        @Override public void onServiceDisconnected(ComponentName name) {
+            navigationServiceBound = false;
+            navigationService = null;
+            navigationEngine = null;
+            locationTracker = null;
+            voicePlayer = null;
+        }
+    };
+
+    private final NavigationForegroundService.SessionCallback sessionCallback = new NavigationForegroundService.SessionCallback() {
+        @Override public void onInstruction(RouteStep step) { runOnUiThread(() -> announceRouteStep(step)); }
+        @Override public void onOffRoute() { runOnUiThread(() -> rerouteFromCurrentLocation()); }
+        @Override public void onArrived(SavedPlace destination, TripRecord report) { runOnUiThread(() -> {
+            if (report != null) showTripCompletionReport(report);
+            activeDestination = null; activeRoute = null; activeWaypoints = new ArrayList<>();
+            setStatus("به " + (destination == null ? "مقصد" : destination.name) + " رسیدید.");
+        }); }
+        @Override public void onWaypointApproaching(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointApproaching(step, ordinal)); }
+        @Override public void onWaypointReached(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointReached(step, ordinal)); }
+        @Override public void onWaypointSkipped(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointSkipped(step, ordinal)); }
+        @Override public void onInstructionStage(RouteStep step, NavigationEngine.AnnouncementStage stage, int metersRemaining) { runOnUiThread(() -> announceInstructionStage(step, stage, metersRemaining)); }
+        @Override public void onLocationUpdate(Location location) { runOnUiThread(() -> {
+            if (location == null) return;
+            if (pendingNavigationDestination != null) {
+                SavedPlace destination = pendingNavigationDestination;
+                List<RoutePoint> waypoints = pendingNavigationWaypoints;
+                pendingNavigationDestination = null;
+                pendingNavigationWaypoints = null;
+                startNavigation(destination, waypoints);
+                return;
+            }
+            smartCompanion.onLocation(location);
+            updateTripStats(location);
+            boolean moving = isCurrentlyMoving(location);
+            if (!rerouteInFlight && navigationEngine != null && navigationEngine.isNavigating()) {
+                checkRouteHazards(location, moving);
+                checkRouteSafetyAlerts(location, moving);
+                checkTrafficIncidentsProximity(location);
+                checkUpcomingSpeedZone(location);
+                checkRouteSpeedLimit(location);
+            }
+        }); }
+        @Override public void onLocationAvailabilityChanged(boolean available) { runOnUiThread(() -> {
+            if (!available && !gpsWarningActive) { gpsWarningActive = true; setStatus("موقعیت مکانی در دسترس نیست، لطفاً GPS را بررسی کنید."); }
+            else if (available && gpsWarningActive) { gpsWarningActive = false; setStatus("موقعیت مکانی دوباره در دسترس است."); }
+        }); }
+    };
 
     @Override
     protected void onResume() {
@@ -448,7 +460,7 @@ public class MainActivity extends Activity {
         if (!permissions.isEmpty()) {
             requestPermissions(permissions.toArray(new String[0]), REQ_PERMISSIONS);
         } else {
-            locationTracker.start();
+            startLocationIfBound();
         }
     }
 
@@ -456,7 +468,7 @@ public class MainActivity extends Activity {
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQ_PERMISSIONS) {
-            locationTracker.start();
+            startLocationIfBound();
         }
     }
 
@@ -519,7 +531,7 @@ public class MainActivity extends Activity {
     }
 
     private void openMap() {
-        if ((navigationEngine.isNavigating() || observingBackgroundSession) && activeDestination != null) {
+        if (navigationService != null && navigationService.isNavigating() && activeDestination != null) {
             openNavigationMap(activeDestination);
             return;
         }
@@ -926,16 +938,17 @@ public class MainActivity extends Activity {
      *  instance - e.g. picking a different destination while "observing" a background session.
      *  Ends the old instance's trip cleanly first so this instance can become the sole owner. */
     private void stopAnyOtherActiveSessionBeforeStartingHere() {
-        MainActivity owner = activeSessionOwner == null ? null : activeSessionOwner.get();
-        if (owner != null && owner != this && owner.navigationEngine.isNavigating()) {
-            owner.stopNavigation("مسیر جدیدی انتخاب شد؛ مسیریابی پیشین متوقف شد.");
-        }
-        observingBackgroundSession = false;
+        // Navigation ownership is now held by NavigationForegroundService; there is no Activity owner to stop.
     }
 
     /** Re-routing keeps the original trip clock and GPS distance so the final report covers the
      *  whole journey rather than only its last recalculated segment. */
     private void startNavigation(SavedPlace destination, List<RoutePoint> waypoints, boolean preserveTripProgress) {
+        if (!navigationServiceBound || navigationService == null || locationTracker == null) {
+            setStatus("سرویس مسیریابی هنوز آماده نیست؛ لطفاً یک لحظه صبر کنید.");
+            bindNavigationService();
+            return;
+        }
         if (!locationTracker.isLocationEnabled()) {
             promptEnableLocationForNavigation(destination, waypoints);
             return;
@@ -998,8 +1011,6 @@ public class MainActivity extends Activity {
                             : personalRoute.routeIndex;
                     RouteResult route = routes.get(routeIndex);
                     placeStore.addRecent(destination);
-                    observingBackgroundSession = false;
-                    activeSessionOwner = new java.lang.ref.WeakReference<>(MainActivity.this);
                     activeDestination = destination;
                     activeRoute = route;
                     RouteCache.store(route, destination.latitude, destination.longitude);
@@ -1025,29 +1036,12 @@ public class MainActivity extends Activity {
                     String firstRouteInstruction = route.steps.isEmpty() ? "<none>" : route.steps.get(0).instruction;
                     android.util.Log.i("DriveMateRoute", "provider=" + route.providerName + " steps=" + route.steps.size()
                             + " first=" + firstRouteInstruction);
-                    navigationEngine.start(route, new NavigationEngine.Listener() {
-                        @Override public void onInstruction(RouteStep step) {
-                            runOnUiThread(() -> announceRouteStep(step));
-                        }
-                        @Override public void onOffRoute() {
-                            runOnUiThread(() -> rerouteFromCurrentLocation());
-                        }
-                        @Override public void onArrived() {
-                            runOnUiThread(() -> finishTrip(destination));
-                        }
-                        @Override public void onWaypointApproaching(RouteStep step, int ordinal) {
-                            runOnUiThread(() -> announceWaypointApproaching(step, ordinal));
-                        }
-                        @Override public void onWaypointReached(RouteStep step, int ordinal) {
-                            runOnUiThread(() -> announceWaypointReached(step, ordinal));
-                        }
-                        @Override public void onWaypointSkipped(RouteStep step, int ordinal) {
-                            runOnUiThread(() -> announceWaypointSkipped(step, ordinal));
-                        }
-                        @Override public void onInstructionStage(RouteStep step, NavigationEngine.AnnouncementStage stage, int metersRemaining) {
-                            runOnUiThread(() -> announceInstructionStage(step, stage, metersRemaining));
-                        }
-                    }, origin, new RoutePoint(destination.latitude, destination.longitude));
+                    if (!navigationServiceBound || navigationService == null) {
+                        setStatus("سرویس مسیریابی هنوز آماده نیست؛ دوباره تلاش کنید.");
+                        return;
+                    }
+                    navigationService.startNavigation(route, destination, requestedWaypoints,
+                            readIntelligenceMode().name(), origin, preserveTripProgress);
                     rerouteInFlight = false;
                     navigationEngine.setInstructionAnnouncementsEnabled(false);
                     // A recalculation must resume the next maneuver quickly; otherwise a turn in
@@ -1524,10 +1518,24 @@ public class MainActivity extends Activity {
     }
 
     private void finishTrip(SavedPlace destination) {
-        finishTrip(destination, true);
+        if (navigationServiceBound && navigationService != null) {
+            TripRecord tripReport = navigationService.finishNavigationSession();
+            resetGuidance(true);
+            activeDestination = null;
+            activeRoute = null;
+            activeWaypoints = new ArrayList<>();
+            if (tripStatsPanel != null) tripStatsPanel.setVisibility(View.GONE);
+            if (tripReport != null) showTripCompletionReport(tripReport);
+            return;
+        }
+        setStatus("سرویس مسیریابی در دسترس نیست.");
     }
 
     private void finishTrip(SavedPlace destination, boolean showCompletionReport) {
+        finishTrip(destination);
+    }
+
+    private void finishTripLegacyUnused(SavedPlace destination) {
         if (activeDestination == null) return;
         resetGuidance(true);
         stopBackgroundNavigation();
@@ -1692,6 +1700,11 @@ public class MainActivity extends Activity {
      * the actual geometry; the first point is reached from the current GPS fix, intermediate
      * points remain mandatory waypoints, and the last point is the final destination. */
     private void startPersonalRouteNavigation(PersonalRoute personalRoute, SavedPlace destination) {
+        if (!navigationServiceBound || navigationService == null || locationTracker == null) {
+            setStatus("سرویس مسیریابی هنوز آماده نیست؛ لطفاً یک لحظه صبر کنید.");
+            bindNavigationService();
+            return;
+        }
         if (personalRoute == null || personalRoute.points.size() < 2) {
             setStatus("مسیر شخصی نقطه کافی برای مسیریابی ندارد.");
             return;
@@ -1739,8 +1752,6 @@ public class MainActivity extends Activity {
         resetGuidance(true);
         ++routeRequestSequence;
         final long requestSequence = routeRequestSequence;
-        observingBackgroundSession = false;
-        activeSessionOwner = new java.lang.ref.WeakReference<>(MainActivity.this);
         activeDestination = destination;
         activeRoute = personalResult;
         activeWaypoints = new ArrayList<>();
@@ -1758,22 +1769,12 @@ public class MainActivity extends Activity {
         fetchRouteHazards(personalResult);
         fetchRouteSafetyAlerts(personalResult);
         startBackgroundNavigation();
-        navigationEngine.start(personalResult, new NavigationEngine.Listener() {
-            @Override public void onInstruction(RouteStep step) { runOnUiThread(() -> announceRouteStep(step)); }
-            @Override public void onOffRoute() {
-                // A saved route is a user-drawn line, not a provider road graph. Do not replace it
-                // with an online route when the driver temporarily leaves the line; keep following
-                // the chosen personal geometry and let the next GPS fix rejoin it.
-                runOnUiThread(() -> setStatus("از مسیر شخصی فاصله گرفته‌اید؛ مسیر ذخیره‌شده حفظ شد."));
-            }
-            @Override public void onArrived() { runOnUiThread(() -> finishTrip(destination)); }
-            @Override public void onWaypointApproaching(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointApproaching(step, ordinal)); }
-            @Override public void onWaypointReached(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointReached(step, ordinal)); }
-            @Override public void onWaypointSkipped(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointSkipped(step, ordinal)); }
-            @Override public void onInstructionStage(RouteStep step, NavigationEngine.AnnouncementStage stage, int metersRemaining) {
-                runOnUiThread(() -> announceInstructionStage(step, stage, metersRemaining));
-            }
-        }, origin, new RoutePoint(destination.latitude, destination.longitude));
+        if (!navigationServiceBound || navigationService == null) {
+            setStatus("سرویس مسیریابی هنوز آماده نیست؛ دوباره تلاش کنید.");
+            return;
+        }
+        navigationService.startNavigation(personalResult, destination, new ArrayList<>(),
+                readIntelligenceMode().name(), origin, false);
         navigationEngine.setInstructionAnnouncementsEnabled(false);
         initialGuidanceHeldUntil = System.currentTimeMillis() + 500L;
         setStatus("مسیریابی مسیر شخصی «" + personalRoute.name + "» آغاز شد.");
@@ -2687,19 +2688,13 @@ public class MainActivity extends Activity {
         // Start the location foreground service while the Activity is visible. Android 12+
         // restricts background starts for location FGS, so waiting until onDestroy is too late.
         startBackgroundNavigation();
-        navigationEngine.start(route, new NavigationEngine.Listener() {
-            @Override public void onInstruction(RouteStep step) { runOnUiThread(() -> announceRouteStep(step)); }
-            @Override public void onOffRoute() { runOnUiThread(() -> rerouteFromCurrentLocation()); }
-            @Override public void onArrived() { runOnUiThread(() -> finishTrip(destination)); }
-            @Override public void onWaypointApproaching(RouteStep step, int ordinal) {
-                runOnUiThread(() -> announceWaypointApproaching(step, ordinal));
-            }
-            @Override public void onWaypointReached(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointReached(step, ordinal)); }
-            @Override public void onWaypointSkipped(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointSkipped(step, ordinal)); }
-            @Override public void onInstructionStage(RouteStep step, NavigationEngine.AnnouncementStage stage, int metersRemaining) {
-                runOnUiThread(() -> announceInstructionStage(step, stage, metersRemaining));
-            }
-        }, locationTracker.getLastLocation(), new RoutePoint(destination.latitude, destination.longitude));
+        if (!navigationServiceBound || navigationService == null) {
+            rerouteInFlight = false;
+            setStatus("سرویس مسیریابی هنوز آماده نیست؛ مسیر فعلی حفظ شد.");
+            return;
+        }
+        navigationService.startNavigation(route, destination, activeWaypoints,
+                readIntelligenceMode().name(), locationTracker.getLastLocation(), true);
         setStatus("مسیر با ترافیک به‌روزرسانی شد؛ حدود " + Math.max(1, gainSeconds / 60) + " دقیقه سریع‌تر است.");
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
                 "مسیر ترافیک‌محور به " + destination.name + " حدود " + Math.max(1, gainSeconds / 60) + " دقیقه زمان بهتری دارد. یک هشدار صوتی بسیار کوتاه و آرام بگو.",
@@ -2716,10 +2711,8 @@ public class MainActivity extends Activity {
     private void rerouteFromCurrentLocation() {
         if (rerouteInFlight || activeDestination == null || locationTracker.getLastLocation() == null) return;
         rerouteInFlight = true;
-        // A new route gets a new engine state. Keeping the previous engine active until the
-        // network call completes allowed its old progress and turn callbacks to leak into the
-        // new route, producing repeated off-route or wrong-turn guidance.
-        navigationEngine.stop();
+        // The service owns the engine. Keep its current step long enough for startNavigation(..., true)
+        // to preserve progress; the service atomically replaces the engine state with the new route.
         initialGuidanceHeldUntil = 0L;
         setStatus("از مسیر خارج شدید؛ در حال محاسبه مسیر جدید...");
         startNavigation(activeDestination, activeWaypoints, true);
@@ -2736,8 +2729,11 @@ public class MainActivity extends Activity {
         boolean enabled = !backgroundNavigationEnabled();
         getSharedPreferences(PREFS_SETTINGS, MODE_PRIVATE).edit().putBoolean("background_navigation", enabled).apply();
         writeAutomaticBackup();
-        if (enabled && navigationEngine.isNavigating()) startBackgroundNavigation();
-        else if (!enabled) stopBackgroundNavigation();
+        if (enabled && navigationService != null && navigationService.isNavigating()) startBackgroundNavigation();
+        // The service owns an active location/navigation session. Disabling the preference must
+        // not tear that session down while the driver is still navigating; Android requires the
+        // active location FGS to remain foreground-visible. The setting takes effect for the next
+        // session/background lifecycle instead.
         refreshNotificationButton();
         setStatus(enabled ? "اعلان و ادامه مسیریابی در پس‌زمینه فعال شد." : "اعلان و ادامه مسیریابی در پس‌زمینه غیرفعال شد.");
     }
@@ -2748,14 +2744,17 @@ public class MainActivity extends Activity {
 
     private void startBackgroundNavigation() {
         if (!backgroundNavigationEnabled()) return;
-        backgroundSessionOwner = this;
         Intent intent = new Intent(this, NavigationForegroundService.class);
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent); else startService(intent);
+        bindNavigationService();
     }
 
     private void stopBackgroundNavigation() {
-        if (backgroundSessionOwner == this) backgroundSessionOwner = null;
-        stopService(new Intent(this, NavigationForegroundService.class));
+        if (navigationServiceBound && navigationService != null) {
+            navigationService.stopNavigationSession();
+        } else {
+            stopService(new Intent(this, NavigationForegroundService.class));
+        }
     }
 
     /** The service broadcasts ACTION_STOP_BROADCAST once, but every live MainActivity instance
@@ -2767,17 +2766,7 @@ public class MainActivity extends Activity {
      *  would build a bogus trip report from stats it never tracked and save a second, garbage trip
      *  record on top of the owner's real one. */
     private void onNavigationStopBroadcastReceived() {
-        String message = "مسیریابی از اعلان متوقف شد.";
-        if (observingBackgroundSession) {
-            observingBackgroundSession = false;
-            activeDestination = null;
-            activeRoute = null;
-            activeWaypoints = new ArrayList<>();
-            setStatus(message);
-            refreshList();
-        } else {
-            stopNavigation(message);
-        }
+        stopNavigation("مسیریابی از اعلان متوقف شد.");
     }
 
     /** Stop requests that originate from this instance's own UI (stop button, the map screen's stop
@@ -2787,74 +2776,26 @@ public class MainActivity extends Activity {
      *  trip report from stats this instance never tracked while leaving the real GPS/voice session
      *  in the owner instance running untouched - so the stop is forwarded to the real owner first. */
     private void requestStopNavigation(String message) {
-        android.util.Log.i("DriveMateSession", "Stop requested: " + message
-                + ", observingBackgroundSession=" + observingBackgroundSession);
-        MainActivity owner = activeSessionOwner == null ? null : activeSessionOwner.get();
-        if (observingBackgroundSession && owner != null && owner != this) {
-            owner.stopNavigation(message);
-            observingBackgroundSession = false;
-            activeDestination = null;
-            activeRoute = null;
-            activeWaypoints = new ArrayList<>();
-            setStatus(message);
-            refreshList();
-        } else {
-            stopNavigation(message);
-        }
+        stopNavigation(message);
     }
 
     private void stopNavigation(String message) {
-        android.util.Log.i("DriveMateSession", "Stopping navigation: " + message
-                + ", destination=" + (activeDestination == null ? "<none>" : activeDestination.name));
-        TripRecord tripReport = buildTripRecord(activeDestination, false);
-        saveTripRecord(tripReport);
+        TripRecord tripReport = navigationServiceBound && navigationService != null
+                ? navigationService.stopNavigationSession() : null;
         resetGuidance(true);
         rerouteInFlight = false;
         ++routeRequestSequence;
-        ++hazardFetchRequestId;
-        ++speedLimitFetchRequestId;
-        ++safetyAlertFetchRequestId;
-        ++weatherCheckRequestId;
-        ++trafficIncidentFetchRequestId;
         activeRouteHazards = new ArrayList<>();
-        activeRouteHazardAnnounced = new boolean[0];
-        activeRouteSpeedLimits = new ArrayList<>();
-        activeSpeedZones = new ArrayList<>();
-        activeSpeedZoneAnnounced = new boolean[0];
-        activeRouteCumulativeDistances = new double[0];
         activeRouteSafetyAlerts = new ArrayList<>();
-        activeRouteSafetyAlertAnnounced = new boolean[0];
         activeRouteTrafficIncidents = new ArrayList<>();
         announcedTrafficIncidentIds.clear();
-        lastSpeedLimitWarningAt = 0L;
-        lastWarnedMappedSpeedLimit = 0;
-        navigationEngine.stop();
-        smartCompanion.stop();
-        intelligenceCoordinator.cancelAll();
-        voiceHandler.removeCallbacks(trafficCheck);
-        voiceHandler.removeCallbacks(weatherCheck);
-        voiceHandler.removeCallbacks(trafficIncidentCheck);
-        voiceHandler.removeCallbacks(tripAnalysisHide);
         activeDestination = null;
-        tripStartedAt = 0L;
-        activeTripDistanceMeters = 0;
-        activeTripPath.clear();
-        activeTripOriginLatitude = Double.NaN;
-        activeTripOriginLongitude = Double.NaN;
-        lastTripLocation = null;
-        lastAlertMovementLocation = null;
-        alertMovingUntil = 0L;
-        initialGuidanceHeldUntil = 0L;
-        hideTripAnalysis();
-        stopBackgroundNavigation();
-        speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
-                "مسیریابی متوقف شده است. یک پیام فارسی کوتاه و طبیعی برای راننده بگو.",
-                "stop_navigation", message, 12_000L);
-        setStatus(message);
         activeRoute = null;
         activeWaypoints = new ArrayList<>();
         if (tripStatsPanel != null) tripStatsPanel.setVisibility(View.GONE);
-        showTripCompletionReport(tripReport);
+        hideTripAnalysis();
+        setStatus(message);
+        if (tripReport != null) showTripCompletionReport(tripReport);
     }
 
     private void registerNavigationReceiver() {
@@ -3710,32 +3651,15 @@ public class MainActivity extends Activity {
      *  manifest). The driver's own "توقف" tap in the notification - or the in-app stop button -
      *  is what actually calls stopNavigation() and performs the full teardown below. */
     @Override protected void onDestroy() {
-        boolean keepRunningInBackground = navigationEngine.isNavigating() && backgroundNavigationEnabled();
-        // A mirroring instance (observingBackgroundSession) never calls navigationEngine.start()
-        // itself, so its own navigationEngine.isNavigating() above is always false - even while a
-        // DIFFERENT, still-alive MainActivity instance (activeSessionOwner) is genuinely driving a
-        // background trip and owns the shared NavigationForegroundService/notification. Without
-        // this check, closing this mirror (e.g. the app's second close while a background trip is
-        // running - see 2026-08-02 report) fell into the teardown branch below and called
-        // stopBackgroundNavigation(), silently killing the real owner's notification even though
-        // navigation itself kept running fine under the owner instance.
-        MainActivity owner = activeSessionOwner == null ? null : activeSessionOwner.get();
-        boolean anotherInstanceOwnsBackgroundSession = observingBackgroundSession
-                && owner != null && owner != this && owner.navigationEngine.isNavigating();
         voiceHandler.removeCallbacks(automaticStop);
         onlineSpeechClient.cancelRecording();
         localSpeechRecognizer.destroy();
-        if (!keepRunningInBackground) {
-            voiceHandler.removeCallbacks(trafficCheck);
-            voiceHandler.removeCallbacks(weatherCheck);
-            intelligenceCoordinator.shutdown();
-            smartCompanion.stop();
-            voicePlayer.shutdown();
-            unregisterReceiver(navigationStopReceiver);
-            navigationEngine.stop();
-            if (!anotherInstanceOwnsBackgroundSession) stopBackgroundNavigation();
-            locationTracker.stop();
+        if (navigationServiceBound && navigationService != null) {
+            navigationService.clearCallback(sessionCallback);
+            unbindService(navigationServiceConnection);
+            navigationServiceBound = false;
         }
+        try { unregisterReceiver(navigationStopReceiver); } catch (Exception ignored) { }
         super.onDestroy();
     }
 }

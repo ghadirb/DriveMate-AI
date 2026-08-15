@@ -37,6 +37,7 @@ public final class NavigationSessionStore {
     private static final String KEY_TRAVELLED_METERS = "travelled_meters";
     private static final String KEY_CURRENT_STEP_INDEX = "current_step_index";
     private static final String KEY_CURRENT_WAYPOINT_ORDINAL = "current_waypoint_ordinal";
+    private static final String KEY_TRIP_PATH_JSON = "trip_path_json";
 
     /** Snapshot of everything needed to call NavigationEngine.start(route, listener, location,
      *  finalDestination, initialStepIndex) again and keep reporting distance/duration/trip time
@@ -50,10 +51,11 @@ public final class NavigationSessionStore {
         public final float travelledMeters;
         public final int currentStepIndex;
         public final int currentWaypointOrdinal;
+        public final List<RoutePoint> tripPath;
 
         public Session(RouteResult route, SavedPlace destination, List<RoutePoint> waypoints, String mode,
                        long tripStartAtMillis, float travelledMeters, int currentStepIndex,
-                       int currentWaypointOrdinal) {
+                       int currentWaypointOrdinal, List<RoutePoint> tripPath) {
             this.route = route;
             this.destination = destination;
             this.waypoints = waypoints;
@@ -62,6 +64,7 @@ public final class NavigationSessionStore {
             this.travelledMeters = travelledMeters;
             this.currentStepIndex = currentStepIndex;
             this.currentWaypointOrdinal = currentWaypointOrdinal;
+            this.tripPath = tripPath == null ? new ArrayList<>() : new ArrayList<>(tripPath);
         }
     }
 
@@ -77,7 +80,7 @@ public final class NavigationSessionStore {
      *  this does not add disk I/O to every location update, only to genuine progress events. */
     public void save(RouteResult route, SavedPlace destination, List<RoutePoint> waypoints, String mode,
                      long tripStartAtMillis, float travelledMeters, int currentStepIndex,
-                     int currentWaypointOrdinal) {
+                     int currentWaypointOrdinal, List<RoutePoint> tripPath) {
         try {
             SharedPreferences.Editor editor = prefs.edit();
             editor.putBoolean(KEY_HAS_SESSION, true);
@@ -89,6 +92,7 @@ public final class NavigationSessionStore {
             editor.putFloat(KEY_TRAVELLED_METERS, travelledMeters);
             editor.putInt(KEY_CURRENT_STEP_INDEX, currentStepIndex);
             editor.putInt(KEY_CURRENT_WAYPOINT_ORDINAL, currentWaypointOrdinal);
+            editor.putString(KEY_TRIP_PATH_JSON, waypointsToJson(tripPath).toString());
             editor.apply();
         } catch (JSONException ignored) {
             // A checkpoint failure must never crash an in-progress trip; the previous checkpoint
@@ -129,8 +133,9 @@ public final class NavigationSessionStore {
             float travelledMeters = prefs.getFloat(KEY_TRAVELLED_METERS, 0f);
             int currentStepIndex = prefs.getInt(KEY_CURRENT_STEP_INDEX, 0);
             int currentWaypointOrdinal = prefs.getInt(KEY_CURRENT_WAYPOINT_ORDINAL, -1);
+            List<RoutePoint> tripPath = waypointsFromJson(prefs.getString(KEY_TRIP_PATH_JSON, null));
             return new Session(route, destination, waypoints, mode, tripStartAtMillis, travelledMeters,
-                    currentStepIndex, currentWaypointOrdinal);
+                    currentStepIndex, currentWaypointOrdinal, tripPath);
         } catch (JSONException e) {
             clear();
             return null;
