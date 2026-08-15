@@ -104,6 +104,7 @@ public class NavigationForegroundService extends Service {
     private double activeTripOriginLongitude = Double.NaN;
     private final List<RoutePoint> activeTripPath = new ArrayList<>();
     private Location lastTripLocation;
+    private long lastSessionCheckpointAt;
 
     @Override public void onCreate() {
         super.onCreate();
@@ -213,6 +214,7 @@ public class NavigationForegroundService extends Service {
             }
         }
         lastTripLocation = origin == null ? null : new Location(origin);
+        lastSessionCheckpointAt = 0L;
         locationTracker.start();
         RoutePoint finalDestination = destination == null ? null
                 : new RoutePoint(destination.latitude, destination.longitude);
@@ -291,6 +293,11 @@ public class NavigationForegroundService extends Service {
             appendTripPath(location);
         }
         lastTripLocation = new Location(location);
+        long now = System.currentTimeMillis();
+        if (now - lastSessionCheckpointAt >= 5_000L) {
+            lastSessionCheckpointAt = now;
+            checkpointSession();
+        }
     }
 
     private void appendTripPath(Location location) {
