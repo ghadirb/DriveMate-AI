@@ -22,6 +22,8 @@ import ai.drivemate.model.RouteStep;
 import ai.drivemate.model.SavedPlace;
 import ai.drivemate.model.TripRecord;
 import ai.drivemate.routing.NavigationEngine;
+import ai.drivemate.routing.OverpassPoiProvider;
+import ai.drivemate.model.SpeedLimitPoint;
 import ai.drivemate.session.NavigationSessionStore;
 import ai.drivemate.storage.TripStore;
 import ai.drivemate.voice.VoiceGuidancePlayer;
@@ -107,6 +109,11 @@ public class NavigationForegroundService extends Service implements BackgroundNa
     private Location lastTripLocation;
     private long lastSessionCheckpointAt;
     private BackgroundNavigationMonitor backgroundMonitor;
+    private final OverpassPoiProvider speedLimitProvider = new OverpassPoiProvider();
+    private List<SpeedLimitPoint> activeSpeedLimits = new ArrayList<>();
+    private int overspeedSamples;
+    private long lastOverspeedWarningAt;
+    private boolean overspeedWarningActive;
 
     @Override public void onCreate() {
         super.onCreate();
@@ -120,6 +127,7 @@ public class NavigationForegroundService extends Service implements BackgroundNa
                 navigationEngine.onLocation(location);
                 recordTripLocation(location);
                 SessionCallback current = callback;
+                if (current == null) checkSpeedLimit(location);
                 if (current != null) current.onLocationUpdate(location);
             }
             @Override public void onLocationAvailabilityChanged(boolean available) {
@@ -154,6 +162,7 @@ public class NavigationForegroundService extends Service implements BackgroundNa
                 : new RoutePoint(activeDestination.latitude, activeDestination.longitude);
         navigationEngine.start(session.route, engineListener, current, finalDestination, session.currentStepIndex);
         ensureForeground();
+        fetchSpeedLimits(session.route);
         if (backgroundMonitor != null) backgroundMonitor.start();
     }
 
@@ -226,6 +235,7 @@ public class NavigationForegroundService extends Service implements BackgroundNa
         navigationEngine.start(route, engineListener, origin, finalDestination, initialStepIndex);
         ensureForeground();
         checkpointSession();
+        fetchSpeedLimits(route);
         if (backgroundMonitor != null) backgroundMonitor.start();
     }
 
@@ -273,6 +283,45 @@ public class NavigationForegroundService extends Service implements BackgroundNa
         sessionStore.save(activeRoute, activeDestination, activeWaypoints, activeMode, tripStartedAt,
                 activeTripDistanceMeters, navigationEngine.currentStepIndex(), currentWaypointOrdinal(), activeTripPath);
         voicePlayer.announce("background_reroute", "مسیر جایگزین پیدا شد و حدود " + Math.max(1, gainSeconds / 60) + " دقیقه سریع‌تر است.");
+    }
+
+
+    private void fetchSpeedLimits(RouteResult route) {
+        activeSpeedLimits = new ArrayList<>();
+        overspeedSamples = 0;
+        overspeedWarningActive = false;
+        if (route == null || route.geometry == null || route.geometry.size() < 2) return;
+        final List<RoutePoint> geometry = new ArrayList<>(route.geometry);
+        final List<SpeedLimitPoint> provider = route.providerSpeedLimits == null ? new ArrayList<>() : new ArrayList<>(route.providerSpeedLimits);
+        new Thread(() -> {
+            List<SpeedLimitPoint> resolved = provider;
+            try {
+                List<SpeedLimitPoint> osm = speedLimitProvider.speedLimitsNear(geometry);
+                if (osm != null && !osm.isEmpty()) resolved = osm;
+            } catch (Exception ignored) { }
+            final List<SpeedLimitPoint> result = resolved;
+            new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> activeSpeedLimits = result);
+        }).start();
+    }
+
+    private void checkSpeedLimit(Location location) {
+        if (location == null || activeSpeedLimits.isEmpty() || !navigationEngine.isNavigating() || !location.hasSpeed()) return;
+        if (location.hasAccuracy() && location.getAccuracy() > 50f) return;
+        SpeedLimitPoint nearest = null; float nearestDistance = Float.MAX_VALUE;
+        for (SpeedLimitPoint point : activeSpeedLimits) {
+            float[] d = new float[1];
+            Location.distanceBetween(location.getLatitude(), location.getLongitude(), point.latitude, point.longitude, d);
+            if (d[0] < nearestDistance) { nearestDistance = d[0]; nearest = point; }
+        }
+        if (nearest == null || nearestDistance > 100f || nearest.kilometersPerHour <= 0) { overspeedSamples = 0; overspeedWarningActive = false; return; }
+        float speedKmh = location.getSpeed() * 3.6f;
+        if (speedKmh >= nearest.kilometersPerHour + 5f) overspeedSamples++;
+        else if (speedKmh <= nearest.kilometersPerHour + 2f) { overspeedSamples = 0; overspeedWarningActive = false; }
+        if (overspeedSamples >= 2 && !overspeedWarningActive && System.currentTimeMillis() - lastOverspeedWarningAt >= 60000L) {
+            overspeedWarningActive = true;
+            lastOverspeedWarningAt = System.currentTimeMillis();
+            voicePlayer.announce("speed_limit_attention", "هشدار سرعت: سرعت مجاز این مسیر " + nearest.kilometersPerHour + " کیلومتر بر ساعت است؛ سرعت خود را کاهش دهید.");
+        }
     }
 
     private void clearTripState() {
@@ -374,7 +423,10 @@ public class NavigationForegroundService extends Service implements BackgroundNa
             // stage's scope - see class javadoc), so with no Activity bound this only keeps the
             // driver informed locally; the engine keeps guiding against the existing route.
             if (current != null) current.onOffRoute();
-            else voicePlayer.announce("alternative_route", "از مسیر خارج شده‌اید. در حال بازیابی مسیر.");
+            else {
+                voicePlayer.announce("alternative_route", "از مسیر خارج شده‌اید. در حال بازیابی مسیر.");
+                if (backgroundMonitor != null) backgroundMonitor.requestOffRouteReroute();
+            }
         }
 
         @Override public void onArrived() {
@@ -393,7 +445,7 @@ public class NavigationForegroundService extends Service implements BackgroundNa
             sessionStore.clear();
             clearTripState();
             if (locationTracker != null) locationTracker.stop();
-            if (voicePlayer != null) voicePlayer.interrupt();
+            // Let the arrival announcement finish; explicit user stop still interrupts voice.
             stopForeground(STOP_FOREGROUND_REMOVE);
             stopSelf();
         }

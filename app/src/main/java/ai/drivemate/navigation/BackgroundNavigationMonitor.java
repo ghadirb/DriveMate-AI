@@ -99,11 +99,16 @@ public final class BackgroundNavigationMonitor {
             try {
                 List<TrafficIncident> incidents = traffic.incidentsNear(route.geometry);
                 Set<String> currentTrafficIds = new HashSet<>();
+                boolean importantTrafficAhead = false;
                 for (TrafficIncident incident : incidents) {
                     if (!ahead(incident.latitude, incident.longitude, route.geometry, current)) continue;
                     String id = incident.id == null ? incident.type.name()+":"+incident.latitude+":"+incident.longitude : incident.id;
                     currentTrafficIds.add(id);
                     if (announcedTraffic.add(id)) voice.announce("bg-traffic:" + id, trafficText(incident));
+                    if (incident.type == TrafficIncident.Type.ACCIDENT || incident.type == TrafficIncident.Type.ROAD_CLOSED
+                            || incident.type == TrafficIncident.Type.ROADWORK || incident.type == TrafficIncident.Type.TRAFFIC_JAM) {
+                        importantTrafficAhead = true;
+                    }
                 }
                 announcedTraffic.retainAll(currentTrafficIds);
                 List<RouteSafetyAlert> alerts = safety.safetyAlertsNear(route.geometry);
@@ -115,15 +120,18 @@ public final class BackgroundNavigationMonitor {
                     if (announcedSafety.add(id)) voice.announce("bg-safety:" + id, safetyText(alert));
                 }
                 announcedSafety.retainAll(currentSafetyIds);
-                maybeReroute(current);
+                maybeReroute(current, importantTrafficAhead);
             } catch (Exception ignored) { }
         }).start();
     }
 
-    private void maybeReroute(Location current) {
+    public void requestOffRouteReroute() { maybeReroute(host.currentLocation(), true); }
+
+    private void maybeReroute(Location current, boolean forced) {
         if (current == null || rerouteInFlight || !host.isNavigating()) return;
         long now = System.currentTimeMillis();
         if (now - lastRerouteAt < MIN_REROUTE_INTERVAL_MS) return;
+        if (!forced) return;
         RouteResult old = host.activeRoute();
         SavedPlace destination = host.activeDestination();
         RouteRepository repository = routes;
@@ -132,14 +140,39 @@ public final class BackgroundNavigationMonitor {
         repository.getRoute(current.getLatitude(), current.getLongitude(), host.activeWaypoints(),
                 destination.latitude, destination.longitude, route -> {
                     int gain = old.durationSeconds - route.durationSeconds;
-                    boolean better = old.durationSeconds >= 300 && route.durationSeconds > 0
+                    boolean better = old.durationSeconds >= 300 && route != null && route.durationSeconds > 0
                             && gain >= MIN_GAIN_SECONDS && gain * 100 >= old.durationSeconds * 12;
-                    if (better && route.geometry != null && route.geometry.size() >= 2) {
+                    if (better && validReplacementRoute(route, current, destination)) {
                         host.applyTrafficReroute(route, current, gainSeconds(gain));
                         lastRerouteAt = now;
                     }
                     rerouteInFlight = false;
                 }, message -> rerouteInFlight = false);
+    }
+
+
+    private boolean validReplacementRoute(RouteResult route, Location current, SavedPlace destination) {
+        if (route == null || route.geometry == null || route.geometry.size() < 4 || destination == null) return false;
+        double polylineMeters = 0d;
+        float[] d = new float[1];
+        RoutePoint previous = null;
+        for (RoutePoint point : route.geometry) {
+            if (point == null || Double.isNaN(point.latitude) || Double.isNaN(point.longitude)) return false;
+            if (previous != null) {
+                Location.distanceBetween(previous.latitude, previous.longitude, point.latitude, point.longitude, d);
+                if (d[0] > 1000f) return false;
+                polylineMeters += d[0];
+            }
+            previous = point;
+        }
+        if (polylineMeters < 50d || route.distanceMeters <= 0) return false;
+        if (polylineMeters < route.distanceMeters * 0.65d || polylineMeters > route.distanceMeters * 1.8d) return false;
+        RoutePoint first = route.geometry.get(0);
+        RoutePoint last = route.geometry.get(route.geometry.size() - 1);
+        Location.distanceBetween(current.getLatitude(), current.getLongitude(), first.latitude, first.longitude, d);
+        if (d[0] > 700f) return false;
+        Location.distanceBetween(destination.latitude, destination.longitude, last.latitude, last.longitude, d);
+        return d[0] <= 700f;
     }
 
     private int gainSeconds(int gain) { return Math.max(0, gain); }

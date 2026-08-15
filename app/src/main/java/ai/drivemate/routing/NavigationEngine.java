@@ -103,7 +103,8 @@ public class NavigationEngine {
     /** Modestly wider than the maneuver-advance radius: this is a one-shot check (no multi-sample
      *  confirmation, since a parked/stopped driver may only ever produce one fix inside it), so it
      *  needs its own buffer against GPS noise rather than sharing the tighter per-maneuver radius. */
-    private static final float FINAL_ARRIVAL_RADIUS_METERS = 150f;
+    private static final float FINAL_ARRIVAL_RADIUS_METERS = 200f;
+    private static final float FINAL_ARRIVAL_ROUTE_RADIUS_METERS = 300f;
 
     public void start(RouteResult route, Listener listener) {
         start(route, listener, null);
@@ -215,9 +216,14 @@ public class NavigationEngine {
         RouteStep destinationStep = route.steps.get(route.steps.size() - 1);
         float metersToDestination = location.distanceTo(finalDestination == null
                 ? asLocation(destinationStep) : asLocation(finalDestination));
+        float metersToRouteEnd = route.geometry == null || route.geometry.isEmpty()
+                ? Float.MAX_VALUE : location.distanceTo(asLocation(route.geometry.get(route.geometry.size() - 1)));
         boolean destinationCloseEnough = metersToDestination <= FINAL_ARRIVAL_RADIUS_METERS
                 || (routeProgress != null && routeProgress.onRoute
-                && routeProgress.remainingMeters <= 80 && metersToDestination <= 220f);
+                && routeProgress.remainingMeters <= 140 && metersToDestination <= FINAL_ARRIVAL_ROUTE_RADIUS_METERS)
+                || (routeProgress != null && routeProgress.remainingMeters <= 90
+                && metersToRouteEnd <= FINAL_ARRIVAL_ROUTE_RADIUS_METERS
+                && metersToDestination <= FINAL_ARRIVAL_ROUTE_RADIUS_METERS);
         if (accuracyOkFor(location, MAX_ACCURACY_FOR_ARRIVAL_METERS) && destinationCloseEnough) {
             finalArrivalConfirmSamples++;
         } else {
