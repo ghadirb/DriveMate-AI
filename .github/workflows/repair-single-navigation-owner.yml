@@ -1,0 +1,83 @@
+name: One-shot navigation owner repair
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: ${{ !contains(github.event.head_commit.message, 'chore: remove one-shot navigation owner repair') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch MapActivity to remain a UI-only map
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+          p = Path('app/src/main/java/ai/drivemate/MapActivity.java')
+          s = p.read_text(encoding='utf-8')
+          original = s
+
+          # MainActivity is the single authoritative owner of NavigationEngine, GPS session and voice.
+          s = s.replace('public class MapActivity extends Activity implements LocationListener, NavigationEngine.Listener {',
+                        'public class MapActivity extends Activity implements LocationListener {')
+          s = s.replace('    private final NavigationEngine navigationEngine = new NavigationEngine();\n', '')
+          s = s.replace('    private boolean tripCompletionShown;\n', '    private boolean tripCompletionShown;\n    private int displayedStepIndex;\n')
+
+          # A live navigation map is a UI child of the existing trip, not the owner of that trip.
+          s = s.replace('if (navigationMode && navigationEngine.isNavigating() && destination != null)',
+                        'if (navigationMode && destination != null)')
+
+          # Do not start a second NavigationEngine from the map. MainActivity already started the
+          # authoritative engine before opening this Activity. Keep the map's local trip clock only
+          # for display while it is visible.
+          old = '''        navigationEngine.start(route, this, current, new RoutePoint(destination.latitude, destination.longitude));\n        // Guarded: refreshNavigationRouteFrom/recalculateActiveRoute also call this on every\n        // reroute, which must not reset the true trip start time/origin/distance-so-far - only a\n        // genuinely new trip (mapNavigationStartedAt == 0) initializes these.\n'''
+          new = '''        // IMPORTANT: MainActivity owns the single live NavigationEngine. This Activity only renders\n        // the selected route and follows the shared location feed; starting another engine here\n        // caused duplicate GPS/session state, competing callbacks, missing voice announcements and\n        // navigation stopping when the map Activity was closed.\n        displayedStepIndex = 0;\n        // Guarded: rerendering/rerouting the map must not reset the true trip start time.\n'''
+          if old not in s:
+              raise SystemExit('startTurnByTurn anchor not found; refusing unsafe patch')
+          s = s.replace(old, new, 1)
+
+          # The first visible turn comes directly from the selected route. Voice remains owned by MainActivity.
+          old = '''        turnExpandIcon.setText("▾");\n        if (!navigationEngine.announceCurrentInstruction()) {\n            turnInstructionText.setText("به سمت مقصد حرکت کنید");\n            turnArrowText.setText("↑");\n            renderLaneGuidance(null);\n        }\n'''
+          new = '''        turnExpandIcon.setText("▾");\n        displayedStepIndex = 0;\n        if (selectedRoute != null && selectedRoute.steps != null && !selectedRoute.steps.isEmpty()) {\n            RouteStep first = selectedRoute.steps.get(0);\n            turnInstructionText.setText(first.instruction == null || first.instruction.trim().isEmpty()\n                    ? "به سمت مقصد حرکت کنید" : first.instruction);\n            turnArrowText.setText(arrowForInstruction(first.instruction));\n            renderLaneGuidance(first.laneGuidance);\n        } else {\n            turnInstructionText.setText("به سمت مقصد حرکت کنید");\n            turnArrowText.setText("↑");\n            renderLaneGuidance(null);\n        }\n'''
+          if old not in s:
+              raise SystemExit('initial instruction anchor not found; refusing unsafe patch')
+          s = s.replace(old, new, 1)
+
+          # Replace engine-dependent HUD calculations with deterministic route geometry.
+          s = s.replace('''        RouteStep step = navigationEngine.currentStep();\n        if (step == null) return;\n''', '''        if (selectedRoute == null || selectedRoute.steps == null || selectedRoute.steps.isEmpty()) return;\n        if (displayedStepIndex < 0) displayedStepIndex = 0;\n        if (displayedStepIndex >= selectedRoute.steps.size()) displayedStepIndex = selectedRoute.steps.size() - 1;\n        while (displayedStepIndex < selectedRoute.steps.size() - 1) {\n            RouteStep currentStep = selectedRoute.steps.get(displayedStepIndex);\n            Location currentTarget = new Location("route");\n            currentTarget.setLatitude(currentStep.latitude);\n            currentTarget.setLongitude(currentStep.longitude);\n            if (location.distanceTo(currentTarget) > 30f) break;\n            displayedStepIndex++;\n        }\n        RouteStep step = selectedRoute.steps.get(displayedStepIndex);\n''', 1)
+          s = s.replace('int remainingMeters = navigationEngine.remainingMeters();\n',
+                        'int remainingMeters = estimateRemainingRouteMeters(location);\n', 1)
+
+          # Add a small route-distance estimator for the map HUD; it never creates a navigation session.
+          anchor = '    private void updateDrivingHud(float metersToCurrentTarget) {'
+          helper = '''    private int estimateRemainingRouteMeters(Location location) {\n        if (selectedRoute == null || selectedRoute.steps == null || selectedRoute.steps.isEmpty()) return 0;\n        int start = Math.max(0, Math.min(displayedStepIndex, selectedRoute.steps.size() - 1));\n        Location previous = location;\n        double total = 0d;\n        for (int i = start; i < selectedRoute.steps.size(); i++) {\n            RouteStep step = selectedRoute.steps.get(i);\n            Location point = new Location("route");\n            point.setLatitude(step.latitude);\n            point.setLongitude(step.longitude);\n            total += previous.distanceTo(point);\n            previous = point;\n        }\n        if (destination != null) {\n            Location end = new Location("destination");\n            end.setLatitude(destination.latitude);\n            end.setLongitude(destination.longitude);\n            if (previous.distanceTo(end) > 5f) total += previous.distanceTo(end);\n        }\n        return (int) Math.max(0, Math.round(total));\n    }\n\n'''
+          if anchor not in s:
+              raise SystemExit('HUD anchor not found; refusing unsafe patch')
+          s = s.replace(anchor, helper + anchor, 1)
+
+          if s == original:
+              raise SystemExit('patch made no changes')
+          p.write_text(s, encoding='utf-8')
+          print('MapActivity patched successfully')
+      - name: Validate and commit
+        shell: bash
+        run: |
+          git diff --check
+          git diff -- app/src/main/java/ai/drivemate/MapActivity.java
+          git config user.name 'DriveMate AI'
+          git config user.email 'drivemate-bot@users.noreply.github.com'
+          git add app/src/main/java/ai/drivemate/MapActivity.java
+          git commit -m 'fix: keep one authoritative navigation engine'
+          git push origin HEAD:main
+      - name: Remove one-shot workflow
+        if: success()
+        shell: bash
+        run: |
+          git rm .github/workflows/repair-single-navigation-owner.yml
+          git commit -m 'chore: remove one-shot navigation owner repair'
+          git push origin HEAD:main
