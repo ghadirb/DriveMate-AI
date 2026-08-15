@@ -462,9 +462,33 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         Log.i("DriveMateSession", "Leaving navigation map for tab=" + tab
                 + "; main navigation remains active=" + navigationMode);
         Intent result = new Intent();
-        result.putExtra(RESULT_MAIN_TAB, tab);
+        // MainActivity checks RESULT_MAIN_TAB before destination extras. Therefore a live navigation
+        // handoff must NOT include RESULT_MAIN_TAB, otherwise MainActivity would return early and
+        // never restart its authoritative navigation/voice session. A normal non-navigation map
+        // exit still returns the requested tab as before.
+        if (navigationMode && navigationEngine.isNavigating() && destination != null) {
+            result.putExtra(RESULT_LATITUDE, destination.latitude);
+            result.putExtra(RESULT_LONGITUDE, destination.longitude);
+            result.putExtra(RESULT_NAME, destination.name);
+            result.putExtra(RESULT_ADDRESS, destination.address);
+            result.putExtra(RESULT_ROUTE_INDEX, Math.max(0, navigationRouteIndex));
+            result.putStringArrayListExtra(RESULT_WAYPOINTS, encodeWaypoints());
+        } else {
+            result.putExtra(RESULT_MAIN_TAB, tab);
+        }
         setResult(RESULT_OK, result);
         finish();
+    }
+
+    @Override
+    public void onBackPressed() {
+        // The Android back gesture/button must use the same handoff as the in-app map exit.
+        // Explicitly stopping navigation remains a separate user action.
+        if (navigationMode && navigationEngine.isNavigating() && destination != null) {
+            returnToMainTab("dashboard");
+            return;
+        }
+        super.onBackPressed();
     }
 
     private void initializeMap() {
