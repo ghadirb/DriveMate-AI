@@ -2675,7 +2675,7 @@ public class MainActivity extends Activity {
         final int requestId = ++safetyAlertFetchRequestId;
         final List<RoutePoint> geometry = route.geometry;
         new Thread(() -> {
-            ArrayList<RouteSafetyAlert> merged = new ArrayList<>(RouteCurveAnalyzer.sharpCurves(geometry));
+            ArrayList<RouteSafetyAlert> merged = new ArrayList<>(RouteCurveAnalyzer.sharpCurves(geometry, route.steps));
             List<RouteSafetyAlert> offlineAlerts = new ArrayList<>();
             try {
                 offlineAlerts = offlineRoadSafetyProvider.safetyAlertsNear(geometry);

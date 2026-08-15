@@ -170,7 +170,12 @@ public class NavigationEngine {
         if (accuracyOk(location) && metersToDestination < FINAL_ARRIVAL_RADIUS_METERS) {
             finalArrivalConfirmSamples++;
         } else {
-            finalArrivalConfirmSamples = 0;
+            // Decay by one rather than a hard reset: GPS accuracy commonly dips right where a
+            // driver is stopping (parking structures, buildings near the destination), and
+            // resetting all prior progress on a single flaky sample could mean the required
+            // consecutive-good-samples count is never actually reached, leaving arrival
+            // permanently undetected.
+            finalArrivalConfirmSamples = Math.max(0, finalArrivalConfirmSamples - 1);
         }
         if (finalArrivalConfirmSamples >= FINAL_ARRIVAL_CONFIRM_SAMPLES) {
             Listener callback = listener;

@@ -89,6 +89,7 @@ import ai.drivemate.ai.RuntimeKeys;
 /** Map UI is isolated from the driving activity; it returns a selected destination to the existing engine. */
 public class MapActivity extends Activity implements LocationListener, NavigationEngine.Listener {
     private static final int REQUEST_MAP_LOCATION_PERMISSION = 410;
+    private static final int REQUEST_ENABLE_LOCATION = 411;
     public static final String EXTRA_ORIGIN_LATITUDE = "origin_latitude";
     public static final String EXTRA_ORIGIN_LONGITUDE = "origin_longitude";
     public static final String EXTRA_NESHAN_KEY = "neshan_key";
@@ -277,7 +278,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             lastAcceptedMapLocation = mapLocationFilter.getLastAcceptedLocation();
         }
         navigationMode = getIntent().getBooleanExtra(EXTRA_NAVIGATION_MODE, false);
-        if (navigationMode) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        if (navigationMode) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            promptEnableLocationIfNeeded();
+        }
         navigationRouteIndex = Math.max(0, getIntent().getIntExtra(EXTRA_NAVIGATION_ROUTE_INDEX, 0));
         restoreNavigationWaypoints();
         String neshanKey = getIntent().getStringExtra(EXTRA_NESHAN_KEY);
@@ -2137,6 +2141,45 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                         turnInstructionText.setText("بازیابی مسیر انجام نشد: " + error);
                     }
                 }));
+    }
+
+    /** Prompts the driver to turn location on with a single tap, via the standard Play Services
+     *  Location Settings Resolution dialog, instead of leaving them to find Settings manually.
+     *  Called once navigation is actually starting (navigationMode becomes true), regardless of
+     *  whether the destination was picked from the map or from saved places - both paths converge
+     *  on this activity launching in navigation mode. Silently does nothing if Play Services is
+     *  unavailable or location is already on; DeviceLocationTracker's own legacy-provider fallback
+     *  still works either way, this is purely a convenience prompt. */
+    private void promptEnableLocationIfNeeded() {
+        if (locationManager == null
+                || locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
+                || locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+            return;
+        }
+        try {
+            com.google.android.gms.location.LocationRequest request =
+                    new com.google.android.gms.location.LocationRequest.Builder(1000L)
+                            .setPriority(com.google.android.gms.location.Priority.PRIORITY_HIGH_ACCURACY)
+                            .build();
+            com.google.android.gms.location.LocationSettingsRequest settingsRequest =
+                    new com.google.android.gms.location.LocationSettingsRequest.Builder()
+                            .addLocationRequest(request)
+                            .build();
+            com.google.android.gms.location.LocationServices.getSettingsClient(this)
+                    .checkLocationSettings(settingsRequest)
+                    .addOnFailureListener(exception -> {
+                        if (exception instanceof com.google.android.gms.common.api.ResolvableApiException) {
+                            try {
+                                ((com.google.android.gms.common.api.ResolvableApiException) exception)
+                                        .startResolutionForResult(this, REQUEST_ENABLE_LOCATION);
+                            } catch (android.content.IntentSender.SendIntentException ignored) {
+                            }
+                        }
+                    });
+        } catch (RuntimeException ignored) {
+            // Play Services missing/outdated - the driver still gets normal location once they
+            // turn it on manually, or the legacy provider fallback picks it up if it comes on.
+        }
     }
 
     private Location currentMapLocation() {
