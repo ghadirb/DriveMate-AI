@@ -1587,7 +1587,7 @@ public class MainActivity extends Activity {
         stopBackgroundNavigation();
         hideTripAnalysis();
         if (tripStatsPanel != null) tripStatsPanel.setVisibility(View.GONE);
-        if (showCompletionReport) showTripCompletionReport(tripReport);
+        showTripCompletionReport(tripReport);
     }
 
     private void searchAndNavigate(String term) {
