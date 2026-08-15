@@ -327,7 +327,7 @@ public class NavigationForegroundService extends Service {
 
     private TripRecord buildTripRecord(SavedPlace destination, boolean completed) {
         if (destination == null || activeRoute == null || tripStartedAt == 0L) return null;
-        if (activeTripDistanceMeters < MIN_RECORDED_TRIP_DISTANCE_METERS) return null;
+        if (!completed && activeTripDistanceMeters < MIN_RECORDED_TRIP_DISTANCE_METERS) return null;
         long endedAt = System.currentTimeMillis();
         return new TripRecord(destination.name, activeTripOriginLatitude, activeTripOriginLongitude,
                 destination.latitude, destination.longitude, activeRoute.distanceMeters, activeRoute.durationSeconds,
