@@ -20,7 +20,7 @@ jobs:
         run: python3 tools/repair_map_navigation_handoff.py
       - name: Verify handoff anchors
         run: |
-          grep -q 'hand the active destination back to MainActivity' app/src/main/java/ai/drivemate/MapActivity.java
+          grep -q 'MainActivity checks RESULT_MAIN_TAB before destination extras' app/src/main/java/ai/drivemate/MapActivity.java
           grep -q 'public void onBackPressed()' app/src/main/java/ai/drivemate/MapActivity.java
       - name: Commit repair
         run: |
