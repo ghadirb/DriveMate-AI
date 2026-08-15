@@ -1,28 +1,13 @@
-name: one-shot navigation regression repair
+name: one-shot navigation regression repair (manual only)
 
 on:
-  push:
-    paths:
-      - 'tools/repair_map_navigation_handoff.py'
-      - '.github/workflows/one-shot-navigation-regression-repair.yml'
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  repair:
-    if: github.ref == 'refs/heads/main'
+  disabled:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Patch map navigation handoff
-        run: python3 tools/repair_map_navigation_handoff.py
-      - name: Commit repair
-        run: |
-          git config user.name 'DriveMate AI'
-          git config user.email 'ghadir.baraty@gmail.com'
-          git add app/src/main/java/ai/drivemate/MapActivity.java
-          git diff --cached --quiet && exit 0
-          git commit -m 'fix: preserve navigation when leaving map'
-          git push
+      - run: echo "One-shot repair completed; this workflow is now disabled. Android Build is the repository health check."
