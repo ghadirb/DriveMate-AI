@@ -1,0 +1,52 @@
+name: One-shot MapActivity compile repair
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.event_name == 'workflow_dispatch' || github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 12266719
+          accept-android-sdk-licenses: true
+          packages: tools platform-tools
+      - name: Install Android build tools
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Apply exact compile repair
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('app/src/main/java/ai/drivemate/MapActivity.java')
+          s = p.read_text(encoding='utf-8')
+          anchor = '    private int navigationRouteIndex;\n'
+          if s.count(anchor) != 1:
+              raise SystemExit(f'expected one navigationRouteIndex anchor, found {s.count(anchor)}')
+          s = s.replace(anchor, anchor + '    /** Current turn/step index used only by the map UI renderer. */\n    private int displayedStepIndex;\n', 1)
+          if s.count('first.laneGuidance') != 1:
+              raise SystemExit(f'expected one first.laneGuidance reference, found {s.count("first.laneGuidance")}')
+          s = s.replace('first.laneGuidance', 'first.lanes', 1)
+          p.write_text(s, encoding='utf-8')
+          PY
+      - name: Verify debug build
+        run: ./gradlew assembleDebug --stacktrace
+      - name: Commit repair and remove one-shot workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/fix-mapactivity-build.yml
+          git add app/src/main/java/ai/drivemate/MapActivity.java
+          git commit -m "fix: repair MapActivity navigation UI compile errors"
+          git push origin HEAD:main
