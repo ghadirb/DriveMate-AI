@@ -183,6 +183,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private boolean hasHeading;
     private boolean navigationCameraEnabled;
     private int navigationRouteIndex;
+    /** Current turn/step index used only by the map UI renderer. */
+    private int displayedStepIndex;
     private final SimpleDateFormat etaFormat = new SimpleDateFormat("HH:mm", Locale.US);
     private long mapNavigationStartedAt;
     /** Snapshot of the origin at the true start of this trip (not updated by reroutes), used so
@@ -1838,7 +1840,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             turnInstructionText.setText(first.instruction == null || first.instruction.trim().isEmpty()
                     ? "به سمت مقصد حرکت کنید" : first.instruction);
             turnArrowText.setText(arrowForInstruction(first.instruction));
-            renderLaneGuidance(first.laneGuidance);
+            renderLaneGuidance(first.lanes);
         } else {
             turnInstructionText.setText("به سمت مقصد حرکت کنید");
             turnArrowText.setText("↑");
