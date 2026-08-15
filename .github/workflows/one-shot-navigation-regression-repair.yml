@@ -1,13 +1,30 @@
-name: one-shot navigation regression repair (manual only)
+name: one-shot navigation regression repair
 
 on:
-  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/repair_map_navigation_handoff.py'
+      - '.github/workflows/one-shot-navigation-regression-repair.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  disabled:
+  repair:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "One-shot repair completed; this workflow is now disabled. Android Build is the repository health check."
+      - uses: actions/checkout@v4
+      - name: Patch map navigation owner
+        run: python3 tools/repair_map_navigation_handoff.py
+      - name: Verify anchors
+        run: |
+          grep -q 'public class MapActivity extends Activity implements LocationListener {' app/src/main/java/ai/drivemate/MapActivity.java
+          grep -q 'single live NavigationEngine' app/src/main/java/ai/drivemate/MapActivity.java
+      - name: Commit repair
+        run: |
+          git config user.name 'DriveMate AI'
+          git config user.email 'ghadir.baraty@gmail.com'
+          git add app/src/main/java/ai/drivemate/MapActivity.java
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix: keep MainActivity as sole navigation owner'
+          git push
