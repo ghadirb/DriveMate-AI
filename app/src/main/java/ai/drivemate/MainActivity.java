@@ -352,7 +352,7 @@ public class MainActivity extends Activity {
             navigationEngine = navigationService.getNavigationEngine();
             locationTracker = navigationService.getLocationTracker();
             voicePlayer = navigationService.getVoicePlayer();
-            navigationService.setCallback(sessionCallback);
+            navigationService.addCallback(sessionCallback);
             startLocationIfBound();
             syncNavigationStateFromService();
             promptEnableLocationIfNeeded();
@@ -3661,7 +3661,7 @@ public class MainActivity extends Activity {
         onlineSpeechClient.cancelRecording();
         localSpeechRecognizer.destroy();
         if (navigationServiceBound && navigationService != null) {
-            navigationService.clearCallback(sessionCallback);
+            navigationService.removeCallback(sessionCallback);
             unbindService(navigationServiceConnection);
             navigationServiceBound = false;
         }

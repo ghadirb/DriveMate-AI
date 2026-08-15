@@ -86,7 +86,12 @@ public class NavigationForegroundService extends Service implements BackgroundNa
     }
 
     private final LocalBinder binder = new LocalBinder();
-    private SessionCallback callback;
+    /** Every currently-bound Activity that wants live events (MainActivity always while alive,
+     *  MapActivity while it's the visible screen). A plain single field here used to mean whichever
+     *  Activity registered last silently cut the other off - e.g. opening the map screen would stop
+     *  MainActivity's own voice/AI layer from ever hearing another event again, and nothing ever
+     *  re-registered it. A list lets both hold a registration at once. */
+    private final java.util.List<SessionCallback> callbacks = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     private DeviceLocationTracker locationTracker;
     private final NavigationEngine navigationEngine = new NavigationEngine();
@@ -126,13 +131,11 @@ public class NavigationForegroundService extends Service implements BackgroundNa
             @Override public void onLocationUpdate(Location location) {
                 navigationEngine.onLocation(location);
                 recordTripLocation(location);
-                SessionCallback current = callback;
-                if (current == null) checkSpeedLimit(location);
-                if (current != null) current.onLocationUpdate(location);
+                if (callbacks.isEmpty()) checkSpeedLimit(location);
+                for (SessionCallback cb : callbacks) cb.onLocationUpdate(location);
             }
             @Override public void onLocationAvailabilityChanged(boolean available) {
-                SessionCallback current = callback;
-                if (current != null) current.onLocationAvailabilityChanged(available);
+                for (SessionCallback cb : callbacks) cb.onLocationAvailabilityChanged(available);
             }
         });
         restoreSessionIfNeeded();
@@ -190,11 +193,10 @@ public class NavigationForegroundService extends Service implements BackgroundNa
         return binder;
     }
 
-    /** Only clears the callback if it is still the same instance that registered it, so an old
-     *  Activity's onStop() racing with a new Activity's onStart() can never wipe out the new,
-     *  legitimately-bound callback. */
-    public void setCallback(SessionCallback callback) { this.callback = callback; }
-    public void clearCallback(SessionCallback callback) { if (this.callback == callback) this.callback = null; }
+    /** Registers a bound Activity for live events - safe to call from more than one Activity at
+     *  once (see the callbacks field javadoc). Adding the same instance twice is a no-op. */
+    public void addCallback(SessionCallback cb) { if (!callbacks.contains(cb)) callbacks.add(cb); }
+    public void removeCallback(SessionCallback cb) { callbacks.remove(cb); }
 
     public NavigationEngine getNavigationEngine() { return navigationEngine; }
     public DeviceLocationTracker getLocationTracker() { return locationTracker; }
@@ -411,36 +413,35 @@ public class NavigationForegroundService extends Service implements BackgroundNa
      *  local-voice-vs-forward-to-Activity rule this follows for every event. */
     private final NavigationEngine.Listener engineListener = new NavigationEngine.Listener() {
         @Override public void onInstruction(RouteStep step) {
-            SessionCallback current = callback;
-            if (current != null) current.onInstruction(step);
-            else voicePlayer.announce("route_step_custom", step.instruction);
+            if (callbacks.isEmpty()) voicePlayer.announce("route_step_custom", step.instruction);
+            for (SessionCallback cb : callbacks) cb.onInstruction(step);
             checkpointSession();
         }
 
         @Override public void onOffRoute() {
-            SessionCallback current = callback;
             // Rerouting itself needs network + the Activity's route-provider stack (out of this
             // stage's scope - see class javadoc), so with no Activity bound this only keeps the
             // driver informed locally; the engine keeps guiding against the existing route.
-            if (current != null) current.onOffRoute();
-            else {
+            if (callbacks.isEmpty()) {
                 voicePlayer.announce("alternative_route", "از مسیر خارج شده‌اید. در حال بازیابی مسیر.");
                 if (backgroundMonitor != null) backgroundMonitor.requestOffRouteReroute();
             }
+            for (SessionCallback cb : callbacks) cb.onOffRoute();
         }
 
         @Override public void onArrived() {
             SavedPlace destination = activeDestination;
             TripRecord tripReport = buildTripRecord(destination, true);
             if (tripReport != null) tripStore.add(tripReport);
-            SessionCallback current = callback;
-            if (current != null) {
-                current.onArrived(destination, tripReport);
-            } else if (destination != null) {
-                int minutes = tripStartedAt == 0L ? 0 : Math.max(1, (int) ((System.currentTimeMillis() - tripStartedAt) / 60_000L));
-                double kilometers = activeTripDistanceMeters / 1000.0;
-                voicePlayer.announce("destination_arrived", "به مقصد رسیدید. سفر حدود " + minutes + " دقیقه و "
-                        + String.format(java.util.Locale.US, "%.1f", kilometers) + " کیلومتر بود.");
+            if (callbacks.isEmpty()) {
+                if (destination != null) {
+                    int minutes = tripStartedAt == 0L ? 0 : Math.max(1, (int) ((System.currentTimeMillis() - tripStartedAt) / 60_000L));
+                    double kilometers = activeTripDistanceMeters / 1000.0;
+                    voicePlayer.announce("destination_arrived", "به مقصد رسیدید. سفر حدود " + minutes + " دقیقه و "
+                            + String.format(java.util.Locale.US, "%.1f", kilometers) + " کیلومتر بود.");
+                }
+            } else {
+                for (SessionCallback cb : callbacks) cb.onArrived(destination, tripReport);
             }
             sessionStore.clear();
             clearTripState();
@@ -451,35 +452,33 @@ public class NavigationForegroundService extends Service implements BackgroundNa
         }
 
         @Override public void onWaypointApproaching(RouteStep step, int ordinal) {
-            SessionCallback current = callback;
-            if (current != null) current.onWaypointApproaching(step, ordinal);
-            else voicePlayer.announce("continue_route", "توقف میانی " + (ordinal + 1) + " نزدیک است.");
+            if (callbacks.isEmpty()) voicePlayer.announce("continue_route", "توقف میانی " + (ordinal + 1) + " نزدیک است.");
+            for (SessionCallback cb : callbacks) cb.onWaypointApproaching(step, ordinal);
         }
 
         @Override public void onWaypointReached(RouteStep step, int ordinal) {
-            SessionCallback current = callback;
-            if (current != null) current.onWaypointReached(step, ordinal);
-            else voicePlayer.announce("continue_route", "به توقف میانی " + (ordinal + 1) + " رسیدید. مسیر به مقصد ادامه دارد.");
+            if (callbacks.isEmpty()) voicePlayer.announce("continue_route", "به توقف میانی " + (ordinal + 1) + " رسیدید. مسیر به مقصد ادامه دارد.");
+            for (SessionCallback cb : callbacks) cb.onWaypointReached(step, ordinal);
             checkpointSession();
         }
 
         @Override public void onWaypointSkipped(RouteStep step, int ordinal) {
-            SessionCallback current = callback;
-            if (current != null) current.onWaypointSkipped(step, ordinal);
-            else voicePlayer.announce("continue_route", "توقف میانی " + (ordinal + 1) + " رد شد؛ مسیریابی به مقصد بعدی ادامه دارد.");
+            if (callbacks.isEmpty()) voicePlayer.announce("continue_route", "توقف میانی " + (ordinal + 1) + " رد شد؛ مسیریابی به مقصد بعدی ادامه دارد.");
+            for (SessionCallback cb : callbacks) cb.onWaypointSkipped(step, ordinal);
             checkpointSession();
         }
 
         @Override public void onInstructionStage(RouteStep step, NavigationEngine.AnnouncementStage stage, int metersRemaining) {
-            SessionCallback current = callback;
-            if (current != null) {
-                current.onInstructionStage(step, stage, metersRemaining);
-            } else if (stage == NavigationEngine.AnnouncementStage.INITIAL
-                    || stage == NavigationEngine.AnnouncementStage.APPROACHING) {
-                String distance = Math.max(10, Math.round(metersRemaining / 10f) * 10) + " متر";
-                String prefix = stage == NavigationEngine.AnnouncementStage.INITIAL
-                        ? "در " + distance + "، " : "تا " + distance + " دیگر، ";
-                voicePlayer.speak(prefix + step.instruction);
+            if (callbacks.isEmpty()) {
+                if (stage == NavigationEngine.AnnouncementStage.INITIAL
+                        || stage == NavigationEngine.AnnouncementStage.APPROACHING) {
+                    String distance = Math.max(10, Math.round(metersRemaining / 10f) * 10) + " متر";
+                    String prefix = stage == NavigationEngine.AnnouncementStage.INITIAL
+                            ? "در " + distance + "، " : "تا " + distance + " دیگر، ";
+                    voicePlayer.speak(prefix + step.instruction);
+                }
+            } else {
+                for (SessionCallback cb : callbacks) cb.onInstructionStage(step, stage, metersRemaining);
             }
         }
     };

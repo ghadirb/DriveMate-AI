@@ -4,6 +4,9 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.Manifest;
 import android.content.Context;
+import android.content.ComponentName;
+import android.content.ServiceConnection;
+import android.os.IBinder;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
@@ -157,6 +160,51 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private PlaceStore placeStore;
     private TripStore tripStore;
     private LocationManager locationManager;
+    /** MainActivity/NavigationForegroundService own the single real NavigationEngine and its
+     *  arrival/instruction detection (see the class javadoc). This activity used to have (and
+     *  still implements NavigationEngine.Listener from, below) its own full copy of that reactive
+     *  UI-update logic, but nothing was ever wiring it to that engine anymore after that move - it
+     *  was never actually invoked, which is why this screen could stay showing an active
+     *  route/turn banner forever after the driver had actually arrived (no arrival ever fired
+     *  here) until the driver switched screens and back. Binding to the service and registering as
+     *  a NavigationForegroundService.SessionCallback while this screen is visible reconnects the
+     *  exact same UI-update methods to the real, single source of truth. */
+    private NavigationForegroundService navigationService;
+    private boolean navigationServiceBound;
+    private final ServiceConnection navigationServiceConnection = new ServiceConnection() {
+        @Override public void onServiceConnected(ComponentName name, IBinder service) {
+            navigationService = ((NavigationForegroundService.LocalBinder) service).getService();
+            navigationServiceBound = true;
+            navigationService.addCallback(navigationSessionCallback);
+        }
+        @Override public void onServiceDisconnected(ComponentName name) {
+            navigationServiceBound = false;
+            navigationService = null;
+        }
+    };
+
+    private final NavigationForegroundService.SessionCallback navigationSessionCallback =
+            new NavigationForegroundService.SessionCallback() {
+        @Override public void onInstruction(RouteStep step) { MapActivity.this.onInstruction(step); }
+        @Override public void onOffRoute() { MapActivity.this.onOffRoute(); }
+        @Override public void onArrived(SavedPlace arrivedDestination, TripRecord tripReport) { MapActivity.this.onArrived(); }
+        @Override public void onWaypointApproaching(RouteStep step, int waypointOrdinal) {
+            MapActivity.this.onWaypointApproaching(step, waypointOrdinal);
+        }
+        @Override public void onWaypointReached(RouteStep step, int waypointOrdinal) {
+            MapActivity.this.onWaypointReached(step, waypointOrdinal);
+        }
+        @Override public void onWaypointSkipped(RouteStep step, int waypointOrdinal) {
+            MapActivity.this.onWaypointSkipped(step, waypointOrdinal);
+        }
+        @Override public void onInstructionStage(RouteStep step, NavigationEngine.AnnouncementStage stage, int metersRemaining) { }
+        // This activity gets its own location fixes directly from LocationManager (see
+        // onLocationChanged below) - it already existed before this binding and drives its own
+        // GPS-quality filtering, vehicle marker, and route-line rendering, none of which this
+        // service-level callback needs to duplicate.
+        @Override public void onLocationUpdate(Location location) { }
+        @Override public void onLocationAvailabilityChanged(boolean available) { }
+    };
     private boolean navigationMode;
     private boolean followVehicle = true;
     /** Tracks the "کاربر زد موقعیت من ولی GPS خاموش بود" flow end-to-end so returning from
@@ -2872,6 +2920,11 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     @Override protected void onResume() {
         super.onResume();
+        if (!navigationServiceBound) {
+            bindService(new Intent(this, NavigationForegroundService.class), navigationServiceConnection, Context.BIND_AUTO_CREATE);
+        } else if (navigationService != null) {
+            navigationService.addCallback(navigationSessionCallback);
+        }
         maybeShowPendingTripReport();
         if (NightModeManager.refreshIfChanged(this)) return;
         NightModeManager.applyWindowBrightness(this);
@@ -2944,6 +2997,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             }
         }
         if (map != null) map.onPause();
+        if (navigationService != null) navigationService.removeCallback(navigationSessionCallback);
         super.onPause();
     }
 
@@ -2967,6 +3021,15 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     @Override protected void onDestroy() {
+        if (navigationServiceBound) {
+            if (navigationService != null) navigationService.removeCallback(navigationSessionCallback);
+            try {
+                unbindService(navigationServiceConnection);
+            } catch (IllegalArgumentException ignored) {
+                // Not actually bound (e.g. the service died and never reconnected) - nothing to undo.
+            }
+            navigationServiceBound = false;
+        }
         poiExpansionHandler.removeCallbacksAndMessages(null);
         trafficIncidentHandler.removeCallbacksAndMessages(null);
         searchHandler.removeCallbacksAndMessages(null);
