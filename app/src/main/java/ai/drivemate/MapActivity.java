@@ -1869,7 +1869,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         target.setLongitude(step.longitude);
         float metersToTurn = location.distanceTo(target);
         turnDistanceText.setText(formatDistance(Math.round(metersToTurn)));
-        updateDrivingHud(metersToTurn);
+        updateDrivingHud(location, metersToTurn);
     }
 
     /** Approximates remaining distance/time by adding the live distance to the next maneuver to
@@ -1898,7 +1898,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         return (int) Math.max(0, Math.round(total));
     }
 
-    private void updateDrivingHud(float metersToCurrentTarget) {
+    private void updateDrivingHud(Location location, float metersToCurrentTarget) {
         if (selectedRoute == null || selectedRoute.steps.isEmpty()) return;
         int remainingMeters = estimateRemainingRouteMeters(location);
         if (remainingMeters <= 0) remainingMeters = Math.round(metersToCurrentTarget);
