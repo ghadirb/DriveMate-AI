@@ -82,10 +82,12 @@ public final class BackgroundNavigationMonitor {
         announcedSafety.clear();
     }
 
-    private final Runnable task = () -> {
+    private final Runnable task = () -> refreshAndReschedule();
+
+    private void refreshAndReschedule() {
         refresh();
         handler.postDelayed(task, REFRESH_MS);
-    };
+    }
     private void refresh() {
         if (!host.isNavigating()) return;
         RouteResult route = host.activeRoute();
@@ -133,7 +135,7 @@ public final class BackgroundNavigationMonitor {
         if (current == null) return true;
         int currentIndex = nearest(current.getLatitude(), current.getLongitude(), geometry);
         int incidentIndex = nearest(lat, lng, geometry);
-        return currentIndex < 0 || incidentIndex < 0 || incidentIndex >= Math.max(0, currentIndex - 1);
+        return currentIndex < 0 || incidentIndex < 0 || incidentIndex > currentIndex;
     }
 
     private int nearest(double lat, double lng, List<RoutePoint> geometry) {
@@ -155,8 +157,8 @@ public final class BackgroundNavigationMonitor {
             case ROAD_CLOSED: return "هشدار: انسداد مسیر در جلو وجود دارد.";
             case ROADWORK: return "هشدار: عملیات عمرانی در مسیر شما جلوتر است.";
             case TRAFFIC_JAM: return "هشدار: ترافیک در مسیر شما جلوتر است.";
-            default: return incident.detail == null || incident.detail.isEmpty()
-                    ? "هشدار: مانع در مسیر شما جلوتر است." : "هشدار مسیر: " + incident.detail;
+            default: return incident.description == null || incident.description.isEmpty()
+                    ? "هشدار: مانع در مسیر شما جلوتر است." : "هشدار مسیر: " + incident.description;
         }
     }
 

@@ -264,7 +264,6 @@ public class NavigationForegroundService extends Service implements BackgroundNa
     @Override public SavedPlace activeDestination() { return activeDestination; }
     @Override public List<RoutePoint> activeWaypoints() { return new ArrayList<>(activeWaypoints); }
     @Override public Location currentLocation() { return lastTripLocation == null ? locationTracker.getLastLocation() : new Location(lastTripLocation); }
-    @Override public boolean isNavigating() { return navigationEngine.isNavigating(); }
     @Override public void applyTrafficReroute(RouteResult route, Location origin, int gainSeconds) {
         if (route == null || origin == null || !navigationEngine.isNavigating()) return;
         activeRoute = route;
