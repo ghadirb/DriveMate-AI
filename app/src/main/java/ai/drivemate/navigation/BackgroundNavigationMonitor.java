@@ -36,6 +36,7 @@ public final class BackgroundNavigationMonitor {
 
     private static final long REFRESH_MS = 5 * 60_000L;
     private static final int MIN_GAIN_SECONDS = 180;
+    private static final long MIN_REROUTE_INTERVAL_MS = 10 * 60_000L;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final VoiceGuidancePlayer voice;
     private final TrafficIncidentProvider traffic;
@@ -45,6 +46,7 @@ public final class BackgroundNavigationMonitor {
     private final Set<String> announcedSafety = new HashSet<>();
     private volatile RouteRepository routes;
     private boolean rerouteInFlight;
+    private long lastRerouteAt;
     public BackgroundNavigationMonitor(Context context, VoiceGuidancePlayer voice, Host host) {
         this.voice = voice;
         this.host = host;
@@ -96,17 +98,23 @@ public final class BackgroundNavigationMonitor {
         new Thread(() -> {
             try {
                 List<TrafficIncident> incidents = traffic.incidentsNear(route.geometry);
+                Set<String> currentTrafficIds = new HashSet<>();
                 for (TrafficIncident incident : incidents) {
                     if (!ahead(incident.latitude, incident.longitude, route.geometry, current)) continue;
                     String id = incident.id == null ? incident.type.name()+":"+incident.latitude+":"+incident.longitude : incident.id;
+                    currentTrafficIds.add(id);
                     if (announcedTraffic.add(id)) voice.announce("bg-traffic:" + id, trafficText(incident));
                 }
+                announcedTraffic.retainAll(currentTrafficIds);
                 List<RouteSafetyAlert> alerts = safety.safetyAlertsNear(route.geometry);
+                Set<String> currentSafetyIds = new HashSet<>();
                 for (RouteSafetyAlert alert : alerts) {
                     if (!ahead(alert.latitude, alert.longitude, route.geometry, current)) continue;
                     String id = alert.type.name()+":"+Math.round(alert.latitude*10000)+":"+Math.round(alert.longitude*10000);
+                    currentSafetyIds.add(id);
                     if (announcedSafety.add(id)) voice.announce("bg-safety:" + id, safetyText(alert));
                 }
+                announcedSafety.retainAll(currentSafetyIds);
                 maybeReroute(current);
             } catch (Exception ignored) { }
         }).start();
@@ -114,6 +122,8 @@ public final class BackgroundNavigationMonitor {
 
     private void maybeReroute(Location current) {
         if (current == null || rerouteInFlight || !host.isNavigating()) return;
+        long now = System.currentTimeMillis();
+        if (now - lastRerouteAt < MIN_REROUTE_INTERVAL_MS) return;
         RouteResult old = host.activeRoute();
         SavedPlace destination = host.activeDestination();
         RouteRepository repository = routes;
@@ -124,8 +134,10 @@ public final class BackgroundNavigationMonitor {
                     int gain = old.durationSeconds - route.durationSeconds;
                     boolean better = old.durationSeconds >= 300 && route.durationSeconds > 0
                             && gain >= MIN_GAIN_SECONDS && gain * 100 >= old.durationSeconds * 12;
-                    if (better && route.geometry != null && route.geometry.size() >= 2)
+                    if (better && route.geometry != null && route.geometry.size() >= 2) {
                         host.applyTrafficReroute(route, current, gainSeconds(gain));
+                        lastRerouteAt = now;
+                    }
                     rerouteInFlight = false;
                 }, message -> rerouteInFlight = false);
     }
