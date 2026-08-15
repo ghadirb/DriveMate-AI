@@ -19,11 +19,10 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
         with:
-          cmdline-tools-version: 12266719
-          accept-android-sdk-licenses: true
-          packages: tools platform-tools
-      - name: Install Android build tools
+          gradle-version: '8.9'
+      - name: Install Android build platform
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
       - name: Apply exact compile repair
         run: |
@@ -34,14 +33,16 @@ jobs:
           anchor = '    private int navigationRouteIndex;\n'
           if s.count(anchor) != 1:
               raise SystemExit(f'expected one navigationRouteIndex anchor, found {s.count(anchor)}')
-          s = s.replace(anchor, anchor + '    /** Current turn/step index used only by the map UI renderer. */\n    private int displayedStepIndex;\n', 1)
-          if s.count('first.laneGuidance') != 1:
-              raise SystemExit(f'expected one first.laneGuidance reference, found {s.count("first.laneGuidance")}')
-          s = s.replace('first.laneGuidance', 'first.lanes', 1)
+          if 'private int displayedStepIndex;' not in s:
+              s = s.replace(anchor, anchor + '    /** Current turn/step index used only by the map UI renderer. */\n    private int displayedStepIndex;\n', 1)
+          if 'first.laneGuidance' in s:
+              if s.count('first.laneGuidance') != 1:
+                  raise SystemExit(f'expected one first.laneGuidance reference, found {s.count("first.laneGuidance")}')
+              s = s.replace('first.laneGuidance', 'first.lanes', 1)
           p.write_text(s, encoding='utf-8')
           PY
       - name: Verify debug build
-        run: ./gradlew assembleDebug --stacktrace
+        run: gradle assembleDebug --stacktrace
       - name: Commit repair and remove one-shot workflow
         run: |
           git config user.name "github-actions[bot]"
