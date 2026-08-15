@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import ai.drivemate.location.DeviceLocationTracker;
+import ai.drivemate.navigation.BackgroundNavigationMonitor;
 import ai.drivemate.model.RoutePoint;
 import ai.drivemate.model.RouteResult;
 import ai.drivemate.model.RouteStep;
@@ -49,7 +50,7 @@ import ai.drivemate.voice.VoiceGuidancePlayer;
  * (speakDrivingEvent/DrivingIntelligenceCoordinator) - see the ongoing refactor notes for the
  * later stages that address those.
  */
-public class NavigationForegroundService extends Service {
+public class NavigationForegroundService extends Service implements BackgroundNavigationMonitor.Host {
     private static final String TAG = "DriveMateNavService";
     public static final String ACTION_STOP = "ai.drivemate.action.STOP_NAVIGATION";
     public static final String ACTION_STOP_BROADCAST = "ai.drivemate.action.STOP_NAVIGATION_BROADCAST";
@@ -105,12 +106,14 @@ public class NavigationForegroundService extends Service {
     private final List<RoutePoint> activeTripPath = new ArrayList<>();
     private Location lastTripLocation;
     private long lastSessionCheckpointAt;
+    private BackgroundNavigationMonitor backgroundMonitor;
 
     @Override public void onCreate() {
         super.onCreate();
         sessionStore = new NavigationSessionStore(this);
         tripStore = new TripStore(this);
         voicePlayer = new VoiceGuidancePlayer(this);
+        backgroundMonitor = new BackgroundNavigationMonitor(this, voicePlayer, this);
         locationTracker = new DeviceLocationTracker(this);
         locationTracker.setUpdateListener(new DeviceLocationTracker.UpdateListener() {
             @Override public void onLocationUpdate(Location location) {
@@ -151,6 +154,7 @@ public class NavigationForegroundService extends Service {
                 : new RoutePoint(activeDestination.latitude, activeDestination.longitude);
         navigationEngine.start(session.route, engineListener, current, finalDestination, session.currentStepIndex);
         ensureForeground();
+        if (backgroundMonitor != null) backgroundMonitor.start();
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
@@ -222,6 +226,7 @@ public class NavigationForegroundService extends Service {
         navigationEngine.start(route, engineListener, origin, finalDestination, initialStepIndex);
         ensureForeground();
         checkpointSession();
+        if (backgroundMonitor != null) backgroundMonitor.start();
     }
 
     /** Explicit driver-initiated stop (not arrival) - e.g. cancelling a trip from the UI. */
@@ -233,6 +238,7 @@ public class NavigationForegroundService extends Service {
         clearTripState();
         if (locationTracker != null) locationTracker.stop();
         if (voicePlayer != null) voicePlayer.interrupt();
+        if (backgroundMonitor != null) backgroundMonitor.stop();
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
         return report;
@@ -248,9 +254,26 @@ public class NavigationForegroundService extends Service {
         clearTripState();
         if (locationTracker != null) locationTracker.stop();
         if (voicePlayer != null) voicePlayer.interrupt();
+        if (backgroundMonitor != null) backgroundMonitor.stop();
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
         return report;
+    }
+
+    @Override public RouteResult activeRoute() { return activeRoute; }
+    @Override public SavedPlace activeDestination() { return activeDestination; }
+    @Override public List<RoutePoint> activeWaypoints() { return new ArrayList<>(activeWaypoints); }
+    @Override public Location currentLocation() { return lastTripLocation == null ? locationTracker.getLastLocation() : new Location(lastTripLocation); }
+    @Override public boolean isNavigating() { return navigationEngine.isNavigating(); }
+    @Override public void applyTrafficReroute(RouteResult route, Location origin, int gainSeconds) {
+        if (route == null || origin == null || !navigationEngine.isNavigating()) return;
+        activeRoute = route;
+        int step = Math.max(0, navigationEngine.currentStepIndex());
+        navigationEngine.start(route, engineListener, origin,
+                activeDestination == null ? null : new RoutePoint(activeDestination.latitude, activeDestination.longitude), step);
+        sessionStore.save(activeRoute, activeDestination, activeWaypoints, activeMode, tripStartedAt,
+                activeTripDistanceMeters, navigationEngine.currentStepIndex(), currentWaypointOrdinal(), activeTripPath);
+        voicePlayer.announce("background_reroute", "مسیر جایگزین پیدا شد و حدود " + Math.max(1, gainSeconds / 60) + " دقیقه سریع‌تر است.");
     }
 
     private void clearTripState() {
