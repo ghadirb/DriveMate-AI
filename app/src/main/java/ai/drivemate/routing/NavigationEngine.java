@@ -103,7 +103,7 @@ public class NavigationEngine {
     /** Modestly wider than the maneuver-advance radius: this is a one-shot check (no multi-sample
      *  confirmation, since a parked/stopped driver may only ever produce one fix inside it), so it
      *  needs its own buffer against GPS noise rather than sharing the tighter per-maneuver radius. */
-    private static final float FINAL_ARRIVAL_RADIUS_METERS = 100f;
+    private static final float FINAL_ARRIVAL_RADIUS_METERS = 150f;
 
     public void start(RouteResult route, Listener listener) {
         start(route, listener, null);
@@ -217,7 +217,7 @@ public class NavigationEngine {
                 ? asLocation(destinationStep) : asLocation(finalDestination));
         boolean destinationCloseEnough = metersToDestination <= FINAL_ARRIVAL_RADIUS_METERS
                 || (routeProgress != null && routeProgress.onRoute
-                && routeProgress.remainingMeters <= 120 && metersToDestination <= 140f);
+                && routeProgress.remainingMeters <= 80 && metersToDestination <= 220f);
         if (accuracyOkFor(location, MAX_ACCURACY_FOR_ARRIVAL_METERS) && destinationCloseEnough) {
             finalArrivalConfirmSamples++;
         } else {
@@ -359,8 +359,8 @@ public class NavigationEngine {
                 clamp(70f, 180f, speed * reactionSeconds * 0.75f)));
         // "در X متر": the first distant heads-up - this is where speed matters most, since it's the
         // one a fast highway approach most needs pulled earlier.
-        float initialMeters = Math.min(stepLen * 0.95f, Math.max(approachMeters + 40f,
-                clamp(120f, 450f, speed * reactionSeconds * 1.6f)));
+        float initialMeters = Math.min(stepLen * 0.98f, Math.max(approachMeters + 50f,
+                clamp(140f, 600f, speed * reactionSeconds * 2.0f)));
 
         if (announceStageReached < 1 && meters <= initialMeters) {
             announceStageReached = 1;
@@ -396,7 +396,7 @@ public class NavigationEngine {
         String text = step.instruction == null ? "" : step.instruction;
         float base = 6f;
         if (text.contains("دور بزنید")) base = 9f;
-        else if (text.contains("میدان")) base = 8f;
+        else if (text.contains("میدان")) base = 10f;
         else if (text.contains("تند")) base = 7f;
         if (speedMps >= 22f) base += 3f;
         return base;

@@ -955,6 +955,12 @@ public class MainActivity extends Activity {
         }
         pendingNavigationDestination = null;
         pendingNavigationWaypoints = null;
+        if (recordingLocalSpeech) localSpeechRecognizer.cancel();
+        if (recordingOnlineSpeech) {
+            recordingOnlineSpeech = false;
+            voiceHandler.removeCallbacks(automaticStop);
+            onlineSpeechClient.cancelRecording();
+        }
         stopAnyOtherActiveSessionBeforeStartingHere();
         resetGuidance(true);
         final long requestSequence = ++routeRequestSequence;
