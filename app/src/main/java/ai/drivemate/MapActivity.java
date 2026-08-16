@@ -204,6 +204,12 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                 // Remove the old route before committing the new geometry so the map never
                 // visually connects stale and fresh routes during a reroute.
                 clearNavigationRouteLines();
+                // Prevent GPS redraw from resurrecting the stale route during reroute.
+                routeOptions = new ArrayList<>();
+                selectedRoute = null;
+                routeNeedsRefreshFromCurrentLocation = false;
+                lastRouteRenderLocation = null;
+                lastRouteRenderAt = 0L;
                 routeOptions = new ArrayList<>();
                 routeOptions.add(route);
                 selectedRoute = route;

@@ -1002,6 +1002,8 @@ public class MainActivity extends Activity {
                 routes -> runOnUiThread(() -> {
                     if (requestSequence != routeRequestSequence) return;
                     if (routes == null || routes.isEmpty()) {
+                        rerouteInFlight = false;
+                        // Release the reroute gate when the provider returns no route.
                         // This used to just "return" here with no feedback at all: the loading
                         // spinner stayed on screen forever and nothing was ever drawn, which is
                         // exactly the "I go to the map and there's no navigation, nothing happened"
