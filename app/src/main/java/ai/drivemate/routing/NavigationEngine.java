@@ -441,11 +441,11 @@ public class NavigationEngine {
      *  same classification MainActivity's voice layer already uses for these Persian instructions. */
     private static float reactionSecondsFor(RouteStep step, float speedMps) {
         String text = step.instruction == null ? "" : step.instruction;
-        float base = 6f;
+        float base = 7f;
         if (text.contains("دور بزنید")) base = 9f;
         else if (text.contains("میدان")) base = 10f;
         else if (text.contains("تند")) base = 7f;
-        if (speedMps >= 22f) base += 3f;
+        if (speedMps >= 22f) base += 4f;
         return base;
     }
 

@@ -291,7 +291,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private static final long ROUTE_REFRESH_RETRY_MS = 15_000L;
     private Location lastRouteRenderLocation;
     private long lastRouteRenderAt;
-    private static final long NAVIGATION_ROUTE_REDRAW_INTERVAL_MS = 2_500L;
+    private static final long NAVIGATION_ROUTE_REDRAW_INTERVAL_MS = 700L;
     private PoiCategory activeNearbyCategory;
     private final List<Marker> nearbyMarkers = new ArrayList<>();
     private final EnumSet<PoiCategory> enabledPoiLayers = EnumSet.noneOf(PoiCategory.class);
@@ -1871,7 +1871,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             lastRouteRenderAt = now;
             return true;
         }
-        if (lastRouteRenderLocation.distanceTo(location) < 8f) return false;
+        if (lastRouteRenderLocation.distanceTo(location) < 3f) return false;
         lastRouteRenderLocation = new Location(location);
         lastRouteRenderAt = now;
         return true;
@@ -1925,17 +1925,26 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
      *  GPS samples. */
     private void updateTurnBanner(Location location) {
         if (selectedRoute == null || selectedRoute.steps == null || selectedRoute.steps.isEmpty()) return;
-        if (displayedStepIndex < 0) displayedStepIndex = 0;
-        if (displayedStepIndex >= selectedRoute.steps.size()) displayedStepIndex = selectedRoute.steps.size() - 1;
-        while (displayedStepIndex < selectedRoute.steps.size() - 1) {
-            RouteStep currentStep = selectedRoute.steps.get(displayedStepIndex);
-            Location currentTarget = new Location("route");
-            currentTarget.setLatitude(currentStep.latitude);
-            currentTarget.setLongitude(currentStep.longitude);
-            if (location.distanceTo(currentTarget) > 30f) break;
-            displayedStepIndex++;
+        // The foreground service is authoritative: keep the banner on the exact same maneuver as voice guidance.
+        RouteStep step = null;
+        if (navigationServiceBound && navigationService != null) {
+            step = navigationService.getNavigationEngine().currentStep();
+            int authoritativeIndex = navigationService.getNavigationEngine().currentStepIndex();
+            if (authoritativeIndex >= 0 && authoritativeIndex < selectedRoute.steps.size()) displayedStepIndex = authoritativeIndex;
         }
-        RouteStep step = selectedRoute.steps.get(displayedStepIndex);
+        if (step == null) {
+            if (displayedStepIndex < 0) displayedStepIndex = 0;
+            if (displayedStepIndex >= selectedRoute.steps.size()) displayedStepIndex = selectedRoute.steps.size() - 1;
+            while (displayedStepIndex < selectedRoute.steps.size() - 1) {
+                RouteStep currentStep = selectedRoute.steps.get(displayedStepIndex);
+                Location currentTarget = new Location("route");
+                currentTarget.setLatitude(currentStep.latitude);
+                currentTarget.setLongitude(currentStep.longitude);
+                if (location.distanceTo(currentTarget) > 30f) break;
+                displayedStepIndex++;
+            }
+            step = selectedRoute.steps.get(displayedStepIndex);
+        }
         Location target = new Location("route");
         target.setLatitude(step.latitude);
         target.setLongitude(step.longitude);
