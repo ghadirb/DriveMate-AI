@@ -1252,7 +1252,9 @@ public class MainActivity extends Activity {
                     .setPositiveButton("بستن", null)
                     .setNeutralButton("تاریخچه سفرها", (dialog, which) -> showTripHistory())
                     .show();
-            if (record.completed) tripStore.markReportShown(record.startedAt);
+            // Every displayed report is consumed, including manually stopped trips; otherwise
+            // onResume can show the same pending report repeatedly.
+            tripStore.markReportShown(record.startedAt);
         } catch (RuntimeException e) {
             // Window may already be invalid right at this moment (activity paused/backgrounded,
             // screen off) - leave unmarked so maybeShowPendingTripReport() catches it on whichever

@@ -104,8 +104,8 @@ public class NavigationEngine {
     /** Modestly wider than the maneuver-advance radius: this is a one-shot check (no multi-sample
      *  confirmation, since a parked/stopped driver may only ever produce one fix inside it), so it
      *  needs its own buffer against GPS noise rather than sharing the tighter per-maneuver radius. */
-    private static final float FINAL_ARRIVAL_RADIUS_METERS = 200f;
-    private static final float FINAL_ARRIVAL_ROUTE_RADIUS_METERS = 300f;
+    private static final float FINAL_ARRIVAL_RADIUS_METERS = 80f;
+    private static final float FINAL_ARRIVAL_ROUTE_RADIUS_METERS = 140f;
 
     public void start(RouteResult route, Listener listener) {
         start(route, listener, null);
@@ -231,9 +231,9 @@ public class NavigationEngine {
                 ? Float.MAX_VALUE : location.distanceTo(asLocation(route.geometry.get(route.geometry.size() - 1)));
         boolean destinationCloseEnough = metersToDestination <= FINAL_ARRIVAL_RADIUS_METERS
                 || (routeProgress != null && routeProgress.onRoute
-                && routeProgress.remainingMeters <= 140 && metersToDestination <= FINAL_ARRIVAL_ROUTE_RADIUS_METERS)
-                || (routeProgress != null && routeProgress.remainingMeters <= 90
-                && metersToRouteEnd <= FINAL_ARRIVAL_ROUTE_RADIUS_METERS
+                && routeProgress.remainingMeters <= 55 && metersToDestination <= FINAL_ARRIVAL_ROUTE_RADIUS_METERS)
+                || (routeProgress != null && routeProgress.onRoute
+                && routeProgress.remainingMeters <= 45 && metersToRouteEnd <= 80f
                 && metersToDestination <= FINAL_ARRIVAL_ROUTE_RADIUS_METERS);
         if (accuracyOkFor(location, MAX_ACCURACY_FOR_ARRIVAL_METERS) && destinationCloseEnough) {
             finalArrivalConfirmSamples++;
@@ -242,6 +242,8 @@ public class NavigationEngine {
         }
         if (finalArrivalConfirmSamples >= FINAL_ARRIVAL_CONFIRM_SAMPLES) {
             Log.i(TAG, "arrival confirmed distance=" + Math.round(metersToDestination)
+                    + " routeRemaining=" + Math.round(routeProgress == null ? -1 : routeProgress.remainingMeters)
+                    + " routeEndDistance=" + Math.round(metersToRouteEnd)
                     + " accuracy=" + (location.hasAccuracy() ? Math.round(location.getAccuracy()) : -1));
             Listener callback = listener;
             stop();

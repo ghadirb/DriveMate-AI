@@ -201,6 +201,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         @Override public void onRouteReplaced(RouteResult route) {
             runOnUiThread(() -> {
                 if (!navigationMode || route == null) return;
+                // Remove the old route before committing the new geometry so the map never
+                // visually connects stale and fresh routes during a reroute.
+                clearNavigationRouteLines();
                 routeOptions = new ArrayList<>();
                 routeOptions.add(route);
                 selectedRoute = route;
@@ -1818,13 +1821,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                 Location nearestLocation = new Location("route");
                 nearestLocation.setLatitude(nearestPoint.latitude);
                 nearestLocation.setLongitude(nearestPoint.longitude);
-                // Only draw the connector from the live position when it is close enough to
-                // plausibly be the same street - a large gap (deviated from the suggested route,
-                // or a GPS jump) drawn as a direct line looked like a real, precise route segment
-                // rather than what it actually was: a straight jump across unrelated streets.
-                if (current.distanceTo(nearestLocation) <= 150f) {
-                    points.add(new LatLng(current.getLatitude(), current.getLongitude()));
-                }
+                // Provider geometry is authoritative. Never add a synthetic straight connector
+                // from the live GPS point to the route; during reroute it can cross real streets.
                 firstPoint = nearestIndex;
             }
         }
@@ -2342,6 +2340,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     @Override public void onOffRoute() {
         runOnUiThread(() -> {
+            // Hide stale geometry immediately; the replacement route is drawn only after the
+            // routing provider returns real street geometry.
+            clearNavigationRouteLines();
             turnInstructionText.setText("در حال محاسبه مجدد مسیر...");
             turnArrowText.setText("↻");
             renderLaneGuidance(null);
