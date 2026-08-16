@@ -64,6 +64,7 @@ public class NavigationEngine {
      *  first maneuver of a trip (before any real GPS speed sample exists) still gets reasonable
      *  lead time instead of the degenerate 0 m/s a fresh Location often reports. */
     private float lastValidSpeedMps = 8.3f;
+    private Location lastTimingLocation;
     private static final float MIN_TIMING_SPEED_MPS = 2.8f;   // ~10km/h floor: stopped/crawling traffic must not collapse distances to ~0
     private static final float MAX_TIMING_SPEED_MPS = 36f;    // ~130km/h ceiling: guards a GPS speed spike from inflating distances unrealistically
     /** A single bad speed sample (multipath spike, brief loss of fix) must not be trusted outright -
@@ -141,6 +142,8 @@ public class NavigationEngine {
         this.skippedWaypointConfirmSamples = 0;
         this.finalArrivalConfirmSamples = 0;
         this.lastInstructionAt = 0L;
+        this.lastValidSpeedMps = 8.3f;
+        this.lastTimingLocation = currentLocation == null ? null : new Location(currentLocation);
         this.currentInstructionAnnounced = false;
         this.announceStageReached = 0;
         this.announcedWaypointIndex = -1;
@@ -164,6 +167,7 @@ public class NavigationEngine {
         passedStepConfirmSamples = 0;
         skippedWaypointConfirmSamples = 0;
         finalArrivalConfirmSamples = 0;
+        lastTimingLocation = null;
         currentInstructionAnnounced = false;
         announceStageReached = 0;
         announcedWaypointIndex = -1;
@@ -181,6 +185,13 @@ public class NavigationEngine {
     }
 
     public int currentStepIndex() { return nextStep; }
+
+    /** Last monotonic route segment accepted by RouteProgressTracker. Unlike a global nearest-point
+     * search this remains stable on loops, parallel roads and temporary off-route deviations. */
+    public int currentRouteSegmentIndex() {
+        RouteProgressTracker.Snapshot snapshot = progressTracker.current();
+        return snapshot == null ? -1 : snapshot.segmentIndex;
+    }
 
     public int remainingMeters() {
         RouteProgressTracker.Snapshot progress = progressTracker.current();
@@ -230,6 +241,8 @@ public class NavigationEngine {
             finalArrivalConfirmSamples = 0;
         }
         if (finalArrivalConfirmSamples >= FINAL_ARRIVAL_CONFIRM_SAMPLES) {
+            Log.i(TAG, "arrival confirmed distance=" + Math.round(metersToDestination)
+                    + " accuracy=" + (location.hasAccuracy() ? Math.round(location.getAccuracy()) : -1));
             Listener callback = listener;
             stop();
             callback.onArrived();
@@ -308,6 +321,9 @@ public class NavigationEngine {
         if (isReliablyOffRoute(location, meters, routeProgress)
                 && now - lastOffRouteCallbackAt >= MIN_MS_BETWEEN_OFFROUTE_CALLBACKS) {
             lastOffRouteCallbackAt = now;
+            Log.i(TAG, "off-route confirmed routeDistance=" + Math.round(routeProgress == null ? -1 : routeProgress.distanceToRouteMeters)
+                    + " targetDistance=" + Math.round(meters) + " accuracy=" + Math.round(location.getAccuracy())
+                    + " samples=" + offRouteSamples);
             listener.onOffRoute();
         }
     }
@@ -401,9 +417,19 @@ public class NavigationEngine {
      *  collapse or balloon every announcement distance for this tick. */
     private float smoothedSpeedMps(Location location) {
         float raw = location.hasSpeed() ? location.getSpeed() : -1f;
-        if (raw >= 0f && (lastValidSpeedMps <= 0f || Math.abs(raw - lastValidSpeedMps) <= MAX_PLAUSIBLE_SPEED_JUMP_MPS)) {
-            lastValidSpeedMps = raw;
+        if (raw < 0f && lastTimingLocation != null) {
+            long elapsedMs = location.getElapsedRealtimeNanos() > 0L && lastTimingLocation.getElapsedRealtimeNanos() > 0L
+                    ? (location.getElapsedRealtimeNanos() - lastTimingLocation.getElapsedRealtimeNanos()) / 1_000_000L
+                    : location.getTime() - lastTimingLocation.getTime();
+            if (elapsedMs > 0L) raw = lastTimingLocation.distanceTo(location) / Math.max(0.5f, elapsedMs / 1000f);
         }
+        if (raw >= 0f && raw <= MAX_TIMING_SPEED_MPS) {
+            // Smooth legitimate acceleration/deceleration instead of rejecting large jumps.
+            // Rejecting them kept the old speed and could make a warning arrive too late.
+            float bounded = Math.max(0f, Math.min(MAX_TIMING_SPEED_MPS, raw));
+            lastValidSpeedMps = lastValidSpeedMps * 0.65f + bounded * 0.35f;
+        }
+        lastTimingLocation = new Location(location);
         return Math.max(MIN_TIMING_SPEED_MPS, Math.min(MAX_TIMING_SPEED_MPS, lastValidSpeedMps));
     }
 

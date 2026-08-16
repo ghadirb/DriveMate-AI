@@ -1805,7 +1805,14 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         int firstPoint = 0;
         if (navigationMode && route == selectedRoute && !route.geometry.isEmpty()) {
             Location current = currentMapLocation();
-            int nearestIndex = closestRouteGeometryIndex(route.geometry, current);
+            int nearestIndex = -1;
+            // Keep rendering aligned with the service-owned monotonic map match. A global nearest-vertex
+            // search can jump backward to a loop/parallel-road segment after a GPS deviation.
+            if (navigationServiceBound && navigationService != null) {
+                int segment = navigationService.getNavigationEngine().currentRouteSegmentIndex();
+                if (segment >= 0 && segment < route.geometry.size()) { nearestIndex = segment; }
+            }
+            if (nearestIndex < 0) { nearestIndex = closestRouteGeometryIndex(route.geometry, current); }
             if (nearestIndex >= 0) {
                 RoutePoint nearestPoint = route.geometry.get(nearestIndex);
                 Location nearestLocation = new Location("route");
@@ -2259,6 +2266,16 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
      *  already left behind. Must include routeWaypoints - a plain origin-to-destination fetch here
      *  would silently drop every remaining intermediate stop from the recomputed route, so a
      *  waypoint reached after any reroute would never be detected or announced again. */
+    private void clearNavigationRouteLines() {
+        if (map == null) return;
+        for (Polyline polyline : alternateRoutePolylines) map.removePolyline(polyline);
+        alternateRoutePolylines.clear();
+        if (routePolyline != null) {
+            map.removePolyline(routePolyline);
+            routePolyline = null;
+        }
+    }
+
     private void recalculateActiveRoute() {
         Location current = currentMapLocation();
         if (destination == null || current == null) return;
@@ -2329,7 +2346,13 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             turnArrowText.setText("↻");
             renderLaneGuidance(null);
         });
-        recalculateActiveRoute();
+        // MainActivity is the authoritative route-fetching UI while it is alive. If it is bound,
+        // do not launch a second concurrent reroute request from MapActivity; two responses can
+        // otherwise race and make the displayed line jump between different routes. MapActivity
+        // remains the fallback rerouter only when no voice-capable Activity is bound.
+        if (navigationServiceBound && navigationService != null && !navigationService.hasVoiceCapableCallback()) {
+            recalculateActiveRoute();
+        }
     }
 
     @Override public void onWaypointReached(RouteStep step, int ordinal) {
@@ -2626,6 +2649,12 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private LatLng drivingPosition() {
         if (selectedRoute == null || selectedRoute.geometry.isEmpty()) {
             return new LatLng(originLatitude, originLongitude);
+        }
+        // Prefer the same monotonic map-matched point used by the live engine. This prevents the
+        // vehicle arrow from snapping to an earlier loop/parallel-road vertex on noisy GPS fixes.
+        if (navigationServiceBound && navigationService != null) {
+            RoutePoint snapped = navigationService.getNavigationEngine().snappedRoutePosition();
+            if (snapped != null) { return new LatLng(snapped.latitude, snapped.longitude); }
         }
         RoutePoint nearest = null;
         float nearestMeters = Float.MAX_VALUE;

@@ -239,6 +239,7 @@ public class NavigationForegroundService extends Service implements BackgroundNa
     public NavigationEngine getNavigationEngine() { return navigationEngine; }
     public DeviceLocationTracker getLocationTracker() { return locationTracker; }
     public VoiceGuidancePlayer getVoicePlayer() { return voicePlayer; }
+    public boolean hasVoiceCapableCallback() { return !noVoiceCapableCallback(); }
     public boolean isNavigating() { return navigationEngine.isNavigating(); }
     public RouteResult getActiveRoute() { return activeRoute; }
     public SavedPlace getActiveDestination() { return activeDestination; }
@@ -271,7 +272,10 @@ public class NavigationForegroundService extends Service implements BackgroundNa
         locationTracker.start();
         RoutePoint finalDestination = destination == null ? null
                 : new RoutePoint(destination.latitude, destination.longitude);
-        int initialStepIndex = preserveTripProgress ? Math.max(0, navigationEngine.currentStepIndex()) : 0;
+        // A reroute is calculated from the driver's current position, so the new route's step list has a different index space.
+        // Never carry the old route's step index into the new route; the engine will select its first actionable
+        // maneuver from the new route and then advance monotonically from live GPS.
+        int initialStepIndex = 0;
         navigationEngine.start(route, engineListener, origin, finalDestination, initialStepIndex);
         for (SessionCallback cb : callbacks) cb.onRouteReplaced(route);
         ensureForeground();
@@ -318,7 +322,8 @@ public class NavigationForegroundService extends Service implements BackgroundNa
     @Override public void applyTrafficReroute(RouteResult route, Location origin, int gainSeconds) {
         if (route == null || origin == null || !navigationEngine.isNavigating()) return;
         activeRoute = route;
-        int step = Math.max(0, navigationEngine.currentStepIndex());
+        // Traffic reroutes also replace the route geometry and therefore must restart step indexing at the new route origin.
+        int step = 0;
         navigationEngine.start(route, engineListener, origin,
                 activeDestination == null ? null : new RoutePoint(activeDestination.latitude, activeDestination.longitude), step);
         sessionStore.save(activeRoute, activeDestination, activeWaypoints, activeMode, tripStartedAt,
@@ -381,6 +386,24 @@ public class NavigationForegroundService extends Service implements BackgroundNa
         if (activeRoute == null || !navigationEngine.isNavigating()) return;
         sessionStore.save(activeRoute, activeDestination, activeWaypoints, activeMode, tripStartedAt,
                 activeTripDistanceMeters, navigationEngine.currentStepIndex(), currentWaypointOrdinal(), activeTripPath);
+    }
+
+    private void removeActiveWaypoint(RouteStep reachedStep) {
+        if (reachedStep == null || activeWaypoints.isEmpty()) return;
+        int closestIndex = -1;
+        float closestDistance = Float.MAX_VALUE;
+        Location reached = new Location("waypoint_reached");
+        reached.setLatitude(reachedStep.latitude);
+        reached.setLongitude(reachedStep.longitude);
+        for (int i = 0; i < activeWaypoints.size(); i++) {
+            RoutePoint waypoint = activeWaypoints.get(i);
+            Location candidate = new Location("waypoint");
+            candidate.setLatitude(waypoint.latitude);
+            candidate.setLongitude(waypoint.longitude);
+            float distance = reached.distanceTo(candidate);
+            if (distance < closestDistance) { closestDistance = distance; closestIndex = i; }
+        }
+        if (closestIndex >= 0 && closestDistance <= 150f) activeWaypoints.remove(closestIndex);
     }
 
     private int currentWaypointOrdinal() {
@@ -493,12 +516,14 @@ public class NavigationForegroundService extends Service implements BackgroundNa
         }
 
         @Override public void onWaypointReached(RouteStep step, int ordinal) {
+            removeActiveWaypoint(step);
             if (noVoiceCapableCallback()) voicePlayer.announce("continue_route", "به توقف میانی " + (ordinal + 1) + " رسیدید. مسیر به مقصد ادامه دارد.");
             for (SessionCallback cb : callbacks) cb.onWaypointReached(step, ordinal);
             checkpointSession();
         }
 
         @Override public void onWaypointSkipped(RouteStep step, int ordinal) {
+            removeActiveWaypoint(step);
             if (noVoiceCapableCallback()) voicePlayer.announce("continue_route", "توقف میانی " + (ordinal + 1) + " رد شد؛ مسیریابی به مقصد بعدی ادامه دارد.");
             for (SessionCallback cb : callbacks) cb.onWaypointSkipped(step, ordinal);
             checkpointSession();
