@@ -88,7 +88,7 @@ public class NavigationEngine {
      *  only clears on the next maneuver or a fresh start(): a one-shot latch can permanently lock
      *  up if the caller ever declines to act on a callback (e.g. its own reroute throttle), since
      *  nothing would ever clear it again for the rest of the trip. A cooldown always re-arms. */
-    private static final long MIN_MS_BETWEEN_OFFROUTE_CALLBACKS = 10_000L;
+    private static final long MIN_MS_BETWEEN_OFFROUTE_CALLBACKS = 3_000L;
     /** Consecutive confirming fixes required before trusting a maneuver has actually been reached
      *  (see onLocation). */
     private static final int STEP_ADVANCE_CONFIRM_SAMPLES = 2;
@@ -229,12 +229,13 @@ public class NavigationEngine {
                 ? asLocation(destinationStep) : asLocation(finalDestination));
         float metersToRouteEnd = route.geometry == null || route.geometry.isEmpty()
                 ? Float.MAX_VALUE : location.distanceTo(asLocation(route.geometry.get(route.geometry.size() - 1)));
-        boolean destinationCloseEnough = metersToDestination <= FINAL_ARRIVAL_RADIUS_METERS
+        // Arrival is a final-state decision: never finish a trip merely because the driver entered a broad destination radius.
+        boolean destinationCloseEnough = metersToDestination <= 35f
                 || (routeProgress != null && routeProgress.onRoute
-                && routeProgress.remainingMeters <= 55 && metersToDestination <= FINAL_ARRIVAL_ROUTE_RADIUS_METERS)
+                && routeProgress.remainingMeters <= 20 && metersToDestination <= 45f)
                 || (routeProgress != null && routeProgress.onRoute
-                && routeProgress.remainingMeters <= 45 && metersToRouteEnd <= 80f
-                && metersToDestination <= FINAL_ARRIVAL_ROUTE_RADIUS_METERS);
+                && routeProgress.remainingMeters <= 15 && metersToRouteEnd <= 35f
+                && metersToDestination <= 55f);
         if (accuracyOkFor(location, MAX_ACCURACY_FOR_ARRIVAL_METERS) && destinationCloseEnough) {
             finalArrivalConfirmSamples++;
         } else {
@@ -454,18 +455,18 @@ public class NavigationEngine {
 
     private boolean isReliablyOffRoute(Location location, float targetDistance,
                                        RouteProgressTracker.Snapshot routeProgress) {
-        if (nextStep >= route.steps.size() - 1 || targetReference == null) return false;
+        if (targetReference == null) return false;
         if (!location.hasAccuracy() || location.getAccuracy() > 50f) return false;
 
-        // Route geometry is much more reliable than distance to a maneuver endpoint on city streets.
-        // The corridor scales with the reported GPS accuracy and requires three fixes, preventing
-        // one bad network-location sample from repeatedly re-routing a driver on narrow streets.
+        // Off-route detection must also work in the final streets of a trip. The previous
+        // last-step guard disabled rerouting exactly when a driver could turn wrong near the
+        // destination. Use route geometry as the primary signal and confirm with two good fixes.
         float routeDistance = routeProgress == null ? distanceToRoute(location) : routeProgress.distanceToRouteMeters;
         float movedFromReference = location.distanceTo(targetReference);
-        float corridorMeters = Math.max(100f, location.getAccuracy() * 3.0f);
-        if (routeDistance > corridorMeters && movedFromReference >= 25f) {
+        float corridorMeters = Math.max(35f, Math.min(70f, location.getAccuracy() * 2.5f));
+        if (routeDistance > corridorMeters && movedFromReference >= 20f) {
             offRouteSamples++;
-            return offRouteSamples >= 3;
+            return offRouteSamples >= 2;
         }
         if (routeDistance <= corridorMeters * 0.65f) offRouteSamples = 0;
 
@@ -474,7 +475,7 @@ public class NavigationEngine {
         boolean movingAway = movedFromReference >= 80f
                 && targetDistance > Math.max(180f, targetDistanceAtReference + 100f);
         offRouteSamples = movingAway ? offRouteSamples + 1 : 0;
-        return offRouteSamples >= 3;
+        return offRouteSamples >= 2;
     }
 
     private boolean accuracyOk(Location location) {
