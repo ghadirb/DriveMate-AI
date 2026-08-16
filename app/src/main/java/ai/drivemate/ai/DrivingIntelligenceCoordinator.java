@@ -1,5 +1,7 @@
 package ai.drivemate.ai;
 
+import android.util.Log;
+
 import java.util.HashMap;
 import java.util.Map;
 import java.util.PriorityQueue;
@@ -14,13 +16,16 @@ import java.util.concurrent.TimeUnit;
  * In economy mode local fallbacks are immediate. Full mode grants online generation a short budget.
  */
 public class DrivingIntelligenceCoordinator {
+    private static final String TAG = "DriveMateAI";
     public enum Mode { ECONOMY, FULL }
     public enum Priority { SAFETY, DRIVING, CONVERSATION }
     public interface Listener { void onText(String requestId, String text, boolean online); }
 
     private enum State { PENDING, RUNNING, FALLBACK, CANCELLED, READY }
     private static final long FULL_MODE_SAFETY_WAIT_MS = 0L;
-    private static final long FULL_MODE_DRIVING_WAIT_MS = 1_000L;
+    // A short but usable budget for a natural turn sentence. MainActivity reads this same budget
+    // for its playback watchdog, preventing one layer from falling back before the other expects.
+    private static final long FULL_MODE_DRIVING_WAIT_MS = 1_800L;
     private static final long FULL_MODE_STANDARD_WAIT_MS = 3000L;
     private static final long ECONOMY_ONLINE_COOLDOWN_MS = 45_000L; // 45-60s suggested
     private static final long ECONOMY_ONLINE_WAIT_MS = 2_500L;
@@ -40,6 +45,11 @@ public class DrivingIntelligenceCoordinator {
     public synchronized void setMode(Mode mode) { this.mode = mode == null ? Mode.ECONOMY : mode; }
     public synchronized Mode getMode() { return mode; }
 
+    /** The authoritative online-response budget for the active full-intelligence mode. */
+    public synchronized long fullModeWaitBudget(Priority priority) {
+        return waitBudget(priority == null ? Priority.CONVERSATION : priority);
+    }
+
     public String request(Priority priority, String prompt, String context, String fallback, boolean onlineInEconomy,
                           long expiresInMs, Listener listener) {
         final Request request = new Request(priority, prompt, context, fallback, expiresInMs, listener);
@@ -50,6 +60,7 @@ public class DrivingIntelligenceCoordinator {
                         && (System.currentTimeMillis() - lastEconomyOnlineCallAt) >= ECONOMY_ONLINE_COOLDOWN_MS;
                 if (!allowOnline) {
                     request.state = State.FALLBACK;
+                    Log.i(TAG, "fallback=economy request=" + request.id + " priority=" + request.priority);
                     dispatch(request, fallback, false);
                     return request.id;
                 }
@@ -121,6 +132,8 @@ public class DrivingIntelligenceCoordinator {
                     || request.expiresAt <= System.currentTimeMillis()) return;
             request.state = State.FALLBACK;
         }
+        Log.i(TAG, "fallback=deadline request=" + request.id + " priority=" + request.priority
+                + " waitedMs=" + (System.currentTimeMillis() - request.createdAt));
         dispatch(request, request.fallback, false);
     }
 
@@ -143,12 +156,15 @@ public class DrivingIntelligenceCoordinator {
                 request.state = State.RUNNING;
             }
             AiAssistant.AnswerResult answer = assistant.answerNowResult(request.prompt, request.context);
+            long responseMs = System.currentTimeMillis() - request.createdAt;
             synchronized (this) {
                 if (request.state == State.CANCELLED || request.state == State.FALLBACK || request.expiresAt <= System.currentTimeMillis()) {
                     request.state = State.CANCELLED;
                     continue;
                 }
                 request.state = State.READY;
+                Log.i(TAG, "answer request=" + request.id + " priority=" + request.priority
+                        + " online=" + answer.online + " responseMs=" + responseMs);
                 if (request.prefetchKey != null) {
                     if (answer.online) prepared.put(request.prefetchKey, new Prepared(answer.text, request.expiresAt));
                     continue;

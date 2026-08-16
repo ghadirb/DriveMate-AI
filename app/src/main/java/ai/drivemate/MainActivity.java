@@ -219,6 +219,9 @@ public class MainActivity extends Activity {
     /** Monotonic token for navigation voice work. Any delayed response from an older route or
      * intelligence mode is ignored instead of speaking over the current guidance. */
     private long guidanceEpoch;
+    /** Separates consecutive announcements on the same route. A late AI/TTS callback from the
+     * previous turn must never speak after the next turn has become relevant. */
+    private long drivingAnnouncementGeneration;
     private boolean rerouteInFlight;
     private SavedPlace pendingSuggestionPlace;
     private PoiCategory pendingSuggestionCategory;
@@ -1921,6 +1924,10 @@ public class MainActivity extends Activity {
         return epoch == guidanceEpoch;
     }
 
+    private boolean isCurrentDrivingAnnouncement(long epoch, long generation) {
+        return isCurrentGuidance(epoch) && generation == drivingAnnouncementGeneration;
+    }
+
     /** Uses the local clip immediately in economy mode; full mode gives online AI/TTS first refusal. */
     private void speakDrivingEvent(DrivingIntelligenceCoordinator.Priority priority, String prompt, String clipName,
                                    String fallback, long expiresInMs) {
@@ -1967,6 +1974,10 @@ public class MainActivity extends Activity {
         }
 
         safetyAnnouncementPlaying = true;
+        // A safety warning preempts every previous turn prompt, including an AI response that is
+        // still in flight. Its callback is ignored even if the network returns while this warning
+        // is playing.
+        drivingAnnouncementGeneration++;
         voicePlayer.interrupt();
         onlineSpeechClient.stopPlayback();
         boolean played = announcement.clipName != null
@@ -1998,16 +2009,11 @@ public class MainActivity extends Activity {
         // The route engine immediately speaks the first real maneuver; avoid a second generic
         // "start moving" prompt that would delay the actionable instruction.
         if ("start_navigation".equals(clipName) && navigationEngine.hasActionableCurrentInstruction()) return;
-        // Always clear whatever is currently playing - local WAV/TTS or an online clip - before
-        // starting a new announcement. Individual playback paths already did this pairwise
-        // (speakShort, playDrivingFallback), but the economy-mode direct path and the full-mode
-        // online-TTS-fallback path each only stopped their own kind, not the other's. Switching
-        // intelligence mode mid-trip could then leave a leftover clip from the old mode overlapping
-        // a fresh one from the new mode, playing simultaneously.
-        if (priority == DrivingIntelligenceCoordinator.Priority.SAFETY) {
-            voicePlayer.interrupt();
-            onlineSpeechClient.stopPlayback();
-        }
+        final long generation = ++drivingAnnouncementGeneration;
+        // A newer maneuver supersedes a previous driving announcement. Stop both local and online
+        // paths together so a delayed clip cannot overlap the current instruction.
+        voicePlayer.interrupt();
+        onlineSpeechClient.stopPlayback();
         // Time-critical navigation cue: the AI paraphrase round trip (up to ~3.75s below) is not
         // acceptable here regardless of intelligence mode - speak the already-correct deterministic
         // text right now. See speakDrivingEvent's immediate-flag doc for why.
@@ -2019,18 +2025,21 @@ public class MainActivity extends Activity {
         if (isFullIntelligenceMode()) {
             setStatus("\u062f\u0631 \u062d\u0627\u0644 \u0622\u0645\u0627\u062f\u0647 \u06a9\u0631\u062f\u0646 \u067e\u0627\u0633\u062e \u0635\u0648\u062a\u06cc \u0647\u0648\u0634\u0645\u0646\u062f...");
             final AtomicBoolean delivered = new AtomicBoolean(false);
-            final long watchdogDelay = priority == DrivingIntelligenceCoordinator.Priority.SAFETY ? 1_000L : 1_800L;
+            // Keep the UI watchdog aligned with the coordinator's actual AI deadline. A shorter
+            // UI timeout used to discard a valid response while the coordinator still considered
+            // it eligible, which made Full mode appear to fall back unnecessarily.
+            final long watchdogDelay = intelligenceCoordinator.fullModeWaitBudget(priority);
             guidanceHandler.postDelayed(() -> {
-                if (!isCurrentGuidance(epoch) || !delivered.compareAndSet(false, true)) return;
-                playOnlineTtsFallback(clipName, fallback, epoch);
+                if (!isCurrentDrivingAnnouncement(epoch, generation) || !delivered.compareAndSet(false, true)) return;
+                playOnlineTtsFallback(clipName, fallback, epoch, generation);
             }, watchdogDelay);
             intelligenceCoordinator.request(priority, prompt, drivingContext(), fallback, false, expiresInMs,
                     (id, text, online) -> runOnUiThread(() -> {
-                        if (!isCurrentGuidance(epoch) || !delivered.compareAndSet(false, true)) return;
+                        if (!isCurrentDrivingAnnouncement(epoch, generation) || !delivered.compareAndSet(false, true)) return;
                         if (online) {
-                            speakShort(text, clipName, fallback, epoch);
+                            speakShort(text, clipName, fallback, epoch, generation);
                         } else {
-                            playOnlineTtsFallback(clipName, fallback, epoch);
+                            playOnlineTtsFallback(clipName, fallback, epoch, generation);
                         }
                     }));
         } else if (clipName != null) {
@@ -2076,10 +2085,15 @@ public class MainActivity extends Activity {
     }
 
     private void playOnlineTtsFallback(String clipName, String fallback, long epoch) {
-        if (!isCurrentGuidance(epoch)) return;
+        playOnlineTtsFallback(clipName, fallback, epoch, 0L);
+    }
+
+    private void playOnlineTtsFallback(String clipName, String fallback, long epoch, long generation) {
+        if (!isCurrentGuidance(epoch) || generation != 0L && generation != drivingAnnouncementGeneration) return;
         final AtomicBoolean finished = new AtomicBoolean(false);
         Runnable localFallback = () -> {
-            if (!isCurrentGuidance(epoch) || !finished.compareAndSet(false, true)) return;
+            if (!isCurrentGuidance(epoch) || generation != 0L && generation != drivingAnnouncementGeneration
+                    || !finished.compareAndSet(false, true)) return;
             boolean played = playDrivingFallback(clipName, fallback);
             setStatus(!played ? "صدای آنلاین در دسترس نبود و صدای محلی هم فعال نیست (TTS دستگاه فعال نیست)."
                     : clipName == null
@@ -2090,7 +2104,8 @@ public class MainActivity extends Activity {
         guidanceHandler.postDelayed(localFallback, 1_400L);
         onlineSpeechClient.speak(fallback, new OnlineSpeechClient.SpeechCallback() {
             @Override public void onPlayed() { runOnUiThread(() -> {
-                if (isCurrentGuidance(epoch) && finished.compareAndSet(false, true)) setStatus("راهنمای مسیر با صدای آنلاین پخش شد.");
+                if (isCurrentGuidance(epoch) && (generation == 0L || generation == drivingAnnouncementGeneration)
+                        && finished.compareAndSet(false, true)) setStatus("راهنمای مسیر با صدای آنلاین پخش شد.");
             }); }
             @Override public void onError() { runOnUiThread(localFallback); }
         });
@@ -2340,7 +2355,11 @@ public class MainActivity extends Activity {
     }
 
     private void speakShort(String answer, String fallbackClip, String fallbackText, long epoch) {
-        if (!isCurrentGuidance(epoch)) return;
+        speakShort(answer, fallbackClip, fallbackText, epoch, 0L);
+    }
+
+    private void speakShort(String answer, String fallbackClip, String fallbackText, long epoch, long generation) {
+        if (!isCurrentGuidance(epoch) || generation != 0L && generation != drivingAnnouncementGeneration) return;
         String shortAnswer = answer == null ? "" : answer.trim();
         if (shortAnswer.length() > 190) shortAnswer = shortAnswer.substring(0, 190);
         final String finalAnswer = shortAnswer;
@@ -2351,19 +2370,22 @@ public class MainActivity extends Activity {
         // promptly, prefer the packaged deterministic WAV instead of letting the maneuver pass.
         if (fallbackClip != null) {
             guidanceHandler.postDelayed(() -> {
-                if (!isCurrentGuidance(epoch) || !delivered.compareAndSet(false, true)) return;
+                if (!isCurrentGuidance(epoch) || generation != 0L && generation != drivingAnnouncementGeneration
+                        || !delivered.compareAndSet(false, true)) return;
                 boolean played = playDrivingFallback(fallbackClip, fallbackText);
                 setStatus(played ? "\u0635\u062f\u0627\u06cc \u0622\u0646\u0644\u0627\u06cc\u0646 \u062f\u06cc\u0631 \u0631\u0633\u06cc\u062f\u061b \u0647\u0634\u062f\u0627\u0631 WAV \u067e\u062e\u0634 \u0634\u062f." : "\u067e\u062e\u0634 \u0647\u0634\u062f\u0627\u0631 \u0645\u0633\u06cc\u0631 \u0645\u0648\u0641\u0642 \u0646\u0628\u0648\u062f.");
             }, 1_400L);
         }
         onlineSpeechClient.speak(finalAnswer, new OnlineSpeechClient.SpeechCallback() {
             @Override public void onPlayed() { runOnUiThread(() -> {
-                if (isCurrentGuidance(epoch) && delivered.compareAndSet(false, true)) {
+                if (isCurrentGuidance(epoch) && (generation == 0L || generation == drivingAnnouncementGeneration)
+                        && delivered.compareAndSet(false, true)) {
                     setStatus("\u0647\u0634\u062f\u0627\u0631 \u0622\u0646\u0644\u0627\u06cc\u0646 \u067e\u062e\u0634 \u0634\u062f.");
                 }
             }); }
             @Override public void onError() { runOnUiThread(() -> {
-                if (!isCurrentGuidance(epoch) || !delivered.compareAndSet(false, true)) return;
+                if (!isCurrentGuidance(epoch) || generation != 0L && generation != drivingAnnouncementGeneration
+                        || !delivered.compareAndSet(false, true)) return;
                 boolean played = fallbackClip != null
                         ? playDrivingFallback(fallbackClip, fallbackText)
                         : voicePlayer.speak(finalAnswer);

@@ -1,8 +1,7 @@
-name: One-shot MapActivity compile repair
+name: Archived one-shot MapActivity compile repair
 
+# Historical one-shot repair. Android Build is the only push-triggered CI workflow.
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
 
 permissions:
@@ -10,7 +9,7 @@ permissions:
 
 jobs:
   repair:
-    if: github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, 'one-shot MapActivity compile repair')
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout main

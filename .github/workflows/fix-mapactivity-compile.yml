@@ -1,14 +1,15 @@
-name: Repair MapActivity compile
+name: Archived MapActivity compile repair
 
+# Historical one-shot repair. It must never modify main during a normal release build.
 on:
-  push:
-    branches: [ main ]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   repair:
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

@@ -40,11 +40,15 @@ public class VoiceGuidancePlayer {
     private boolean ttsReady;
     private boolean ttsAvailable = true;
     private boolean playing;
+    /** Only callbacks for this utterance may release the serial playback queue. Android can
+     * deliver onDone for a stopped utterance after its replacement has already started. */
+    private String activeTtsUtteranceId;
     private String lastGuidanceKey;
     private long lastGuidanceAt;
 
     public VoiceGuidancePlayer(Context context) {
         this.context = context.getApplicationContext();
+        validatePackagedClips();
         textToSpeech = new TextToSpeech(this.context, status -> {
             synchronized (VoiceGuidancePlayer.this) {
                 if (status != TextToSpeech.SUCCESS) {
@@ -65,6 +69,16 @@ public class VoiceGuidancePlayer {
         });
     }
 
+    /** Resource packaging errors should be visible during device/CI diagnostics rather than
+     * silently degrading an instruction to device TTS at the first real maneuver. */
+    private void validatePackagedClips() {
+        for (String clip : REAL_CLIPS) {
+            if (context.getResources().getIdentifier(clip, "raw", context.getPackageName()) == 0) {
+                Log.e(TAG, "Missing packaged guidance clip: " + clip);
+            }
+        }
+    }
+
     public synchronized boolean announce(String clipName, String fallbackText) {
         String resolved = resolveClipName(clipName);
         int resId = context.getResources().getIdentifier(resolved, "raw", context.getPackageName());
@@ -82,7 +96,7 @@ public class VoiceGuidancePlayer {
             removeNonSafetyQueuedItems();
             if (playing) {
                 stopMediaOnly();
-                if (textToSpeech != null) textToSpeech.stop();
+                stopTextToSpeech();
                 playing = false;
             }
             queue.addFirst(item);
@@ -105,7 +119,7 @@ public class VoiceGuidancePlayer {
             removeNonSafetyQueuedItems();
             if (playing) {
                 stopMediaOnly();
-                if (textToSpeech != null) textToSpeech.stop();
+                stopTextToSpeech();
                 playing = false;
             }
             queue.addFirst(item);
@@ -151,7 +165,7 @@ public class VoiceGuidancePlayer {
 
     private boolean startClip(int resId, String label) {
         stopMediaOnly();
-        if (textToSpeech != null) textToSpeech.stop();
+        stopTextToSpeech();
         player = MediaPlayer.create(context, resId);
         if (player == null) return false;
         player.setVolume(volume, volume);
@@ -189,21 +203,25 @@ public class VoiceGuidancePlayer {
         if (textToSpeech == null || !ttsReady) return false;
         playing = true;
         final String utteranceId = "drivemate_tts_" + System.nanoTime();
+        activeTtsUtteranceId = utteranceId;
         textToSpeech.setOnUtteranceProgressListener(new UtteranceProgressListener() {
             @Override public void onStart(String id) { }
-            @Override public void onDone(String id) { finishTts(); }
-            @Override public void onError(String id) { finishTts(); }
+            @Override public void onDone(String id) { finishTts(id); }
+            @Override public void onError(String id) { finishTts(id); }
         });
         int result = textToSpeech.speak(text, TextToSpeech.QUEUE_ADD, null, utteranceId);
         if (result != TextToSpeech.SUCCESS) {
+            activeTtsUtteranceId = null;
             playing = false;
             return false;
         }
         return true;
     }
 
-    private void finishTts() {
+    private void finishTts(String utteranceId) {
         synchronized (this) {
+            if (utteranceId == null || !utteranceId.equals(activeTtsUtteranceId)) return;
+            activeTtsUtteranceId = null;
             playing = false;
             drain();
         }
@@ -259,10 +277,15 @@ public class VoiceGuidancePlayer {
         }
     }
 
+    private void stopTextToSpeech() {
+        if (textToSpeech != null) textToSpeech.stop();
+        activeTtsUtteranceId = null;
+    }
+
     public synchronized void interrupt() {
         queue.clear();
         stopMediaOnly();
-        if (textToSpeech != null) textToSpeech.stop();
+        stopTextToSpeech();
         playing = false;
     }
 
@@ -274,6 +297,7 @@ public class VoiceGuidancePlayer {
             textToSpeech.shutdown();
             textToSpeech = null;
         }
+        activeTtsUtteranceId = null;
         playing = false;
     }
 
