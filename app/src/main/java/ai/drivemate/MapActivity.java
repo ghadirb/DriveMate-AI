@@ -175,7 +175,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         @Override public void onServiceConnected(ComponentName name, IBinder service) {
             navigationService = ((NavigationForegroundService.LocalBinder) service).getService();
             navigationServiceBound = true;
-            navigationService.addCallback(navigationSessionCallback);
+            navigationService.addCallback(navigationSessionCallback, false);
         }
         @Override public void onServiceDisconnected(ComponentName name) {
             navigationServiceBound = false;
@@ -2934,7 +2934,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         if (!navigationServiceBound) {
             bindService(new Intent(this, NavigationForegroundService.class), navigationServiceConnection, Context.BIND_AUTO_CREATE);
         } else if (navigationService != null) {
-            navigationService.addCallback(navigationSessionCallback);
+            navigationService.addCallback(navigationSessionCallback, false);
         }
         maybeShowPendingTripReport();
         if (NightModeManager.refreshIfChanged(this)) return;

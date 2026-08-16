@@ -1920,8 +1920,21 @@ public class MainActivity extends Activity {
     /** Uses the local clip immediately in economy mode; full mode gives online AI/TTS first refusal. */
     private void speakDrivingEvent(DrivingIntelligenceCoordinator.Priority priority, String prompt, String clipName,
                                    String fallback, long expiresInMs) {
+        speakDrivingEvent(priority, prompt, clipName, fallback, expiresInMs, false);
+    }
+
+    /** Same as above, but when immediate=true the online AI paraphrase step is skipped entirely
+     *  (in both economy AND full/smart mode) and the deterministic fallback/clip is spoken right
+     *  away - same "never wait for AI/network" rule SAFETY already follows. Use this for anything
+     *  whose timing is itself the point (a live, distance/speed-computed navigation cue): the
+     *  full-mode AI round trip can take up to ~3.75s (see playDrivingAnnouncement's watchdog),
+     *  which alone can eat most or all of a short maneuver's remaining lead time and make an
+     *  otherwise correctly-timed cue play late, or only once the maneuver (e.g. a tight roundabout
+     *  entry) has already been passed. */
+    private void speakDrivingEvent(DrivingIntelligenceCoordinator.Priority priority, String prompt, String clipName,
+                                   String fallback, long expiresInMs, boolean immediate) {
         DrivingAnnouncement announcement = new DrivingAnnouncement(priority, prompt, clipName, fallback,
-                System.currentTimeMillis() + Math.max(1_000L, expiresInMs));
+                System.currentTimeMillis() + Math.max(1_000L, expiresInMs), immediate);
         if (priority == DrivingIntelligenceCoordinator.Priority.SAFETY) {
             safetyAnnouncementQueue.add(announcement.withMinimumLifetime(45_000L));
             drainSafetyAnnouncements();
@@ -1991,6 +2004,14 @@ public class MainActivity extends Activity {
             voicePlayer.interrupt();
             onlineSpeechClient.stopPlayback();
         }
+        // Time-critical navigation cue: the AI paraphrase round trip (up to ~3.75s below) is not
+        // acceptable here regardless of intelligence mode - speak the already-correct deterministic
+        // text right now. See speakDrivingEvent's immediate-flag doc for why.
+        if (announcement.immediate) {
+            boolean played = playDrivingFallback(clipName, fallback);
+            setStatus(played ? "دستور مسیریابی پخش شد." : "دستور مسیریابی آماده شد، ولی صدای دستگاه در دسترس نیست.");
+            return;
+        }
         if (isFullIntelligenceMode()) {
             setStatus("\u062f\u0631 \u062d\u0627\u0644 \u0622\u0645\u0627\u062f\u0647 \u06a9\u0631\u062f\u0646 \u067e\u0627\u0633\u062e \u0635\u0648\u062a\u06cc \u0647\u0648\u0634\u0645\u0646\u062f...");
             final AtomicBoolean delivered = new AtomicBoolean(false);
@@ -2021,19 +2042,21 @@ public class MainActivity extends Activity {
         final String clipName;
         final String fallback;
         final long expiresAt;
+        final boolean immediate;
 
         DrivingAnnouncement(DrivingIntelligenceCoordinator.Priority priority, String prompt,
-                            String clipName, String fallback, long expiresAt) {
+                            String clipName, String fallback, long expiresAt, boolean immediate) {
             this.priority = priority;
             this.prompt = prompt == null ? "" : prompt;
             this.clipName = clipName;
             this.fallback = fallback == null ? "" : fallback;
             this.expiresAt = expiresAt;
+            this.immediate = immediate;
         }
 
         DrivingAnnouncement withMinimumLifetime(long minimumLifetimeMs) {
             return new DrivingAnnouncement(priority, prompt, clipName, fallback,
-                    Math.max(expiresAt, System.currentTimeMillis() + minimumLifetimeMs));
+                    Math.max(expiresAt, System.currentTimeMillis() + minimumLifetimeMs), immediate);
         }
     }
 
@@ -3502,7 +3525,7 @@ public class MainActivity extends Activity {
                     ? "در " + distance + "، " + text : "تا " + distance + " دیگر، " + text;
         }
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING, phrase,
-                "instruction_stage_custom", phrase, 8_000L);
+                "instruction_stage_custom", phrase, 8_000L, true);
     }
 
     /** Rounds to the nearest 10m under 100m, nearest 50m beyond - a live GPS-derived distance read
@@ -3557,8 +3580,13 @@ public class MainActivity extends Activity {
                 + (laneClause.isEmpty() ? "" : " راهنمای خط عبور از داده مسیر: " + laneClause)
                 + " آن را در یک جمله فارسی کوتاه، طبیعی و مناسب رانندگی بیان کن"
                 + (laneClause.isEmpty() ? "." : "؛ راهنمای خط عبور را هم در همان جمله بگنجان.");
+        // This fires exactly at the maneuver (either from the cascade's finalMeters threshold, or -
+        // for a short step like a tight roundabout entry - as NavigationEngine's last-chance
+        // force-announce right before advancing past it). There is no lead time left to spend on an
+        // AI paraphrase round trip here; waiting for one is how a roundabout ends up announced only
+        // after the driver has already passed it. Speak the real instruction immediately instead.
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING, stepPrompt,
-                lastInstruction, fallbackWithLane, 10_000L);
+                lastInstruction, fallbackWithLane, 10_000L, true);
         setStatus(text);
     }
 

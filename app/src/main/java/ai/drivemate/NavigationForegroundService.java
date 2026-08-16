@@ -100,6 +100,17 @@ public class NavigationForegroundService extends Service implements BackgroundNa
      *  MainActivity's own voice/AI layer from ever hearing another event again, and nothing ever
      *  re-registered it. A list lets both hold a registration at once. */
     private final java.util.List<SessionCallback> callbacks = new java.util.concurrent.CopyOnWriteArrayList<>();
+    /** Callbacks registered with providesVoice=false (see addCallback) - currently just
+     *  MapActivity, which only drives its own turn banner/UI and was never wired to speak
+     *  anything itself (see the onInstruction/onInstructionStage local-fallback checks below). If
+     *  MainActivity's callback is the only voice-capable one and Android destroys that Activity
+     *  instance (low-memory reclaim) while only the map screen is left on screen, callbacks stops
+     *  being empty - so the old callbacks.isEmpty() local-fallback check never re-armed, and every
+     *  navigation cue went silent even though the trip kept running correctly. Tracking voice
+     *  capability per-callback lets the local fallback re-arm in exactly that case, without
+     *  double-speaking when MainActivity is still alive alongside MapActivity. */
+    private final java.util.Set<SessionCallback> silentCallbacks =
+            java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
 
     private DeviceLocationTracker locationTracker;
     private final NavigationEngine navigationEngine = new NavigationEngine();
@@ -139,7 +150,7 @@ public class NavigationForegroundService extends Service implements BackgroundNa
             @Override public void onLocationUpdate(Location location) {
                 navigationEngine.onLocation(location);
                 recordTripLocation(location);
-                if (callbacks.isEmpty()) checkSpeedLimit(location);
+                if (noVoiceCapableCallback()) checkSpeedLimit(location);
                 for (SessionCallback cb : callbacks) cb.onLocationUpdate(location);
             }
             @Override public void onLocationAvailabilityChanged(boolean available) {
@@ -203,8 +214,27 @@ public class NavigationForegroundService extends Service implements BackgroundNa
 
     /** Registers a bound Activity for live events - safe to call from more than one Activity at
      *  once (see the callbacks field javadoc). Adding the same instance twice is a no-op. */
-    public void addCallback(SessionCallback cb) { if (!callbacks.contains(cb)) callbacks.add(cb); }
-    public void removeCallback(SessionCallback cb) { callbacks.remove(cb); }
+    public void addCallback(SessionCallback cb) { addCallback(cb, true); }
+
+    /** providesVoice=false for a callback (e.g. MapActivity) that only updates its own UI and
+     *  relies on some other voice-capable callback (MainActivity) to actually speak - see
+     *  silentCallbacks above for why this matters. */
+    public void addCallback(SessionCallback cb, boolean providesVoice) {
+        if (!callbacks.contains(cb)) callbacks.add(cb);
+        if (providesVoice) silentCallbacks.remove(cb); else silentCallbacks.add(cb);
+    }
+
+    public void removeCallback(SessionCallback cb) {
+        callbacks.remove(cb);
+        silentCallbacks.remove(cb);
+    }
+
+    /** True when nobody currently registered is able to speak a navigation cue - either no
+     *  Activity is bound at all, or every bound Activity registered with providesVoice=false. */
+    private boolean noVoiceCapableCallback() {
+        for (SessionCallback cb : callbacks) if (!silentCallbacks.contains(cb)) return false;
+        return true;
+    }
 
     public NavigationEngine getNavigationEngine() { return navigationEngine; }
     public DeviceLocationTracker getLocationTracker() { return locationTracker; }
@@ -422,7 +452,7 @@ public class NavigationForegroundService extends Service implements BackgroundNa
      *  local-voice-vs-forward-to-Activity rule this follows for every event. */
     private final NavigationEngine.Listener engineListener = new NavigationEngine.Listener() {
         @Override public void onInstruction(RouteStep step) {
-            if (callbacks.isEmpty()) voicePlayer.announce("route_step_custom", step.instruction);
+            if (noVoiceCapableCallback()) voicePlayer.announce("route_step_custom", step.instruction);
             for (SessionCallback cb : callbacks) cb.onInstruction(step);
             checkpointSession();
         }
@@ -431,7 +461,7 @@ public class NavigationForegroundService extends Service implements BackgroundNa
             // Rerouting itself needs network + the Activity's route-provider stack (out of this
             // stage's scope - see class javadoc), so with no Activity bound this only keeps the
             // driver informed locally; the engine keeps guiding against the existing route.
-            if (callbacks.isEmpty()) {
+            if (noVoiceCapableCallback()) {
                 voicePlayer.announce("alternative_route", "از مسیر خارج شده‌اید. در حال بازیابی مسیر.");
                 if (backgroundMonitor != null) backgroundMonitor.requestOffRouteReroute();
             }
@@ -442,16 +472,13 @@ public class NavigationForegroundService extends Service implements BackgroundNa
             SavedPlace destination = activeDestination;
             TripRecord tripReport = buildTripRecord(destination, true);
             if (tripReport != null) tripStore.add(tripReport);
-            if (callbacks.isEmpty()) {
-                if (destination != null) {
-                    int minutes = tripStartedAt == 0L ? 0 : Math.max(1, (int) ((System.currentTimeMillis() - tripStartedAt) / 60_000L));
-                    double kilometers = activeTripDistanceMeters / 1000.0;
-                    voicePlayer.announce("destination_arrived", "به مقصد رسیدید. سفر حدود " + minutes + " دقیقه و "
-                            + String.format(java.util.Locale.US, "%.1f", kilometers) + " کیلومتر بود.");
-                }
-            } else {
-                for (SessionCallback cb : callbacks) cb.onArrived(destination, tripReport);
+            if (noVoiceCapableCallback() && destination != null) {
+                int minutes = tripStartedAt == 0L ? 0 : Math.max(1, (int) ((System.currentTimeMillis() - tripStartedAt) / 60_000L));
+                double kilometers = activeTripDistanceMeters / 1000.0;
+                voicePlayer.announce("destination_arrived", "به مقصد رسیدید. سفر حدود " + minutes + " دقیقه و "
+                        + String.format(java.util.Locale.US, "%.1f", kilometers) + " کیلومتر بود.");
             }
+            for (SessionCallback cb : callbacks) cb.onArrived(destination, tripReport);
             sessionStore.clear();
             clearTripState();
             if (locationTracker != null) locationTracker.stop();
@@ -461,34 +488,32 @@ public class NavigationForegroundService extends Service implements BackgroundNa
         }
 
         @Override public void onWaypointApproaching(RouteStep step, int ordinal) {
-            if (callbacks.isEmpty()) voicePlayer.announce("continue_route", "توقف میانی " + (ordinal + 1) + " نزدیک است.");
+            if (noVoiceCapableCallback()) voicePlayer.announce("continue_route", "توقف میانی " + (ordinal + 1) + " نزدیک است.");
             for (SessionCallback cb : callbacks) cb.onWaypointApproaching(step, ordinal);
         }
 
         @Override public void onWaypointReached(RouteStep step, int ordinal) {
-            if (callbacks.isEmpty()) voicePlayer.announce("continue_route", "به توقف میانی " + (ordinal + 1) + " رسیدید. مسیر به مقصد ادامه دارد.");
+            if (noVoiceCapableCallback()) voicePlayer.announce("continue_route", "به توقف میانی " + (ordinal + 1) + " رسیدید. مسیر به مقصد ادامه دارد.");
             for (SessionCallback cb : callbacks) cb.onWaypointReached(step, ordinal);
             checkpointSession();
         }
 
         @Override public void onWaypointSkipped(RouteStep step, int ordinal) {
-            if (callbacks.isEmpty()) voicePlayer.announce("continue_route", "توقف میانی " + (ordinal + 1) + " رد شد؛ مسیریابی به مقصد بعدی ادامه دارد.");
+            if (noVoiceCapableCallback()) voicePlayer.announce("continue_route", "توقف میانی " + (ordinal + 1) + " رد شد؛ مسیریابی به مقصد بعدی ادامه دارد.");
             for (SessionCallback cb : callbacks) cb.onWaypointSkipped(step, ordinal);
             checkpointSession();
         }
 
         @Override public void onInstructionStage(RouteStep step, NavigationEngine.AnnouncementStage stage, int metersRemaining) {
-            if (callbacks.isEmpty()) {
-                if (stage == NavigationEngine.AnnouncementStage.INITIAL
-                        || stage == NavigationEngine.AnnouncementStage.APPROACHING) {
-                    String distance = Math.max(10, Math.round(metersRemaining / 10f) * 10) + " متر";
-                    String prefix = stage == NavigationEngine.AnnouncementStage.INITIAL
-                            ? "در " + distance + "، " : "تا " + distance + " دیگر، ";
-                    voicePlayer.speak(prefix + step.instruction);
-                }
-            } else {
-                for (SessionCallback cb : callbacks) cb.onInstructionStage(step, stage, metersRemaining);
+            if (noVoiceCapableCallback()
+                    && (stage == NavigationEngine.AnnouncementStage.INITIAL
+                        || stage == NavigationEngine.AnnouncementStage.APPROACHING)) {
+                String distance = Math.max(10, Math.round(metersRemaining / 10f) * 10) + " متر";
+                String prefix = stage == NavigationEngine.AnnouncementStage.INITIAL
+                        ? "در " + distance + "، " : "تا " + distance + " دیگر، ";
+                voicePlayer.speak(prefix + step.instruction);
             }
+            for (SessionCallback cb : callbacks) cb.onInstructionStage(step, stage, metersRemaining);
         }
     };
 
