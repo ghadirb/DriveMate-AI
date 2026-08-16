@@ -79,6 +79,14 @@ public class NavigationForegroundService extends Service implements BackgroundNa
         void onInstructionStage(RouteStep step, NavigationEngine.AnnouncementStage stage, int metersRemaining);
         void onLocationUpdate(Location location);
         void onLocationAvailabilityChanged(boolean available);
+        /** Fired whenever startNavigation() (re)points the engine at a route - a fresh trip or a
+         *  reroute, from whichever bound Activity triggered it. Route fetching still happens
+         *  Activity-side (see class javadoc), so without this, an Activity that did NOT itself
+         *  trigger the reroute (e.g. MapActivity when MainActivity's off-route handler is the one
+         *  that actually replaced the engine's route) had no way to learn the engine's route had
+         *  changed underneath it - it kept drawing/tracking the stale pre-reroute route while the
+         *  engine (and the other Activity's voice guidance) had already moved on to the new one. */
+        void onRouteReplaced(RouteResult route);
     }
 
     public final class LocalBinder extends Binder {
@@ -235,6 +243,7 @@ public class NavigationForegroundService extends Service implements BackgroundNa
                 : new RoutePoint(destination.latitude, destination.longitude);
         int initialStepIndex = preserveTripProgress ? Math.max(0, navigationEngine.currentStepIndex()) : 0;
         navigationEngine.start(route, engineListener, origin, finalDestination, initialStepIndex);
+        for (SessionCallback cb : callbacks) cb.onRouteReplaced(route);
         ensureForeground();
         checkpointSession();
         fetchSpeedLimits(route);

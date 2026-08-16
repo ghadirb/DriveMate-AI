@@ -198,6 +198,17 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             MapActivity.this.onWaypointSkipped(step, waypointOrdinal);
         }
         @Override public void onInstructionStage(RouteStep step, NavigationEngine.AnnouncementStage stage, int metersRemaining) { }
+        @Override public void onRouteReplaced(RouteResult route) {
+            runOnUiThread(() -> {
+                if (!navigationMode || route == null) return;
+                routeOptions = new ArrayList<>();
+                routeOptions.add(route);
+                selectedRoute = route;
+                routeNeedsRefreshFromCurrentLocation = false;
+                showRoutePreview(route);
+                startTurnByTurn(route);
+            });
+        }
         // This activity gets its own location fixes directly from LocationManager (see
         // onLocationChanged below) - it already existed before this binding and drives its own
         // GPS-quality filtering, vehicle marker, and route-line rendering, none of which this

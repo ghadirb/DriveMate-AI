@@ -382,6 +382,7 @@ public class MainActivity extends Activity {
         @Override public void onWaypointReached(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointReached(step, ordinal)); }
         @Override public void onWaypointSkipped(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointSkipped(step, ordinal)); }
         @Override public void onInstructionStage(RouteStep step, NavigationEngine.AnnouncementStage stage, int metersRemaining) { runOnUiThread(() -> announceInstructionStage(step, stage, metersRemaining)); }
+        @Override public void onRouteReplaced(RouteResult route) { runOnUiThread(() -> activeRoute = route); }
         @Override public void onLocationUpdate(Location location) { runOnUiThread(() -> {
             if (location == null) return;
             if (pendingNavigationDestination != null) {
