@@ -2019,7 +2019,7 @@ public class MainActivity extends Activity {
         if (isFullIntelligenceMode()) {
             setStatus("\u062f\u0631 \u062d\u0627\u0644 \u0622\u0645\u0627\u062f\u0647 \u06a9\u0631\u062f\u0646 \u067e\u0627\u0633\u062e \u0635\u0648\u062a\u06cc \u0647\u0648\u0634\u0645\u0646\u062f...");
             final AtomicBoolean delivered = new AtomicBoolean(false);
-            final long watchdogDelay = priority == DrivingIntelligenceCoordinator.Priority.SAFETY ? 2_000L : 3_750L;
+            final long watchdogDelay = priority == DrivingIntelligenceCoordinator.Priority.SAFETY ? 1_000L : 1_800L;
             guidanceHandler.postDelayed(() -> {
                 if (!isCurrentGuidance(epoch) || !delivered.compareAndSet(false, true)) return;
                 playOnlineTtsFallback(clipName, fallback, epoch);
@@ -2087,7 +2087,7 @@ public class MainActivity extends Activity {
                     : "صدای آنلاین در دسترس نبود؛ هشدار WAV پخش شد.");
         };
         setStatus("پاسخ به‌موقع نرسید؛ در حال دریافت صدای آنلاین...");
-        guidanceHandler.postDelayed(localFallback, 2500L);
+        guidanceHandler.postDelayed(localFallback, 1_400L);
         onlineSpeechClient.speak(fallback, new OnlineSpeechClient.SpeechCallback() {
             @Override public void onPlayed() { runOnUiThread(() -> {
                 if (isCurrentGuidance(epoch) && finished.compareAndSet(false, true)) setStatus("راهنمای مسیر با صدای آنلاین پخش شد.");
@@ -2343,23 +2343,31 @@ public class MainActivity extends Activity {
         if (!isCurrentGuidance(epoch)) return;
         String shortAnswer = answer == null ? "" : answer.trim();
         if (shortAnswer.length() > 190) shortAnswer = shortAnswer.substring(0, 190);
-        setStatus("در حال دریافت صدای آنلاین...");
         final String finalAnswer = shortAnswer;
+        final AtomicBoolean delivered = new AtomicBoolean(false);
         voicePlayer.interrupt();
         onlineSpeechClient.stopPlayback();
+        // A navigation answer has a hard real-time deadline. If online TTS has not started
+        // promptly, prefer the packaged deterministic WAV instead of letting the maneuver pass.
+        if (fallbackClip != null) {
+            guidanceHandler.postDelayed(() -> {
+                if (!isCurrentGuidance(epoch) || !delivered.compareAndSet(false, true)) return;
+                boolean played = playDrivingFallback(fallbackClip, fallbackText);
+                setStatus(played ? "\u0635\u062f\u0627\u06cc \u0622\u0646\u0644\u0627\u06cc\u0646 \u062f\u06cc\u0631 \u0631\u0633\u06cc\u062f\u061b \u0647\u0634\u062f\u0627\u0631 WAV \u067e\u062e\u0634 \u0634\u062f." : "\u067e\u062e\u0634 \u0647\u0634\u062f\u0627\u0631 \u0645\u0633\u06cc\u0631 \u0645\u0648\u0641\u0642 \u0646\u0628\u0648\u062f.");
+            }, 1_400L);
+        }
         onlineSpeechClient.speak(finalAnswer, new OnlineSpeechClient.SpeechCallback() {
             @Override public void onPlayed() { runOnUiThread(() -> {
-                if (isCurrentGuidance(epoch)) setStatus("پاسخ هوشمند با صدای آنلاین پخش شد.");
+                if (isCurrentGuidance(epoch) && delivered.compareAndSet(false, true)) {
+                    setStatus("\u0647\u0634\u062f\u0627\u0631 \u0622\u0646\u0644\u0627\u06cc\u0646 \u067e\u062e\u0634 \u0634\u062f.");
+                }
             }); }
             @Override public void onError() { runOnUiThread(() -> {
-                if (!isCurrentGuidance(epoch)) return;
-                if (fallbackClip != null) {
-                    voicePlayer.announce(fallbackClip, fallbackText);
-                    setStatus("\u0635\u062f\u0627\u06cc \u0622\u0646\u0644\u0627\u06cc\u0646 \u062f\u0631 \u062f\u0633\u062a\u0631\u0633 \u0646\u06cc\u0633\u062a\u061b \u0647\u0634\u062f\u0627\u0631 WAV \u067e\u062e\u0634 \u0634\u062f.");
-                    return;
-                }
-                voicePlayer.speak(finalAnswer);
-                setStatus("پاسخ صوتی با صدای گوشی پخش شد.");
+                if (!isCurrentGuidance(epoch) || !delivered.compareAndSet(false, true)) return;
+                boolean played = fallbackClip != null
+                        ? playDrivingFallback(fallbackClip, fallbackText)
+                        : voicePlayer.speak(finalAnswer);
+                setStatus(played ? "\u067e\u0627\u0633\u062e \u0622\u0646\u0644\u0627\u06cc\u0646 \u062f\u0631 \u062f\u0633\u062a\u0631\u0633 \u0646\u0628\u0648\u062f\u061b \u0647\u0634\u062f\u0627\u0631 \u0645\u062d\u0644\u06cc \u067e\u062e\u0634 \u0634\u062f." : "\u067e\u062e\u0634 \u0647\u0634\u062f\u0627\u0631 \u0646\u0627\u0645\u0648\u0641\u0642 \u0628\u0648\u062f.");
             }); }
         });
     }
@@ -3528,8 +3536,36 @@ public class MainActivity extends Activity {
             phrase = stage == NavigationEngine.AnnouncementStage.INITIAL
                     ? "در " + distance + "، " + text : "تا " + distance + " دیگر، " + text;
         }
+        String stageClip = instructionStageClip(text, metersRemaining);
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING, phrase,
-                "instruction_stage_custom", phrase, 8_000L, true);
+                stageClip, phrase, 8_000L);
+    }
+
+    /** Maps early turn stages to the packaged distance-aware clips so Economy never needs network
+     *  TTS for the core navigation cue. Full/Smart still tries online first and uses the same clip
+     *  as its hard-deadline fallback. */
+    private String instructionStageClip(String text, int metersRemaining) {
+        String lower = text == null ? "" : text.toLowerCase(Locale.ROOT);
+        boolean left = lower.contains("left") || text.contains("\u0686\u067e");
+        boolean right = lower.contains("right") || text.contains("\u0631\u0627\u0633\u062a");
+        boolean uturn = lower.contains("uturn") || lower.contains("u-turn") || text.contains("\u062f\u0648\u0631\u0628\u0631\u06af\u0631\u062f\u0627\u0646");
+        if (lower.contains("roundabout") || lower.contains("rotary") || text.contains("\u0645\u06cc\u062f\u0627\u0646")) {
+            int exit = extractExitNumber(text);
+            if (exit >= 1 && exit <= 3) return "roundabout_exit_" + exit;
+        }
+        if (uturn) return metersRemaining >= 250 ? "u_turn_300m" : "u_turn_100m";
+        if (left) {
+            if (metersRemaining >= 400) return "turn_left_500m";
+            if (metersRemaining >= 150) return "turn_left_200m";
+            return "turn_left_100m";
+        }
+        if (right) {
+            if (metersRemaining >= 400) return "turn_right_500m";
+            if (metersRemaining >= 250) return "turn_right_300m";
+            if (metersRemaining >= 150) return "turn_right_200m";
+            return "turn_right_100m";
+        }
+        return null;
     }
 
     /** Rounds to the nearest 10m under 100m, nearest 50m beyond - a live GPS-derived distance read
@@ -3590,7 +3626,7 @@ public class MainActivity extends Activity {
         // AI paraphrase round trip here; waiting for one is how a roundabout ends up announced only
         // after the driver has already passed it. Speak the real instruction immediately instead.
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING, stepPrompt,
-                lastInstruction, fallbackWithLane, 10_000L, true);
+                lastInstruction, fallbackWithLane, 10_000L);
         setStatus(text);
     }
 

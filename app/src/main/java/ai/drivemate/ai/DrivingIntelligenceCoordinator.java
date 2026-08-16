@@ -20,7 +20,7 @@ public class DrivingIntelligenceCoordinator {
 
     private enum State { PENDING, RUNNING, FALLBACK, CANCELLED, READY }
     private static final long FULL_MODE_SAFETY_WAIT_MS = 0L;
-    private static final long FULL_MODE_DRIVING_WAIT_MS = 0L;
+    private static final long FULL_MODE_DRIVING_WAIT_MS = 1_000L;
     private static final long FULL_MODE_STANDARD_WAIT_MS = 3000L;
     private static final long ECONOMY_ONLINE_COOLDOWN_MS = 45_000L; // 45-60s suggested
     private static final long ECONOMY_ONLINE_WAIT_MS = 2_500L;
