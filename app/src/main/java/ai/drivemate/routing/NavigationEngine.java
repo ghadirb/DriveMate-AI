@@ -282,6 +282,18 @@ public class NavigationEngine {
                 advancePastWaypoint(nextStep, location, justReached);
                 return;
             }
+            // For a short maneuver step, reachedDistance (which triggers this advance) can be
+            // numerically closer than finalMeters (which triggers the voice instruction in
+            // evaluateInstructionCascade) - the driver could physically reach/pass the maneuver
+            // before its own announcement threshold was ever crossed, silently skipping the
+            // instruction entirely (e.g. a roundabout with a short entry segment: shown on the
+            // banner because that reads the step directly, but never spoken). This is the last
+            // chance to say it before moving on to the next maneuver.
+            if (instructionAnnouncementsEnabled && !currentInstructionAnnounced && hasActionableCurrentInstruction()) {
+                currentInstructionAnnounced = true;
+                lastInstructionAt = System.currentTimeMillis();
+                listener.onInstruction(justReached);
+            }
             nextStep = Math.min(nextStep + 1, route.steps.size() - 1);
             currentInstructionAnnounced = false;
             announceStageReached = 0;
