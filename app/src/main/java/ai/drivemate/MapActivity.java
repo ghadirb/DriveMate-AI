@@ -299,10 +299,12 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private final LocationQualityFilter mapLocationFilter = new LocationQualityFilter();
     /** True only for a service-owned fix already filtered by the authoritative navigation tracker. */
     private boolean authoritativeLocationPending;
-    private boolean routeNeedsRefreshFromCurrentLocation;
-    private boolean routeRefreshInFlight;
+    private volatile boolean routeNeedsRefreshFromCurrentLocation;
+    private volatile boolean routeRefreshInFlight;
     private long lastRouteRefreshAttemptAt;
-    private static final long ROUTE_REFRESH_RETRY_MS = 15_000L;
+    /** A failed/off-route redraw must recover quickly; ordinary GPS refreshes still share this
+     *  gate so they cannot hammer the public routing providers. */
+    private static final long ROUTE_REFRESH_RETRY_MS = 2_500L;
     private Location lastRouteRenderLocation;
     private long lastRouteRenderAt;
     private static final long NAVIGATION_ROUTE_REDRAW_INTERVAL_MS = 700L;
@@ -2323,6 +2325,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         lastRouteRefreshAttemptAt = now;
         final double latitude = current.getLatitude();
         final double longitude = current.getLongitude();
+        Log.i("DriveMateMapRoute", "refresh requested force=" + force
+                + " lat=" + latitude + " lng=" + longitude
+                + " waypoints=" + routeWaypoints.size());
         routeRepository.getRoute(latitude, longitude, waypointCoordinates(),
                 destination.latitude, destination.longitude,
                 route -> runOnUiThread(() -> {
@@ -2332,12 +2337,15 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                     routeOptions.add(route);
                     selectedRoute = route;
                     routeNeedsRefreshFromCurrentLocation = false;
+                    Log.i("DriveMateMapRoute", "refresh succeeded provider=" + route.providerName
+                            + " geometry=" + route.geometry.size());
                     showRoutePreview(route);
                     startTurnByTurn(route);
                 }),
                 error -> runOnUiThread(() -> {
                     routeRefreshInFlight = false;
                     routeNeedsRefreshFromCurrentLocation = true;
+                    Log.w("DriveMateMapRoute", "refresh failed force=" + force + " error=" + error);
                     if (turnInstructionText != null && force) {
                         turnInstructionText.setText("بازیابی مسیر انجام نشد: " + error);
                     }
@@ -2374,6 +2382,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     @Override public void onOffRoute() {
+        // Mark the map stale even when MainActivity currently owns the network request. Its
+        // service callback normally replaces the line; the flag is a bounded fallback if that
+        // Activity is paused/destroyed or its request fails before a replacement reaches the map.
+        routeNeedsRefreshFromCurrentLocation = true;
         runOnUiThread(() -> {
             // Hide stale geometry immediately; the replacement route is drawn only after the
             // routing provider returns real street geometry.
@@ -2388,6 +2400,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         // remains the fallback rerouter only when no voice-capable Activity is bound.
         if (navigationServiceBound && navigationService != null && !navigationService.hasVoiceCapableCallback()) {
             recalculateActiveRoute();
+        } else if (!navigationServiceBound || navigationService == null) {
+            // There is no service callback left to request a replacement. Force one map-owned
+            // request rather than waiting for the ordinary GPS throttle.
+            refreshNavigationRouteFrom(currentMapLocation(), true);
         }
     }
 
@@ -3119,7 +3135,11 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             gpsWarningActive = false;
             Toast.makeText(this, "موقعیت مکانی دوباره در دسترس است.", Toast.LENGTH_SHORT).show();
         }
-        if (routeNeedsRefreshFromCurrentLocation) refreshNavigationRouteFrom(currentMapLocation(), false);
+        boolean serviceOwnsReroute = navigationServiceBound && navigationService != null
+                && navigationService.hasVoiceCapableCallback();
+        if (routeNeedsRefreshFromCurrentLocation && !serviceOwnsReroute) {
+            refreshNavigationRouteFrom(currentMapLocation(), false);
+        }
     }
 
     @Override protected void onDestroy() {
@@ -3188,10 +3208,17 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             showCurrentMarker();
             if (selectedRoute != null) updateRoadSpeedLimit(accepted.getLatitude(), accepted.getLongitude());
             if (navigationMode && destination != null) {
-                        if (navigationMode && destination != null) {
-                    updateTurnBanner(accepted);
-                    if (routeNeedsRefreshFromCurrentLocation) refreshNavigationRouteFrom(accepted, false);
-                    if (shouldRedrawNavigationRoute(accepted)) drawAllRoutes();
+                updateTurnBanner(accepted);
+                boolean serviceOwnsReroute = navigationServiceBound && navigationService != null
+                        && navigationService.hasVoiceCapableCallback();
+                if (routeNeedsRefreshFromCurrentLocation && !serviceOwnsReroute) {
+                    refreshNavigationRouteFrom(accepted, false);
+                }
+                // selectedRoute still points to the previous route until the authoritative
+                // service callback arrives. Do not redraw it while a replacement is pending.
+                if (!routeNeedsRefreshFromCurrentLocation && !routeRefreshInFlight
+                        && shouldRedrawNavigationRoute(accepted)) {
+                    drawAllRoutes();
                 }
             }
             if (navigationMode && followVehicle && navigationCameraEnabled) {

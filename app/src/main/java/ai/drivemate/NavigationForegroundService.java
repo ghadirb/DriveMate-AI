@@ -305,6 +305,11 @@ public class NavigationForegroundService extends Service implements BackgroundNa
         navigationEngine.start(route, engineListener, origin, finalDestination, initialStepIndex);
         android.util.Log.i(TAG, "start route waypoints=" + activeWaypoints.size()
                 + " waypointSteps=" + navigationEngine.hasWaypointSteps());
+        if (!activeWaypoints.isEmpty()) {
+            RoutePoint firstWaypoint = activeWaypoints.get(0);
+            android.util.Log.i(TAG, "first waypoint lat=" + firstWaypoint.latitude
+                    + " lng=" + firstWaypoint.longitude);
+        }
         for (SessionCallback cb : callbacks) cb.onRouteReplaced(route);
         ensureForeground();
         checkpointSession();
@@ -533,6 +538,10 @@ public class NavigationForegroundService extends Service implements BackgroundNa
     private void speakWaypoint(String text) {
         if (text == null || text.trim().isEmpty()) return;
         if (onlineSpeechClient != null && onlineSpeechClient.canUseOnlineTts()) {
+            waypointSpeechGeneration++;
+            if (voicePlayer != null) voicePlayer.interrupt();
+            onlineSpeechClient.stopPlayback();
+            android.util.Log.i(TAG, "waypoint speech path=online textLength=" + text.length());
             final long generation = waypointSpeechGeneration;
             onlineSpeechClient.speak(text, new OnlineSpeechClient.SpeechCallback() {
                 @Override public void onPlayed() {
@@ -549,6 +558,7 @@ public class NavigationForegroundService extends Service implements BackgroundNa
             });
             return;
         }
+        android.util.Log.i(TAG, "waypoint speech path=local textLength=" + text.length());
         if (voicePlayer != null) voicePlayer.speak(text);
     }
 

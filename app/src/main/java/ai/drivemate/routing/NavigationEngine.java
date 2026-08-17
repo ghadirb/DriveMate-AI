@@ -243,13 +243,15 @@ public class NavigationEngine {
         float metersToRouteEnd = route.geometry == null || route.geometry.isEmpty()
                 ? Float.MAX_VALUE : location.distanceTo(asLocation(route.geometry.get(route.geometry.size() - 1)));
         // Arrival is a final-state decision: never finish a trip merely because the driver entered a broad destination radius.
-        boolean destinationCloseEnough = (metersToDestination <= 25f
+        int pendingWaypointIndex = nextWaypointIndex();
+        boolean destinationCloseEnough = pendingWaypointIndex < 0
+                && ((metersToDestination <= 25f
                 && (routeProgress == null || routeProgress.onRoute))
                 || (routeProgress != null && routeProgress.onRoute
                 && routeProgress.remainingMeters <= 15 && metersToDestination <= 40f)
                 || (routeProgress != null && routeProgress.onRoute
                 && routeProgress.remainingMeters <= 10 && metersToRouteEnd <= 25f
-                && metersToDestination <= 50f);
+                && metersToDestination <= 50f));
         if (accuracyOkFor(location, MAX_ACCURACY_FOR_FINAL_ARRIVAL_METERS)
                 && destinationCloseEnough) {
             finalArrivalConfirmSamples++;
@@ -266,7 +268,7 @@ public class NavigationEngine {
             callback.onArrived();
             return;
         }
-        int nextWaypointIndex = nextWaypointIndex();
+        int nextWaypointIndex = pendingWaypointIndex;
         if (nextWaypointIndex >= 0) {
             RouteStep waypoint = route.steps.get(nextWaypointIndex);
             float metersToWaypoint = location.distanceTo(asLocation(waypoint));
@@ -275,7 +277,7 @@ public class NavigationEngine {
             float waypointLeadSeconds = waypointSpeed >= 22f ? 10f : 8f;
             float waypointAnnounceDistance = Math.max(120f, Math.min(320f,
                     Math.max(waypoint.distanceMeters * 0.65f, waypointSpeed * waypointLeadSeconds)));
-            if (instructionAnnouncementsEnabled && announcedWaypointIndex != nextWaypointIndex
+            if (announcedWaypointIndex != nextWaypointIndex
                     && metersToWaypoint <= waypointAnnounceDistance) {
                 announcedWaypointIndex = nextWaypointIndex;
                 Log.i(TAG, "waypoint approaching ordinal=" + waypoint.waypointOrdinal
@@ -368,9 +370,13 @@ public class NavigationEngine {
 
     private static int firstActionableStepIndex(RouteResult route, int startingIndex) {
         if (route == null || route.steps == null) return startingIndex;
+        int firstWaypointIndex = -1;
         for (int index = startingIndex; index < route.steps.size(); index++) {
             RouteStep step = route.steps.get(index);
-            if (step.waypointOrdinal >= 0) continue;
+            if (step.waypointOrdinal >= 0) {
+                if (firstWaypointIndex < 0) firstWaypointIndex = index;
+                continue;
+            }
             String instruction = step.instruction == null ? "" : step.instruction.trim();
             String lower = instruction.toLowerCase(java.util.Locale.ROOT);
             boolean arrival = lower.contains("arriv") || instruction.contains("\u0645\u0642\u0635\u062f")
@@ -378,9 +384,9 @@ public class NavigationEngine {
             boolean genericStart = lower.contains("depart") || lower.contains("continue")
                     || instruction.contains("\u0628\u0647 \u0633\u0645\u062a \u0645\u0642\u0635\u062f \u062d\u0631\u06a9\u062a")
                     || instruction.contains("\u062f\u0631 \u0645\u0633\u06cc\u0631 \u0627\u062f\u0627\u0645\u0647");
-            if (!arrival && !genericStart) return index;
+            if (!arrival && !genericStart) return firstWaypointIndex >= 0 ? firstWaypointIndex : index;
         }
-        return startingIndex;
+        return firstWaypointIndex >= 0 ? firstWaypointIndex : startingIndex;
     }
 
     /** Announces the first actionable provider instruction as soon as a route is ready. */

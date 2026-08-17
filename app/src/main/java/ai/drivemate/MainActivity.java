@@ -2779,10 +2779,22 @@ public class MainActivity extends Activity {
     private void rerouteFromCurrentLocation() {
         Location rerouteLocation = locationTracker == null ? null : locationTracker.getLastLocation();
         long now = System.currentTimeMillis();
-        if (rerouteInFlight || activeDestination == null || rerouteLocation == null) return;
-        if (now - lastRerouteStartedAt < 1_500L) return;
+        if (rerouteInFlight || activeDestination == null || rerouteLocation == null) {
+            android.util.Log.d("DriveMateRoute", "reroute ignored inFlight=" + rerouteInFlight
+                    + " destination=" + (activeDestination != null)
+                    + " location=" + (rerouteLocation != null));
+            return;
+        }
+        if (now - lastRerouteStartedAt < 1_500L) {
+            android.util.Log.d("DriveMateRoute", "reroute throttled ageMs="
+                    + (now - lastRerouteStartedAt));
+            return;
+        }
         lastRerouteStartedAt = now;
         rerouteInFlight = true;
+        android.util.Log.i("DriveMateRoute", "reroute requested lat=" + rerouteLocation.getLatitude()
+                + " lng=" + rerouteLocation.getLongitude()
+                + " waypoints=" + activeWaypoints.size());
         // The service owns the engine. Keep its current step long enough for startNavigation(..., true)
         // to preserve progress; the service atomically replaces the engine state with the new route.
         initialGuidanceHeldUntil = 0L;
@@ -3688,6 +3700,8 @@ public class MainActivity extends Activity {
         if (text == null || text.trim().isEmpty()) return;
         if (onlineSpeechClient != null && onlineSpeechClient.canUseOnlineTts()) {
             if (voicePlayer != null) voicePlayer.interrupt();
+            onlineSpeechClient.stopPlayback();
+            android.util.Log.i("DriveMateVoice", "waypoint speech path=online textLength=" + text.length());
             final long epoch = guidanceEpoch;
             onlineSpeechClient.speak(text, new OnlineSpeechClient.SpeechCallback() {
                 @Override public void onPlayed() {
@@ -3701,6 +3715,7 @@ public class MainActivity extends Activity {
             });
             return;
         }
+        android.util.Log.i("DriveMateVoice", "waypoint speech path=local textLength=" + text.length());
         if (voicePlayer != null) voicePlayer.speak(text);
     }
 
