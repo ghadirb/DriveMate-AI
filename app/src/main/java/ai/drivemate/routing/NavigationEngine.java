@@ -255,18 +255,24 @@ public class NavigationEngine {
         if (nextWaypointIndex >= 0) {
             RouteStep waypoint = route.steps.get(nextWaypointIndex);
             float metersToWaypoint = location.distanceTo(asLocation(waypoint));
-            if (waypointWasSkipped(location, routeProgress, nextWaypointIndex, metersToWaypoint)) {
-                skipWaypoint(nextWaypointIndex, location, waypoint);
-                return;
-            }
-            float waypointAnnounceDistance = Math.max(90f, Math.min(260f,
-                    Math.max(120f, waypoint.distanceMeters * 0.65f)));
+            // Announce before the skip test so a delayed/fake GPS jump cannot silently consume the stop.
+            float waypointSpeed = smoothedSpeedMps(location);
+            float waypointLeadSeconds = waypointSpeed >= 22f ? 10f : 8f;
+            float waypointAnnounceDistance = Math.max(120f, Math.min(320f,
+                    Math.max(waypoint.distanceMeters * 0.65f, waypointSpeed * waypointLeadSeconds)));
             if (instructionAnnouncementsEnabled && announcedWaypointIndex != nextWaypointIndex
                     && metersToWaypoint <= waypointAnnounceDistance) {
                 announcedWaypointIndex = nextWaypointIndex;
+                Log.i(TAG, "waypoint approaching ordinal=" + waypoint.waypointOrdinal
+                        + " distance=" + Math.round(metersToWaypoint)
+                        + " announceDistance=" + Math.round(waypointAnnounceDistance)
+                        + " speedMps=" + String.format(java.util.Locale.US, "%.1f", waypointSpeed));
                 listener.onWaypointApproaching(waypoint, waypoint.waypointOrdinal);
             }
-            // A shortcut can reach a stop without ever touching all of the provider's maneuver
+            if (waypointWasSkipped(location, routeProgress, nextWaypointIndex, metersToWaypoint)) {
+                skipWaypoint(nextWaypointIndex, location, waypoint);
+                return;
+            }// A shortcut can reach a stop without ever touching all of the provider's maneuver
             // points. Advance directly past that stop so navigation continues to the next one.
             if (accuracyOk(location) && metersToWaypoint <= FINAL_ARRIVAL_RADIUS_METERS) {
                 advancePastWaypoint(nextWaypointIndex, location, waypoint);

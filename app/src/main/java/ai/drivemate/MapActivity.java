@@ -1828,21 +1828,23 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         if (navigationMode && route == selectedRoute && !route.geometry.isEmpty()) {
             Location current = currentMapLocation();
             int nearestIndex = -1;
-            // Keep rendering aligned with the service-owned monotonic map match. A global nearest-vertex
-            // search can jump backward to a loop/parallel-road segment after a GPS deviation.
+            // Prefer the authoritative monotonic segment and its exact snapped position. Starting
+            // the polyline at a whole geometry vertex made the visible line trail the vehicle until
+            // the next vertex was reached, which was especially obvious on sparse reroute geometry.
+            RoutePoint snapped = null;
             if (navigationServiceBound && navigationService != null) {
                 int segment = navigationService.getNavigationEngine().currentRouteSegmentIndex();
-                if (segment >= 0 && segment < route.geometry.size()) { nearestIndex = segment; }
+                snapped = navigationService.getNavigationEngine().snappedRoutePosition();
+                if (segment >= 0 && segment < route.geometry.size()) nearestIndex = segment;
             }
-            if (nearestIndex < 0) { nearestIndex = closestRouteGeometryIndex(route.geometry, current); }
+            if (nearestIndex < 0) nearestIndex = closestRouteGeometryIndex(route.geometry, current);
             if (nearestIndex >= 0) {
-                RoutePoint nearestPoint = route.geometry.get(nearestIndex);
-                Location nearestLocation = new Location("route");
-                nearestLocation.setLatitude(nearestPoint.latitude);
-                nearestLocation.setLongitude(nearestPoint.longitude);
-                // Provider geometry is authoritative. Never add a synthetic straight connector
-                // from the live GPS point to the route; during reroute it can cross real streets.
-                firstPoint = nearestIndex;
+                if (snapped != null) {
+                    points.add(new LatLng(snapped.latitude, snapped.longitude));
+                    firstPoint = Math.min(nearestIndex + 1, route.geometry.size());
+                } else {
+                    firstPoint = nearestIndex;
+                }
             }
         }
         for (int index = firstPoint; index < route.geometry.size(); index++) {
