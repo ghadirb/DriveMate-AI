@@ -58,6 +58,11 @@ public class MapIrRoutingProvider implements RoutingProvider {
         JSONObject object = RoutingHttp.getJson(url, "x-api-key", apiKey);
         JSONArray rawRoutes = object.optJSONArray("routes");
         if (rawRoutes == null || rawRoutes.length() == 0) throw new IllegalStateException("map.ir returned no route.");
+        JSONObject firstRoute = rawRoutes.optJSONObject(0);
+        JSONArray firstRouteLegs = firstRoute == null ? null : firstRoute.optJSONArray("legs");
+        android.util.Log.i("DriveMateRoute", "map.ir parsed legs="
+                + (firstRouteLegs == null ? 0 : firstRouteLegs.length())
+                + " waypoints=" + (waypoints == null ? 0 : waypoints.size()));
         ArrayList<RouteResult> results = new ArrayList<>();
         for (int i = 0; i < rawRoutes.length() && i < 3; i++) {
             results.add(parseRoute(rawRoutes.getJSONObject(i), originLat, originLng, waypoints, destinationLat, destinationLng));

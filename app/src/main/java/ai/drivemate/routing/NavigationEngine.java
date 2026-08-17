@@ -153,6 +153,7 @@ public class NavigationEngine {
         updateTargetReference(currentLocation);
         if (route != null && !route.steps.isEmpty()) {
             Log.i(TAG, "start step=" + nextStep + " steps=" + route.steps.size()
+                    + " waypointIndex=" + nextWaypointIndex()
                     + " instruction=" + route.steps.get(nextStep).instruction);
         }
     }
@@ -195,7 +196,14 @@ public class NavigationEngine {
 
     public int remainingMeters() {
         RouteProgressTracker.Snapshot progress = progressTracker.current();
-        return progress == null ? route == null ? 0 : route.distanceMeters : progress.remainingMeters;
+        if (route == null) return 0;
+        if (progress == null) return route.distanceMeters;
+        int waypointIndex = nextWaypointIndex();
+        if (waypointIndex >= 0 && waypointIndex < stepProgressMeters.length
+                && !Double.isNaN(stepProgressMeters[waypointIndex])) {
+            return (int) Math.round(Math.max(0d, stepProgressMeters[waypointIndex] - progress.progressMeters));
+        }
+        return progress.remainingMeters;
     }
 
     public RoutePoint snappedRoutePosition() {

@@ -421,6 +421,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         wireControls();
         restorePoiLayerPreferences();
         initializeMap();
+        drawWaypointMarkers();
         loadRemoteRoutingConfig();
         if (map != null && !enabledPoiLayers.isEmpty()) refreshPoiLayers();
         if (map != null && isSpeedLimitLayerEnabled() && !navigationMode) loadNearbySpeedLimits();
@@ -1828,23 +1829,12 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         if (navigationMode && route == selectedRoute && !route.geometry.isEmpty()) {
             Location current = currentMapLocation();
             int nearestIndex = -1;
-            // Prefer the authoritative monotonic segment and its exact snapped position. Starting
-            // the polyline at a whole geometry vertex made the visible line trail the vehicle until
-            // the next vertex was reached, which was especially obvious on sparse reroute geometry.
-            RoutePoint snapped = null;
-            if (navigationServiceBound && navigationService != null) {
-                int segment = navigationService.getNavigationEngine().currentRouteSegmentIndex();
-                snapped = navigationService.getNavigationEngine().snappedRoutePosition();
-                if (segment >= 0 && segment < route.geometry.size()) nearestIndex = segment;
-            }
+            // MapActivity can fetch a fresh route independently of the service-owned route. Its
+            // geometry can therefore have a different vertex count and segment indexing; never
+            // apply the service route's segment index to this geometry.
             if (nearestIndex < 0) nearestIndex = closestRouteGeometryIndex(route.geometry, current);
             if (nearestIndex >= 0) {
-                if (snapped != null) {
-                    points.add(new LatLng(snapped.latitude, snapped.longitude));
-                    firstPoint = Math.min(nearestIndex + 1, route.geometry.size());
-                } else {
-                    firstPoint = nearestIndex;
-                }
+                firstPoint = nearestIndex;
             }
         }
         for (int index = firstPoint; index < route.geometry.size(); index++) {
@@ -1974,6 +1964,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
      *  it moves with the car instead of freezing at the numbers shown when the route was chosen. */
     private int estimateRemainingRouteMeters(Location location) {
         if (selectedRoute == null || selectedRoute.steps == null || selectedRoute.steps.isEmpty()) return 0;
+        if (navigationServiceBound && navigationService != null
+                && navigationService.getNavigationEngine().isNavigating()) {
+            return navigationService.getNavigationEngine().remainingMeters();
+        }
         int start = Math.max(0, Math.min(displayedStepIndex, selectedRoute.steps.size() - 1));
         Location previous = location;
         double total = 0d;
