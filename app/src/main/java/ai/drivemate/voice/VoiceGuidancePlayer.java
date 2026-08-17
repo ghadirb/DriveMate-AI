@@ -108,6 +108,13 @@ public class VoiceGuidancePlayer {
         return true;
     }
 
+    /** Lets the navigation layer choose online TTS only when a packaged WAV clip is unavailable. */
+    public synchronized boolean hasClip(String clipName) {
+        String resolved = resolveClipName(clipName);
+        return REAL_CLIPS.contains(resolved)
+                && context.getResources().getIdentifier(resolved, "raw", context.getPackageName()) != 0;
+    }
+
     public synchronized void play(String clipName) {
         String resolved = resolveClipName(clipName);
         int resId = context.getResources().getIdentifier(resolved, "raw", context.getPackageName());

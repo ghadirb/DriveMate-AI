@@ -346,7 +346,7 @@ public class NavigationEngine {
         if (isReliablyOffRoute(location, meters, routeProgress)
                 && now - lastOffRouteCallbackAt >= MIN_MS_BETWEEN_OFFROUTE_CALLBACKS) {
             lastOffRouteCallbackAt = now;
-            Log.i(TAG, "off-route confirmed routeDistance=" + Math.round(routeProgress == null ? -1 : routeProgress.distanceToRouteMeters)
+            Log.i(TAG, "off-route confirmed routeDistance=" + Math.round(routeDistance)
                     + " targetDistance=" + Math.round(meters) + " accuracy=" + Math.round(location.getAccuracy())
                     + " samples=" + offRouteSamples);
             listener.onOffRoute();
@@ -478,14 +478,18 @@ public class NavigationEngine {
     private boolean isReliablyOffRoute(Location location, float targetDistance,
                                        RouteProgressTracker.Snapshot routeProgress) {
         if (targetReference == null) return false;
-        if (!location.hasAccuracy() || location.getAccuracy() > 50f) return false;
+        if (!location.hasAccuracy() || location.getAccuracy() > 90f) return false;
 
         // Off-route detection must also work in the final streets of a trip. The previous
         // last-step guard disabled rerouting exactly when a driver could turn wrong near the
         // destination. Use route geometry as the primary signal and confirm with two good fixes.
-        float routeDistance = routeProgress == null ? distanceToRoute(location) : routeProgress.distanceToRouteMeters;
+        // Use the complete geometry for the off-route signal. The monotonic progress snapshot is
+        // intentionally constrained to a local window for stable drawing, but that same constraint
+        // can hide an immediate deviation when the vehicle is already beside a later street.
+        float routeDistance = distanceToRoute(location);
         float movedFromReference = location.distanceTo(targetReference);
-        float corridorMeters = Math.max(25f, Math.min(60f, location.getAccuracy() * 2.2f));
+        float accuracyMeters = location.getAccuracy();
+        float corridorMeters = Math.max(25f, Math.min(75f, accuracyMeters * 2.0f));
         boolean clearlySeparated = routeDistance > corridorMeters + 12f;
         boolean movingEnough = movedFromReference >= 15f
                 || (location.hasSpeed() && location.getSpeed() >= 1.2f);
@@ -493,7 +497,9 @@ public class NavigationEngine {
             offRouteSamples++;
             // A clean fix well outside the route is sufficient; noisy borderline fixes still
             // require confirmation so a single multipath spike cannot trigger a reroute.
-            return offRouteSamples >= (routeDistance > corridorMeters + 35f ? 1 : 2);
+            int requiredSamples = accuracyMeters > 50f ? 3
+                    : (routeDistance > corridorMeters + 35f ? 1 : 2);
+            return offRouteSamples >= requiredSamples;
         }
         if (routeDistance <= corridorMeters * 0.65f) offRouteSamples = 0;
 

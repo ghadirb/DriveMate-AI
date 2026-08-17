@@ -2746,7 +2746,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         // Keep the OSM canvas north-up. The vehicle bitmap already carries the real world
         // bearing; rotating both the canvas and bitmap made the arrow appear sideways/opposite
         // on osmdroid builds where overlays follow the MapView transform.
-        applyMapOrientation(0f, 0f, 0f);
+        // Keep the canvas north-up so the vehicle bitmap remains aligned with the real
+        // travel bearing, but restore the tilted driving perspective used by navigation.
+        applyMapOrientation(0f, 48f, 0f);
         map.moveCamera(cameraTarget, 0.28f);
         map.setZoom(17.25f, 0.28f);
     }

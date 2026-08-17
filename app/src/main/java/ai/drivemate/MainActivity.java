@@ -357,6 +357,7 @@ public class MainActivity extends Activity {
             navigationEngine = navigationService.getNavigationEngine();
             locationTracker = navigationService.getLocationTracker();
             voicePlayer = navigationService.getVoicePlayer();
+            navigationService.setRuntimeKeys(runtimeKeys);
             navigationService.addCallback(sessionCallback);
             startLocationIfBound();
             syncNavigationStateFromService();
@@ -1649,6 +1650,7 @@ public class MainActivity extends Activity {
             runtimeKeys = RuntimeKeys.fetchDefault(BuildConfig.KEYS_DECRYPTION_SECRET);
             aiAssistant.setRuntimeKeys(runtimeKeys);
             onlineSpeechClient.setRuntimeKeys(runtimeKeys);
+            if (navigationService != null) navigationService.setRuntimeKeys(runtimeKeys);
             neshanRoutingProvider.setApiKey(runtimeKeys.get("NESHAN_API_KEY"));
             mapIrRoutingProvider.setApiKey(runtimeKeys.get("MAPIR_API_KEY"));
             tomTomRoutingProvider.setApiKey(runtimeKeys.get("TOMTOM_API_KEY"));
@@ -2046,10 +2048,8 @@ public class MainActivity extends Activity {
                             playOnlineTtsFallback(clipName, fallback, epoch, generation);
                         }
                     }));
-        } else if (clipName != null) {
-            voicePlayer.announce(clipName, fallback);
         } else {
-            voicePlayer.speak(fallback);
+            speakMissingClipOnlineFirst(clipName, fallback);
         }
     }
 
@@ -3684,6 +3684,49 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void speakWaypointFallback(String text) {
+        if (text == null || text.trim().isEmpty()) return;
+        if (onlineSpeechClient != null && onlineSpeechClient.canUseOnlineTts()) {
+            if (voicePlayer != null) voicePlayer.interrupt();
+            final long epoch = guidanceEpoch;
+            onlineSpeechClient.speak(text, new OnlineSpeechClient.SpeechCallback() {
+                @Override public void onPlayed() {
+                    android.util.Log.i("DriveMateVoice", "waypoint TTS provider="
+                            + onlineSpeechClient.getLastTtsProvider());
+                }
+                @Override public void onError() {
+                    android.util.Log.w("DriveMateVoice", "waypoint online TTS failed; local fallback");
+                    if (epoch == guidanceEpoch && voicePlayer != null) voicePlayer.speak(text);
+                }
+            });
+            return;
+        }
+        if (voicePlayer != null) voicePlayer.speak(text);
+    }
+
+    /** Speaks a navigation warning with packaged WAV first, and online TTS only when the clip is
+     * unavailable. Device TTS remains the final offline fallback. */
+    private boolean speakMissingClipOnlineFirst(String clipName, String text) {
+        if (text == null || text.trim().isEmpty()) return false;
+        if (voicePlayer != null && clipName != null && voicePlayer.hasClip(clipName)) {
+            return voicePlayer.announce(clipName, text);
+        }
+        if (onlineSpeechClient != null && onlineSpeechClient.canUseOnlineTts()) {
+            final long epoch = guidanceEpoch;
+            onlineSpeechClient.speak(text, new OnlineSpeechClient.SpeechCallback() {
+                @Override public void onPlayed() {
+                    android.util.Log.i("DriveMateVoice", "missing WAV TTS provider="
+                            + onlineSpeechClient.getLastTtsProvider());
+                }
+                @Override public void onError() {
+                    if (epoch == guidanceEpoch && voicePlayer != null) voicePlayer.speak(text);
+                }
+            });
+            return true;
+        }
+        return voicePlayer != null && voicePlayer.speak(text);
+    }
+
     private void announceWaypointReached(RouteStep step, int ordinal) {
         // Match by coordinates, not ordinal: waypointOrdinal is fixed to the waypoints list as it
         // was at the time THIS route was computed, but activeWaypoints shrinks with every stop
@@ -3693,20 +3736,14 @@ public class MainActivity extends Activity {
         removeReachedWaypoint(activeWaypoints, step);
         int humanNumber = ordinal + 1;
         String fallback = "به توقف میانی " + humanNumber + " رسیدید. مسیر به مقصد ادامه دارد.";
-        speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
-                "راننده به توقف میانی شماره " + humanNumber
-                        + " رسیده است. یک پیام فارسی کوتاه و طبیعی بگو که مسیر تا مقصد نهایی ادامه دارد.",
-                null, fallback, 12_000L, true);
+        speakWaypointFallback(fallback);
         setStatus(fallback);
     }
 
     private void announceWaypointApproaching(RouteStep step, int ordinal) {
         int humanNumber = ordinal + 1;
         String fallback = "توقف میانی " + humanNumber + " نزدیک است.";
-        speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
-                "راننده در حال نزدیک شدن به توقف میانی شماره " + humanNumber
-                        + " است. یک هشدار فارسی بسیار کوتاه و مناسب رانندگی بگو.",
-                null, fallback, 10_000L, true);
+        speakWaypointFallback(fallback);
         setStatus(fallback);
     }
 
@@ -3715,10 +3752,7 @@ public class MainActivity extends Activity {
         int humanNumber = ordinal + 1;
         String fallback = "توقف میانی " + humanNumber
                 + " رد شد و از مسیر حذف شد؛ مسیریابی به مقصد بعدی ادامه دارد.";
-        speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
-                "راننده با چند نمونه دقیق GPS از توقف میانی شماره " + humanNumber
-                        + " عبور کرده و آن را نرفته است. یک پیام فارسی کوتاه بگو که توقف حذف شده و مسیر ادامه دارد.",
-                null, fallback, 12_000L, true);
+        speakWaypointFallback(fallback);
         setStatus(fallback);
     }
 
