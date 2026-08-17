@@ -260,6 +260,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private static final long FOLLOW_VEHICLE_RESUME_DELAY_MS = 8_000L;
     private float lastBearing;
     private boolean hasHeading;
+    private long lastHeadingAt;
     private boolean navigationCameraEnabled;
     private int navigationRouteIndex;
     /** Current turn/step index used only by the map UI renderer. */
@@ -305,6 +306,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private Location lastRouteRenderLocation;
     private long lastRouteRenderAt;
     private static final long NAVIGATION_ROUTE_REDRAW_INTERVAL_MS = 700L;
+    private RouteResult routeGeometryProgressOwner;
+    private int lastRenderedRouteGeometryIndex = -1;
     private PoiCategory activeNearbyCategory;
     private final List<Marker> nearbyMarkers = new ArrayList<>();
     private final EnumSet<PoiCategory> enabledPoiLayers = EnumSet.noneOf(PoiCategory.class);
@@ -1763,6 +1766,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     private void showRoutePreview(RouteResult route) {
+        if (route != routeGeometryProgressOwner) {
+            routeGeometryProgressOwner = route;
+            lastRenderedRouteGeometryIndex = -1;
+        }
         int minutes = Math.max(1, (int) Math.ceil(route.durationSeconds / 60.0));
         routeText.setText("مسیر پیشنهادی | " + minutes + " دقیقه | "
                 + String.format(Locale.US, "%.1f", route.distanceMeters / 1000.0) + " کیلومتر");
@@ -1833,7 +1840,11 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             // geometry can therefore have a different vertex count and segment indexing; never
             // apply the service route's segment index to this geometry.
             if (nearestIndex < 0) nearestIndex = closestRouteGeometryIndex(route.geometry, current);
+            if (route == routeGeometryProgressOwner && lastRenderedRouteGeometryIndex >= 0) {
+                nearestIndex = Math.max(nearestIndex, lastRenderedRouteGeometryIndex);
+            }
             if (nearestIndex >= 0) {
+                if (route == routeGeometryProgressOwner) lastRenderedRouteGeometryIndex = nearestIndex;
                 firstPoint = nearestIndex;
             }
         }
@@ -2458,7 +2469,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         double fromLongitude = Double.isNaN(tripOriginLongitude) ? originLongitude : tripOriginLongitude;
         tripStore.add(new TripRecord(destination.name, fromLatitude, fromLongitude,
                 destination.latitude, destination.longitude, distanceMeters, durationSeconds,
-                startedAt, System.currentTimeMillis(), distanceMeters, provider, routeWaypoints.size(), true));
+                startedAt, System.currentTimeMillis(), distanceMeters, provider, routeWaypoints.size(), true,
+                navigationServiceBound && navigationService != null
+                        ? navigationService.getTripPath() : java.util.Collections.emptyList()));
     }
 
     /** Clears the per-trip tracking fields once a trip has been fully handled (report shown or
@@ -2656,7 +2669,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private void showCurrentMarker() {
         if (map == null) return;
         if (navigationMode) {
-            showVehicleMarker(lastBearing);
+            showVehicleMarker(navigationHeading());
             return;
         }
         if (currentMarker != null) map.removeMarker(currentMarker);
@@ -2667,7 +2680,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private void showVehicleMarker(float bearing) {
         if (map == null) return;
         if (vehicleMarker != null) map.removeMarker(vehicleMarker);
-        vehicleMarker = new Marker(drivingPosition(), vehicleMarkerStyle(navigationCameraEnabled ? 0f : bearing));
+        // The map view itself rotates to keep travel direction up. The bitmap must retain its
+        // world bearing; passing zero here made the arrow rotate with the map in the opposite
+        // direction and appear reversed immediately after a turn/off-route event.
+        vehicleMarker = new Marker(drivingPosition(), vehicleMarkerStyle(bearing));
         map.addMarker(vehicleMarker);
     }
 
@@ -2734,6 +2750,23 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     private float navigationHeading() {
+        // Prefer the driver's measured travel direction. Route geometry is only a fallback: on
+        // loops, parallel roads, or immediately after leaving the route its forward bearing can
+        // legitimately be opposite to the direction the vehicle is actually moving.
+        if (hasHeading && lastAcceptedMapLocation != null) {
+            boolean moving = !lastAcceptedMapLocation.hasSpeed()
+                    || lastAcceptedMapLocation.getSpeed() >= 1.0f;
+            if (moving || System.currentTimeMillis() - lastHeadingAt < 3_000L) return lastBearing;
+        }
+        if (navigationServiceBound && navigationService != null) {
+            ai.drivemate.routing.NavigationEngine engine = navigationService.getNavigationEngine();
+            if (engine.snappedRoutePosition() != null) {
+                float engineHeading = engine.routeHeading();
+                if (!Float.isNaN(engineHeading) && engineHeading >= 0f && engineHeading <= 360f) {
+                    return engineHeading;
+                }
+            }
+        }
         LatLng position = drivingPosition();
         if (selectedRoute != null) {
             int nearestIndex = -1;
@@ -3117,13 +3150,30 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         authoritativeLocationPending = false;
         Location accepted = authoritative ? location : mapLocationFilter.filter(location);
         if (accepted == null) return;
+        Location previous = lastAcceptedMapLocation == null
+                ? null : new Location(lastAcceptedMapLocation);
         gpsWarningActive = false;
         lastAcceptedMapLocation = new Location(accepted);
         originLatitude = accepted.getLatitude();
         originLongitude = accepted.getLongitude();
-        if (accepted.hasBearing()) {
+        if (accepted.hasBearing() && (!accepted.hasSpeed() || accepted.getSpeed() >= 1.0f)) {
             lastBearing = accepted.getBearing();
             hasHeading = true;
+            lastHeadingAt = System.currentTimeMillis();
+        } else if (previous != null && previous.distanceTo(accepted) >= 5f
+                && (!accepted.hasAccuracy() || accepted.getAccuracy() <= 50f)) {
+            // Some fake-GPS and budget devices omit Location.bearing entirely. Deriving bearing
+            // from two accepted fixes gives the marker/camera a useful direction on the very
+            // first movement instead of waiting for the provider to populate bearing.
+            float measured = previous.bearingTo(accepted);
+            if (!hasHeading) {
+                lastBearing = measured;
+            } else {
+                float delta = ((measured - lastBearing + 540f) % 360f) - 180f;
+                lastBearing = (lastBearing + delta * 0.6f + 360f) % 360f;
+            }
+            hasHeading = true;
+            lastHeadingAt = System.currentTimeMillis();
         }
         if (navigationMode && destination != null) {
             if (lastTripAccumLocation != null) tripTraveledDistanceMeters += lastTripAccumLocation.distanceTo(accepted);

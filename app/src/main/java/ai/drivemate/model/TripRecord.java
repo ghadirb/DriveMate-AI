@@ -62,7 +62,7 @@ public class TripRecord {
         this.completed = completed;
         ArrayList<RoutePoint> compactPath = new ArrayList<>();
         if (traveledPath != null) {
-            int start = Math.max(0, traveledPath.size() - 240);
+            int start = Math.max(0, traveledPath.size() - 1200);
             for (int index = start; index < traveledPath.size(); index++) {
                 RoutePoint point = traveledPath.get(index);
                 if (point != null) compactPath.add(point);
@@ -100,7 +100,7 @@ public class TripRecord {
     private static List<RoutePoint> pathFromJson(JSONArray values) {
         ArrayList<RoutePoint> path = new ArrayList<>();
         if (values == null) return path;
-        int start = Math.max(0, values.length() - 240);
+        int start = Math.max(0, values.length() - 1200);
         for (int index = start; index < values.length(); index++) {
             JSONObject point = values.optJSONObject(index);
             if (point != null && point.has("lat") && point.has("lng")) {

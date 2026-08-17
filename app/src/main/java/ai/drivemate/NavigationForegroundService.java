@@ -131,6 +131,9 @@ public class NavigationForegroundService extends Service implements BackgroundNa
     private double activeTripOriginLongitude = Double.NaN;
     private final List<RoutePoint> activeTripPath = new ArrayList<>();
     private Location lastTripLocation;
+    /** Last geometry vertex used while building the matched trip trace. Reset whenever a
+     *  provider replaces the active route so an old route cannot be joined to the new one. */
+    private int lastTripGeometryIndex = -1;
     private long lastSessionCheckpointAt;
     private BackgroundNavigationMonitor backgroundMonitor;
     private final OverpassPoiProvider speedLimitProvider = new OverpassPoiProvider();
@@ -256,11 +259,13 @@ public class NavigationForegroundService extends Service implements BackgroundNa
         activeRoute = route;
         activeDestination = destination;
         activeWaypoints = waypoints == null ? new ArrayList<>() : new ArrayList<>(waypoints);
+        lastTripGeometryIndex = -1;
         activeMode = mode == null ? "" : mode;
         if (!preserveTripProgress || tripStartedAt == 0L) {
             tripStartedAt = System.currentTimeMillis();
             activeTripDistanceMeters = 0;
             activeTripPath.clear();
+            lastTripGeometryIndex = -1;
             if (origin != null) {
                 activeTripOriginLatitude = origin.getLatitude();
                 activeTripOriginLongitude = origin.getLongitude();
@@ -326,6 +331,7 @@ public class NavigationForegroundService extends Service implements BackgroundNa
     @Override public void applyTrafficReroute(RouteResult route, Location origin, int gainSeconds) {
         if (route == null || origin == null || !navigationEngine.isNavigating()) return;
         activeRoute = route;
+        lastTripGeometryIndex = -1;
         // Traffic reroutes also replace the route geometry and therefore must restart step indexing at the new route origin.
         int step = 0;
         navigationEngine.start(route, engineListener, origin,
@@ -381,6 +387,7 @@ public class NavigationForegroundService extends Service implements BackgroundNa
         tripStartedAt = 0L;
         activeTripDistanceMeters = 0;
         activeTripPath.clear();
+        lastTripGeometryIndex = -1;
         activeTripOriginLatitude = Double.NaN;
         activeTripOriginLongitude = Double.NaN;
         lastTripLocation = null;
@@ -441,15 +448,61 @@ public class NavigationForegroundService extends Service implements BackgroundNa
 
     private void appendTripPath(Location location) {
         if (location == null) return;
+        RoutePoint snapped = navigationEngine.snappedRoutePosition();
+        if (snapped != null && activeRoute != null && activeRoute.geometry != null
+                && activeRoute.geometry.size() >= 2) {
+            int currentIndex = nearestGeometryIndex(snapped);
+            if (currentIndex >= 0 && lastTripGeometryIndex >= 0
+                    && currentIndex >= lastTripGeometryIndex) {
+                for (int index = lastTripGeometryIndex + 1;
+                     index <= currentIndex && index < activeRoute.geometry.size(); index++) {
+                    appendTripPoint(activeRoute.geometry.get(index));
+                }
+            } else {
+                appendTripPoint(snapped);
+            }
+            lastTripGeometryIndex = currentIndex;
+            appendTripPoint(snapped);
+            return;
+        }
+        appendTripPoint(new RoutePoint(location.getLatitude(), location.getLongitude()));
+    }
+
+    private void appendTripPoint(RoutePoint point) {
+        if (point == null) return;
         if (!activeTripPath.isEmpty()) {
             RoutePoint previous = activeTripPath.get(activeTripPath.size() - 1);
             Location previousLocation = new Location("trip_path");
             previousLocation.setLatitude(previous.latitude);
             previousLocation.setLongitude(previous.longitude);
-            if (previousLocation.distanceTo(location) < 20f) return;
+            Location currentLocation = new Location("trip_path");
+            currentLocation.setLatitude(point.latitude);
+            currentLocation.setLongitude(point.longitude);
+            if (previousLocation.distanceTo(currentLocation) < 8f) return;
         }
-        if (activeTripPath.size() >= 240) compactTripPath();
-        activeTripPath.add(new RoutePoint(location.getLatitude(), location.getLongitude()));
+        if (activeTripPath.size() >= 1000) compactTripPath();
+        activeTripPath.add(point);
+    }
+
+    private int nearestGeometryIndex(RoutePoint point) {
+        if (point == null || activeRoute == null || activeRoute.geometry == null) return -1;
+        Location target = new Location("trip_route");
+        target.setLatitude(point.latitude);
+        target.setLongitude(point.longitude);
+        int nearest = -1;
+        float nearestMeters = Float.MAX_VALUE;
+        for (int index = 0; index < activeRoute.geometry.size(); index++) {
+            RoutePoint candidate = activeRoute.geometry.get(index);
+            Location location = new Location("trip_route");
+            location.setLatitude(candidate.latitude);
+            location.setLongitude(candidate.longitude);
+            float distance = target.distanceTo(location);
+            if (distance < nearestMeters) {
+                nearestMeters = distance;
+                nearest = index;
+            }
+        }
+        return nearest;
     }
 
     private void compactTripPath() {
@@ -461,6 +514,7 @@ public class NavigationForegroundService extends Service implements BackgroundNa
         }
         compacted.add(activeTripPath.get(activeTripPath.size() - 1));
         activeTripPath.clear();
+        lastTripGeometryIndex = -1;
         activeTripPath.addAll(compacted);
     }
 
@@ -469,6 +523,8 @@ public class NavigationForegroundService extends Service implements BackgroundNa
         // Explicit driver stop is a valid trip-end action; do not discard its report just because
         // the service-side distance accumulator missed samples (for example synthetic/fake GPS).
         long endedAt = System.currentTimeMillis();
+        android.util.Log.i(TAG, "trip report pathPoints=" + activeTripPath.size()
+                + " distance=" + activeTripDistanceMeters);
         return new TripRecord(destination.name, activeTripOriginLatitude, activeTripOriginLongitude,
                 destination.latitude, destination.longitude, activeRoute.distanceMeters, activeRoute.durationSeconds,
                 tripStartedAt, endedAt, activeTripDistanceMeters, activeRoute.providerName,
@@ -516,11 +572,13 @@ public class NavigationForegroundService extends Service implements BackgroundNa
         }
 
         @Override public void onWaypointApproaching(RouteStep step, int ordinal) {
+            android.util.Log.i(TAG, "waypoint approaching ordinal=" + ordinal);
             if (noVoiceCapableCallback()) voicePlayer.announce("continue_route", "توقف میانی " + (ordinal + 1) + " نزدیک است.");
             for (SessionCallback cb : callbacks) cb.onWaypointApproaching(step, ordinal);
         }
 
         @Override public void onWaypointReached(RouteStep step, int ordinal) {
+            android.util.Log.i(TAG, "waypoint reached ordinal=" + ordinal);
             removeActiveWaypoint(step);
             if (noVoiceCapableCallback()) voicePlayer.announce("continue_route", "به توقف میانی " + (ordinal + 1) + " رسیدید. مسیر به مقصد ادامه دارد.");
             for (SessionCallback cb : callbacks) cb.onWaypointReached(step, ordinal);

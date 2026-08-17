@@ -101,10 +101,11 @@ public class NavigationEngine {
     private static final double PASSED_STEP_BUFFER_METERS = 35d;
     private static final double SKIPPED_WAYPOINT_BUFFER_METERS = 180d;
     private static final float GEOGRAPHIC_WAYPOINT_SKIP_ADVANTAGE_METERS = 180f;
-    /** Modestly wider than the maneuver-advance radius: this is a one-shot check (no multi-sample
-     *  confirmation, since a parked/stopped driver may only ever produce one fix inside it), so it
-     *  needs its own buffer against GPS noise rather than sharing the tighter per-maneuver radius. */
-    private static final float FINAL_ARRIVAL_RADIUS_METERS = 80f;
+    /** Intermediate place pins often sit inside a building/parking entrance rather than exactly
+     *  on the routable road. A slightly wider stop radius prevents the engine from passing the
+     *  requested stop without an arrival event while keeping final-destination confirmation
+     *  stricter below. */
+    private static final float FINAL_ARRIVAL_RADIUS_METERS = 110f;
     private static final float FINAL_ARRIVAL_ROUTE_RADIUS_METERS = 140f;
 
     public void start(RouteResult route, Listener listener) {
@@ -282,7 +283,8 @@ public class NavigationEngine {
                 return;
             }// A shortcut can reach a stop without ever touching all of the provider's maneuver
             // points. Advance directly past that stop so navigation continues to the next one.
-            if (accuracyOk(location) && metersToWaypoint <= FINAL_ARRIVAL_RADIUS_METERS) {
+            if (accuracyOkFor(location, MAX_ACCURACY_FOR_ARRIVAL_METERS)
+                    && metersToWaypoint <= FINAL_ARRIVAL_RADIUS_METERS) {
                 advancePastWaypoint(nextWaypointIndex, location, waypoint);
                 return;
             }
@@ -514,6 +516,8 @@ public class NavigationEngine {
         skippedWaypointConfirmSamples = 0;
         announceStageReached = 0;
         updateTargetReference(location);
+        Log.i(TAG, "waypoint reached ordinal=" + waypoint.waypointOrdinal
+                + " distance=" + Math.round(location.distanceTo(asLocation(waypoint))));
         listener.onWaypointReached(waypoint, waypoint.waypointOrdinal);
         RouteStep next = route.steps.get(Math.min(nextStep, route.steps.size() - 1));
         float nextDistance = location.distanceTo(asLocation(next));
@@ -527,6 +531,7 @@ public class NavigationEngine {
         announcedWaypointIndex = -1;
         announceStageReached = 0;
         updateTargetReference(location);
+        Log.i(TAG, "waypoint skipped ordinal=" + waypoint.waypointOrdinal);
         listener.onWaypointSkipped(waypoint, waypoint.waypointOrdinal);
         RouteStep next = route.steps.get(Math.min(nextStep, route.steps.size() - 1));
         float nextDistance = location.distanceTo(asLocation(next));

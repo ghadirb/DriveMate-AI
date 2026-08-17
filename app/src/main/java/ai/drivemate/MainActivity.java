@@ -1188,7 +1188,7 @@ public class MainActivity extends Activity {
             previousLocation.setLongitude(previous.longitude);
             if (previousLocation.distanceTo(location) < 20f) return;
         }
-        if (activeTripPath.size() >= 240) compactTripPath();
+        if (activeTripPath.size() >= 1000) compactTripPath();
         activeTripPath.add(new RoutePoint(location.getLatitude(), location.getLongitude()));
     }
 
@@ -1208,10 +1208,12 @@ public class MainActivity extends Activity {
         if (destination == null || activeRoute == null || tripStartedAt == 0L) return null;
         if (activeTripDistanceMeters < MIN_RECORDED_TRIP_DISTANCE_METERS) return null;
         long endedAt = System.currentTimeMillis();
+        List<RoutePoint> recordedPath = navigationServiceBound && navigationService != null
+                ? navigationService.getTripPath() : activeTripPath;
         return new TripRecord(destination.name, activeTripOriginLatitude, activeTripOriginLongitude,
                 destination.latitude, destination.longitude, activeRoute.distanceMeters, activeRoute.durationSeconds,
                 tripStartedAt, endedAt, activeTripDistanceMeters, activeRoute.providerName,
-                activeWaypoints.size(), completed, activeTripPath);
+                activeWaypoints.size(), completed, recordedPath);
     }
 
     private void saveTripRecord(TripRecord record) {
