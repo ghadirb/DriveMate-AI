@@ -77,13 +77,10 @@ public class NavigationEngine {
     private double[] stepProgressMeters = new double[0];
     private static final long MIN_MS_BETWEEN_INSTRUCTIONS = 1800L;
     private static final float MAX_ACCURACY_FOR_ADVANCE_METERS = 60f;
-    /** Deliberately looser than the maneuver-advance accuracy gate above: arrival is checked
-     *  against a much larger 55m radius already, and a driver who has actually reached the
-     *  destination but is getting a degraded fix (underground/multi-level parking, dense urban
-     *  canyon, covered driveway - exactly where trips often end) must still be able to arrive
-     *  rather than sit there indefinitely hearing "continue on route" because no fix ever came in
-     *  under the tighter 60m bar used for in-route maneuver advancement. */
+    /** Waypoint arrival can tolerate a place pin inside a parking entrance, but final arrival
+     *  must wait for a substantially better fix so a weak GPS reading cannot end the trip early. */
     private static final float MAX_ACCURACY_FOR_ARRIVAL_METERS = 100f;
+    private static final float MAX_ACCURACY_FOR_FINAL_ARRIVAL_METERS = 60f;
     /** Minimum gap between onOffRoute() callbacks. Time-based rather than a one-shot latch that
      *  only clears on the next maneuver or a fresh start(): a one-shot latch can permanently lock
      *  up if the caller ever declines to act on a callback (e.g. its own reroute throttle), since
@@ -96,7 +93,7 @@ public class NavigationEngine {
     private int passedStepConfirmSamples;
     private int skippedWaypointConfirmSamples;
     private int finalArrivalConfirmSamples;
-    private static final int FINAL_ARRIVAL_CONFIRM_SAMPLES = 2;
+    private static final int FINAL_ARRIVAL_CONFIRM_SAMPLES = 3;
     private static final int WAYPOINT_SKIP_CONFIRM_SAMPLES = 2;
     private static final double PASSED_STEP_BUFFER_METERS = 35d;
     private static final double SKIPPED_WAYPOINT_BUFFER_METERS = 180d;
@@ -246,13 +243,15 @@ public class NavigationEngine {
         float metersToRouteEnd = route.geometry == null || route.geometry.isEmpty()
                 ? Float.MAX_VALUE : location.distanceTo(asLocation(route.geometry.get(route.geometry.size() - 1)));
         // Arrival is a final-state decision: never finish a trip merely because the driver entered a broad destination radius.
-        boolean destinationCloseEnough = metersToDestination <= 35f
+        boolean destinationCloseEnough = (metersToDestination <= 25f
+                && (routeProgress == null || routeProgress.onRoute))
                 || (routeProgress != null && routeProgress.onRoute
-                && routeProgress.remainingMeters <= 20 && metersToDestination <= 45f)
+                && routeProgress.remainingMeters <= 15 && metersToDestination <= 40f)
                 || (routeProgress != null && routeProgress.onRoute
-                && routeProgress.remainingMeters <= 15 && metersToRouteEnd <= 35f
-                && metersToDestination <= 55f);
-        if (accuracyOkFor(location, MAX_ACCURACY_FOR_ARRIVAL_METERS) && destinationCloseEnough) {
+                && routeProgress.remainingMeters <= 10 && metersToRouteEnd <= 25f
+                && metersToDestination <= 50f);
+        if (accuracyOkFor(location, MAX_ACCURACY_FOR_FINAL_ARRIVAL_METERS)
+                && destinationCloseEnough) {
             finalArrivalConfirmSamples++;
         } else {
             finalArrivalConfirmSamples = 0;

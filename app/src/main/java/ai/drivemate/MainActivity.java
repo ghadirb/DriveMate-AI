@@ -2780,7 +2780,7 @@ public class MainActivity extends Activity {
         Location rerouteLocation = locationTracker == null ? null : locationTracker.getLastLocation();
         long now = System.currentTimeMillis();
         if (rerouteInFlight || activeDestination == null || rerouteLocation == null) return;
-        if (now - lastRerouteStartedAt < 4_000L) return;
+        if (now - lastRerouteStartedAt < 1_500L) return;
         lastRerouteStartedAt = now;
         rerouteInFlight = true;
         // The service owns the engine. Keep its current step long enough for startNavigation(..., true)
