@@ -346,7 +346,8 @@ public class NavigationEngine {
         if (isReliablyOffRoute(location, meters, routeProgress)
                 && now - lastOffRouteCallbackAt >= MIN_MS_BETWEEN_OFFROUTE_CALLBACKS) {
             lastOffRouteCallbackAt = now;
-            Log.i(TAG, "off-route confirmed routeDistance=" + Math.round(routeDistance)
+            Log.i(TAG, "off-route confirmed routeDistance=" + Math.round(
+                    routeProgress == null ? distanceToRoute(location) : routeProgress.distanceToRouteMeters)
                     + " targetDistance=" + Math.round(meters) + " accuracy=" + Math.round(location.getAccuracy())
                     + " samples=" + offRouteSamples);
             listener.onOffRoute();
