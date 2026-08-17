@@ -287,6 +287,8 @@ public class NavigationForegroundService extends Service implements BackgroundNa
     /** Explicit driver-initiated stop (not arrival) - e.g. cancelling a trip from the UI. */
     public TripRecord stopNavigationSession() {
         TripRecord report = buildTripRecord(activeDestination, false);
+        android.util.Log.i(TAG, "explicit stop report=" + (report != null) + " distance=" + activeTripDistanceMeters
+                + " navigating=" + navigationEngine.isNavigating());
         if (report != null) tripStore.add(report);
         navigationEngine.stop();
         sessionStore.clear();
@@ -302,6 +304,8 @@ public class NavigationForegroundService extends Service implements BackgroundNa
     /** Completes the active session from the service-owned arrival/Activity callback path. */
     public TripRecord finishNavigationSession() {
         SavedPlace destination = activeDestination;
+        android.util.Log.i(TAG, "finishNavigationSession destination=" + (destination == null ? "null" : destination.name)
+                + " distance=" + activeTripDistanceMeters + " navigating=" + navigationEngine.isNavigating());
         TripRecord report = buildTripRecord(destination, true);
         if (report != null) tripStore.add(report);
         navigationEngine.stop();
@@ -462,7 +466,8 @@ public class NavigationForegroundService extends Service implements BackgroundNa
 
     private TripRecord buildTripRecord(SavedPlace destination, boolean completed) {
         if (destination == null || activeRoute == null || tripStartedAt == 0L) return null;
-        if (!completed && activeTripDistanceMeters < MIN_RECORDED_TRIP_DISTANCE_METERS) return null;
+        // Explicit driver stop is a valid trip-end action; do not discard its report just because
+        // the service-side distance accumulator missed samples (for example synthetic/fake GPS).
         long endedAt = System.currentTimeMillis();
         return new TripRecord(destination.name, activeTripOriginLatitude, activeTripOriginLongitude,
                 destination.latitude, destination.longitude, activeRoute.distanceMeters, activeRoute.durationSeconds,

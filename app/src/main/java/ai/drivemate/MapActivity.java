@@ -222,7 +222,17 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         // onLocationChanged below) - it already existed before this binding and drives its own
         // GPS-quality filtering, vehicle marker, and route-line rendering, none of which this
         // service-level callback needs to duplicate.
-        @Override public void onLocationUpdate(Location location) { }
+        @Override public void onLocationUpdate(Location location) {
+            // NavigationForegroundService is the authoritative GPS owner. Feed its already-filtered
+            // fixes into the map UI as well, so the arrow/polyline cannot stall when MapActivity's
+            // independent LocationManager stream is paused or dropped.
+            if (location == null) return;
+            runOnUiThread(() -> {
+                if (!isFinishing() && !isDestroyed() && navigationMode) {
+                    onLocationChanged(new Location(location));
+                }
+            });
+        }
         @Override public void onLocationAvailabilityChanged(boolean available) { }
     };
     private boolean navigationMode;
