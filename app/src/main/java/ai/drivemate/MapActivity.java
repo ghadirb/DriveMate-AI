@@ -2743,8 +2743,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         float heading = navigationHeading();
         LatLng vehiclePosition = drivingPosition();
         LatLng cameraTarget = pointAhead(vehiclePosition, heading, 68d);
-        // Neshan applies this as map rotation; invert the travel heading so the road ahead is up.
-        applyMapOrientation(-heading, 58f, 0.28f);
+        // Keep the OSM canvas north-up. The vehicle bitmap already carries the real world
+        // bearing; rotating both the canvas and bitmap made the arrow appear sideways/opposite
+        // on osmdroid builds where overlays follow the MapView transform.
+        applyMapOrientation(0f, 0f, 0f);
         map.moveCamera(cameraTarget, 0.28f);
         map.setZoom(17.25f, 0.28f);
     }
@@ -3156,15 +3158,11 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         lastAcceptedMapLocation = new Location(accepted);
         originLatitude = accepted.getLatitude();
         originLongitude = accepted.getLongitude();
-        if (accepted.hasBearing() && (!accepted.hasSpeed() || accepted.getSpeed() >= 1.0f)) {
-            lastBearing = accepted.getBearing();
-            hasHeading = true;
-            lastHeadingAt = System.currentTimeMillis();
-        } else if (previous != null && previous.distanceTo(accepted) >= 5f
+        if (previous != null && previous.distanceTo(accepted) >= 5f
                 && (!accepted.hasAccuracy() || accepted.getAccuracy() <= 50f)) {
             // Some fake-GPS and budget devices omit Location.bearing entirely. Deriving bearing
             // from two accepted fixes gives the marker/camera a useful direction on the very
-            // first movement instead of waiting for the provider to populate bearing.
+            // first movement instead of trusting a stale zero bearing from the provider.
             float measured = previous.bearingTo(accepted);
             if (!hasHeading) {
                 lastBearing = measured;
@@ -3172,6 +3170,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                 float delta = ((measured - lastBearing + 540f) % 360f) - 180f;
                 lastBearing = (lastBearing + delta * 0.6f + 360f) % 360f;
             }
+            hasHeading = true;
+            lastHeadingAt = System.currentTimeMillis();
+        } else if (accepted.hasBearing() && (!accepted.hasSpeed() || accepted.getSpeed() >= 1.0f)) {
+            lastBearing = accepted.getBearing();
             hasHeading = true;
             lastHeadingAt = System.currentTimeMillis();
         }

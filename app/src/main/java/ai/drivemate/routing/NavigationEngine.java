@@ -88,7 +88,7 @@ public class NavigationEngine {
      *  only clears on the next maneuver or a fresh start(): a one-shot latch can permanently lock
      *  up if the caller ever declines to act on a callback (e.g. its own reroute throttle), since
      *  nothing would ever clear it again for the rest of the trip. A cooldown always re-arms. */
-    private static final long MIN_MS_BETWEEN_OFFROUTE_CALLBACKS = 3_000L;
+    private static final long MIN_MS_BETWEEN_OFFROUTE_CALLBACKS = 1_500L;
     /** Consecutive confirming fixes required before trusting a maneuver has actually been reached
      *  (see onLocation). */
     private static final int STEP_ADVANCE_CONFIRM_SAMPLES = 2;
@@ -184,6 +184,13 @@ public class NavigationEngine {
     public RouteStep currentStep() {
         if (route == null || route.steps.isEmpty()) return null;
         return route.steps.get(Math.min(nextStep, route.steps.size() - 1));
+    }
+
+    /** True when the provider supplied at least one synthetic intermediate-stop step. */
+    public boolean hasWaypointSteps() {
+        if (route == null || route.steps == null) return false;
+        for (RouteStep step : route.steps) if (step.waypointOrdinal >= 0) return true;
+        return false;
     }
 
     public int currentStepIndex() { return nextStep; }
@@ -479,10 +486,15 @@ public class NavigationEngine {
         // destination. Use route geometry as the primary signal and confirm with two good fixes.
         float routeDistance = routeProgress == null ? distanceToRoute(location) : routeProgress.distanceToRouteMeters;
         float movedFromReference = location.distanceTo(targetReference);
-        float corridorMeters = Math.max(35f, Math.min(70f, location.getAccuracy() * 2.5f));
-        if (routeDistance > corridorMeters && movedFromReference >= 20f) {
+        float corridorMeters = Math.max(25f, Math.min(60f, location.getAccuracy() * 2.2f));
+        boolean clearlySeparated = routeDistance > corridorMeters + 12f;
+        boolean movingEnough = movedFromReference >= 15f
+                || (location.hasSpeed() && location.getSpeed() >= 1.2f);
+        if (clearlySeparated && movingEnough) {
             offRouteSamples++;
-            return offRouteSamples >= 2;
+            // A clean fix well outside the route is sufficient; noisy borderline fixes still
+            // require confirmation so a single multipath spike cannot trigger a reroute.
+            return offRouteSamples >= (routeDistance > corridorMeters + 35f ? 1 : 2);
         }
         if (routeDistance <= corridorMeters * 0.65f) offRouteSamples = 0;
 

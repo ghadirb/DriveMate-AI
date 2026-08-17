@@ -1049,7 +1049,7 @@ public class MainActivity extends Activity {
                     lastTrafficEtaMeasuredAt = System.currentTimeMillis();
                     String firstRouteInstruction = route.steps.isEmpty() ? "<none>" : route.steps.get(0).instruction;
                     android.util.Log.i("DriveMateRoute", "provider=" + route.providerName + " steps=" + route.steps.size()
-                            + " first=" + firstRouteInstruction);
+                            + " waypoints=" + requestedWaypoints.size() + " first=" + firstRouteInstruction);
                     if (!navigationServiceBound || navigationService == null) {
                         setStatus("سرویس مسیریابی هنوز آماده نیست؛ دوباره تلاش کنید.");
                         return;
@@ -2780,7 +2780,7 @@ public class MainActivity extends Activity {
         Location rerouteLocation = locationTracker == null ? null : locationTracker.getLastLocation();
         long now = System.currentTimeMillis();
         if (rerouteInFlight || activeDestination == null || rerouteLocation == null) return;
-        if (now - lastRerouteStartedAt < 8_000L) return;
+        if (now - lastRerouteStartedAt < 4_000L) return;
         lastRerouteStartedAt = now;
         rerouteInFlight = true;
         // The service owns the engine. Keep its current step long enough for startNavigation(..., true)
@@ -3696,7 +3696,7 @@ public class MainActivity extends Activity {
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
                 "راننده به توقف میانی شماره " + humanNumber
                         + " رسیده است. یک پیام فارسی کوتاه و طبیعی بگو که مسیر تا مقصد نهایی ادامه دارد.",
-                "continue_route", fallback, 12_000L);
+                null, fallback, 12_000L, true);
         setStatus(fallback);
     }
 
@@ -3706,7 +3706,7 @@ public class MainActivity extends Activity {
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
                 "راننده در حال نزدیک شدن به توقف میانی شماره " + humanNumber
                         + " است. یک هشدار فارسی بسیار کوتاه و مناسب رانندگی بگو.",
-                "continue_route", fallback, 10_000L);
+                null, fallback, 10_000L, true);
         setStatus(fallback);
     }
 
@@ -3718,7 +3718,7 @@ public class MainActivity extends Activity {
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
                 "راننده با چند نمونه دقیق GPS از توقف میانی شماره " + humanNumber
                         + " عبور کرده و آن را نرفته است. یک پیام فارسی کوتاه بگو که توقف حذف شده و مسیر ادامه دارد.",
-                "continue_route", fallback, 12_000L);
+                null, fallback, 12_000L, true);
         setStatus(fallback);
     }
 

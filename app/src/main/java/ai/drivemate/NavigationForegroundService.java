@@ -134,6 +134,8 @@ public class NavigationForegroundService extends Service implements BackgroundNa
     /** Last geometry vertex used while building the matched trip trace. Reset whenever a
      *  provider replaces the active route so an old route cannot be joined to the new one. */
     private int lastTripGeometryIndex = -1;
+    private RoutePoint fallbackAnnouncedWaypoint;
+    private int completedWaypointCount;
     private long lastSessionCheckpointAt;
     private BackgroundNavigationMonitor backgroundMonitor;
     private final OverpassPoiProvider speedLimitProvider = new OverpassPoiProvider();
@@ -152,6 +154,7 @@ public class NavigationForegroundService extends Service implements BackgroundNa
         locationTracker.setUpdateListener(new DeviceLocationTracker.UpdateListener() {
             @Override public void onLocationUpdate(Location location) {
                 navigationEngine.onLocation(location);
+                checkFallbackWaypoint(location);
                 recordTripLocation(location);
                 if (noVoiceCapableCallback()) checkSpeedLimit(location);
                 for (SessionCallback cb : callbacks) cb.onLocationUpdate(location);
@@ -181,6 +184,8 @@ public class NavigationForegroundService extends Service implements BackgroundNa
         activeTripDistanceMeters = Math.round(session.travelledMeters);
         activeTripPath.clear();
         if (session.tripPath != null) activeTripPath.addAll(session.tripPath);
+        completedWaypointCount = 0;
+        fallbackAnnouncedWaypoint = null;
         locationTracker.start();
         Location current = locationTracker.getLastLocation();
         RoutePoint finalDestination = activeDestination == null ? null
@@ -260,6 +265,8 @@ public class NavigationForegroundService extends Service implements BackgroundNa
         activeDestination = destination;
         activeWaypoints = waypoints == null ? new ArrayList<>() : new ArrayList<>(waypoints);
         lastTripGeometryIndex = -1;
+        fallbackAnnouncedWaypoint = null;
+        if (!preserveTripProgress) completedWaypointCount = 0;
         activeMode = mode == null ? "" : mode;
         if (!preserveTripProgress || tripStartedAt == 0L) {
             tripStartedAt = System.currentTimeMillis();
@@ -282,6 +289,8 @@ public class NavigationForegroundService extends Service implements BackgroundNa
         // maneuver from the new route and then advance monotonically from live GPS.
         int initialStepIndex = 0;
         navigationEngine.start(route, engineListener, origin, finalDestination, initialStepIndex);
+        android.util.Log.i(TAG, "start route waypoints=" + activeWaypoints.size()
+                + " waypointSteps=" + navigationEngine.hasWaypointSteps());
         for (SessionCallback cb : callbacks) cb.onRouteReplaced(route);
         ensureForeground();
         checkpointSession();
@@ -332,6 +341,7 @@ public class NavigationForegroundService extends Service implements BackgroundNa
         if (route == null || origin == null || !navigationEngine.isNavigating()) return;
         activeRoute = route;
         lastTripGeometryIndex = -1;
+        fallbackAnnouncedWaypoint = null;
         // Traffic reroutes also replace the route geometry and therefore must restart step indexing at the new route origin.
         int step = 0;
         navigationEngine.start(route, engineListener, origin,
@@ -388,6 +398,8 @@ public class NavigationForegroundService extends Service implements BackgroundNa
         activeTripDistanceMeters = 0;
         activeTripPath.clear();
         lastTripGeometryIndex = -1;
+        fallbackAnnouncedWaypoint = null;
+        completedWaypointCount = 0;
         activeTripOriginLatitude = Double.NaN;
         activeTripOriginLongitude = Double.NaN;
         lastTripLocation = null;
@@ -466,6 +478,34 @@ public class NavigationForegroundService extends Service implements BackgroundNa
             return;
         }
         appendTripPoint(new RoutePoint(location.getLatitude(), location.getLongitude()));
+    }
+
+    /** Provider-independent safety net for a malformed multi-stop response. Normally the
+     *  NavigationEngine's synthetic RouteStep handles this; when a provider returns no waypoint
+     *  steps at all, the requested stop must still be announced and removed from future reroutes. */
+    private void checkFallbackWaypoint(Location location) {
+        if (location == null || !navigationEngine.isNavigating() || activeWaypoints.isEmpty()
+                || navigationEngine.hasWaypointSteps()) return;
+        RoutePoint waypoint = activeWaypoints.get(0);
+        Location target = new Location("fallback_waypoint");
+        target.setLatitude(waypoint.latitude);
+        target.setLongitude(waypoint.longitude);
+        float distance = location.distanceTo(target);
+        float speed = location.hasSpeed() ? Math.max(1f, location.getSpeed()) : 8.3f;
+        float announceDistance = Math.max(120f, Math.min(320f, speed * 8f));
+        RouteStep step = new RouteStep(waypoint.latitude, waypoint.longitude,
+                "به توقف میانی می‌رسید", 0, null, completedWaypointCount);
+        if (fallbackAnnouncedWaypoint == null && distance <= announceDistance) {
+            fallbackAnnouncedWaypoint = waypoint;
+            android.util.Log.i(TAG, "fallback waypoint approaching ordinal=" + completedWaypointCount
+                    + " distance=" + Math.round(distance));
+            engineListener.onWaypointApproaching(step, completedWaypointCount);
+        }
+        if (distance <= 110f) {
+            android.util.Log.i(TAG, "fallback waypoint reached ordinal=" + completedWaypointCount
+                    + " distance=" + Math.round(distance));
+            engineListener.onWaypointReached(step, completedWaypointCount);
+        }
     }
 
     private void appendTripPoint(RoutePoint point) {
@@ -573,21 +613,25 @@ public class NavigationForegroundService extends Service implements BackgroundNa
 
         @Override public void onWaypointApproaching(RouteStep step, int ordinal) {
             android.util.Log.i(TAG, "waypoint approaching ordinal=" + ordinal);
-            if (noVoiceCapableCallback()) voicePlayer.announce("continue_route", "توقف میانی " + (ordinal + 1) + " نزدیک است.");
+            if (noVoiceCapableCallback()) voicePlayer.speak("توقف میانی " + (ordinal + 1) + " نزدیک است.");
             for (SessionCallback cb : callbacks) cb.onWaypointApproaching(step, ordinal);
         }
 
         @Override public void onWaypointReached(RouteStep step, int ordinal) {
             android.util.Log.i(TAG, "waypoint reached ordinal=" + ordinal);
             removeActiveWaypoint(step);
-            if (noVoiceCapableCallback()) voicePlayer.announce("continue_route", "به توقف میانی " + (ordinal + 1) + " رسیدید. مسیر به مقصد ادامه دارد.");
+            completedWaypointCount = Math.max(completedWaypointCount, ordinal + 1);
+            fallbackAnnouncedWaypoint = null;
+            if (noVoiceCapableCallback()) voicePlayer.speak("به توقف میانی " + (ordinal + 1) + " رسیدید. مسیر به مقصد ادامه دارد.");
             for (SessionCallback cb : callbacks) cb.onWaypointReached(step, ordinal);
             checkpointSession();
         }
 
         @Override public void onWaypointSkipped(RouteStep step, int ordinal) {
             removeActiveWaypoint(step);
-            if (noVoiceCapableCallback()) voicePlayer.announce("continue_route", "توقف میانی " + (ordinal + 1) + " رد شد؛ مسیریابی به مقصد بعدی ادامه دارد.");
+            completedWaypointCount = Math.max(completedWaypointCount, ordinal + 1);
+            fallbackAnnouncedWaypoint = null;
+            if (noVoiceCapableCallback()) voicePlayer.speak("توقف میانی " + (ordinal + 1) + " رد شد؛ مسیریابی به مقصد بعدی ادامه دارد.");
             for (SessionCallback cb : callbacks) cb.onWaypointSkipped(step, ordinal);
             checkpointSession();
         }
