@@ -97,7 +97,7 @@ public class NavigationEngine {
     private int skippedWaypointConfirmSamples;
     private int finalArrivalConfirmSamples;
     private static final int FINAL_ARRIVAL_CONFIRM_SAMPLES = 2;
-    private static final int WAYPOINT_SKIP_CONFIRM_SAMPLES = 3;
+    private static final int WAYPOINT_SKIP_CONFIRM_SAMPLES = 2;
     private static final double PASSED_STEP_BUFFER_METERS = 35d;
     private static final double SKIPPED_WAYPOINT_BUFFER_METERS = 180d;
     private static final float GEOGRAPHIC_WAYPOINT_SKIP_ADVANTAGE_METERS = 180f;
@@ -521,7 +521,7 @@ public class NavigationEngine {
 
     private boolean waypointWasSkipped(Location location, RouteProgressTracker.Snapshot routeProgress,
                                        int waypointIndex, float metersToWaypoint) {
-        if (!accuracyOk(location) || location.hasAccuracy() && location.getAccuracy() > 40f
+        if (!accuracyOkFor(location, 75f)
                 || waypointIndex >= stepProgressMeters.length
                 || Double.isNaN(stepProgressMeters[waypointIndex])) {
             skippedWaypointConfirmSamples = 0;

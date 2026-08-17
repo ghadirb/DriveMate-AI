@@ -223,6 +223,8 @@ public class MainActivity extends Activity {
      * previous turn must never speak after the next turn has become relevant. */
     private long drivingAnnouncementGeneration;
     private boolean rerouteInFlight;
+    /** Prevents immediate retriggering from the same stale/off-route GPS fix. */
+    private long lastRerouteStartedAt;
     private SavedPlace pendingSuggestionPlace;
     private PoiCategory pendingSuggestionCategory;
     private final RoutePatternAnalyzer routePatternAnalyzer = new RoutePatternAnalyzer();
@@ -2773,7 +2775,11 @@ public class MainActivity extends Activity {
     }
 
     private void rerouteFromCurrentLocation() {
-        if (rerouteInFlight || activeDestination == null || locationTracker.getLastLocation() == null) return;
+        Location rerouteLocation = locationTracker == null ? null : locationTracker.getLastLocation();
+        long now = System.currentTimeMillis();
+        if (rerouteInFlight || activeDestination == null || rerouteLocation == null) return;
+        if (now - lastRerouteStartedAt < 8_000L) return;
+        lastRerouteStartedAt = now;
         rerouteInFlight = true;
         // The service owns the engine. Keep its current step long enough for startNavigation(..., true)
         // to preserve progress; the service atomically replaces the engine state with the new route.

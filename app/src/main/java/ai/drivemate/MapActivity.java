@@ -229,6 +229,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             if (location == null) return;
             runOnUiThread(() -> {
                 if (!isFinishing() && !isDestroyed() && navigationMode) {
+                    authoritativeLocationPending = true;
                     onLocationChanged(new Location(location));
                 }
             });
@@ -295,6 +296,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
      * fix here too; otherwise a weak network fix can visibly jump the vehicle/route in alleys. */
     private Location lastAcceptedMapLocation;
     private final LocationQualityFilter mapLocationFilter = new LocationQualityFilter();
+    /** True only for a service-owned fix already filtered by the authoritative navigation tracker. */
+    private boolean authoritativeLocationPending;
     private boolean routeNeedsRefreshFromCurrentLocation;
     private boolean routeRefreshInFlight;
     private long lastRouteRefreshAttemptAt;
@@ -3114,7 +3117,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     @Override public void onLocationChanged(Location location) {
         if (isFinishing() || isDestroyed()) return;
-        Location accepted = mapLocationFilter.filter(location);
+        boolean authoritative = authoritativeLocationPending;
+        authoritativeLocationPending = false;
+        Location accepted = authoritative ? location : mapLocationFilter.filter(location);
         if (accepted == null) return;
         gpsWarningActive = false;
         lastAcceptedMapLocation = new Location(accepted);
