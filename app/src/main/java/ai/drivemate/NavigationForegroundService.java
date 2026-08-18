@@ -670,7 +670,7 @@ public class NavigationForegroundService extends Service implements BackgroundNa
             if (step != null) {
                 fallbackAnnouncedWaypoint = new RoutePoint(step.latitude, step.longitude);
             }
-            if (noVoiceCapableCallback()) speakWaypoint("توقف میانی " + (ordinal + 1) + " نزدیک است.");
+            speakWaypoint("مقصد میانی " + (ordinal + 1) + " نزدیک است.");
             for (SessionCallback cb : callbacks) cb.onWaypointApproaching(step, ordinal);
         }
 
@@ -686,7 +686,7 @@ public class NavigationForegroundService extends Service implements BackgroundNa
             removeActiveWaypoint(step);
             completedWaypointCount = Math.max(completedWaypointCount, ordinal + 1);
             fallbackAnnouncedWaypoint = null;
-            if (noVoiceCapableCallback()) speakWaypoint("به توقف میانی " + (ordinal + 1) + " رسیدید. مسیر به مقصد ادامه دارد.");
+            speakWaypoint("به مقصد میانی " + (ordinal + 1) + " رسیدید. مسیر به مقصد بعدی ادامه دارد.");
             for (SessionCallback cb : callbacks) cb.onWaypointReached(step, ordinal);
             checkpointSession();
         }
@@ -702,7 +702,7 @@ public class NavigationForegroundService extends Service implements BackgroundNa
             removeActiveWaypoint(step);
             completedWaypointCount = Math.max(completedWaypointCount, ordinal + 1);
             fallbackAnnouncedWaypoint = null;
-            if (noVoiceCapableCallback()) speakWaypoint("توقف میانی " + (ordinal + 1) + " رد شد؛ مسیریابی به مقصد بعدی ادامه دارد.");
+            speakWaypoint("مقصد میانی " + (ordinal + 1) + " رد شد؛ مسیریابی به مقصد بعدی ادامه دارد.");
             for (SessionCallback cb : callbacks) cb.onWaypointSkipped(step, ordinal);
             checkpointSession();
         }

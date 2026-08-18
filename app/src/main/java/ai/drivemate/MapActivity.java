@@ -1967,6 +1967,19 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             }
             step = selectedRoute.steps.get(displayedStepIndex);
         }
+        NavigationEngine liveEngine = navigationServiceBound && navigationService != null
+                ? navigationService.getNavigationEngine() : null;
+        RouteStep nextWaypoint = liveEngine == null ? null : liveEngine.nextWaypoint();
+        if (nextWaypoint != null) {
+            int waypointDistance = liveEngine.distanceToNextWaypointMeters(location);
+            if (waypointDistance >= 0) {
+                turnInstructionText.setText("مقصد میانی " + (nextWaypoint.waypointOrdinal + 1));
+                turnArrowText.setText("●");
+                turnDistanceText.setText(formatDistance(waypointDistance));
+                updateDrivingHud(location, waypointDistance);
+                return;
+            }
+        }
         Location target = new Location("route");
         target.setLatitude(step.latitude);
         target.setLongitude(step.longitude);
@@ -2007,6 +2020,23 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     private void updateDrivingHud(Location location, float metersToCurrentTarget) {
         if (selectedRoute == null || selectedRoute.steps.isEmpty()) return;
+        NavigationEngine liveEngine = navigationServiceBound && navigationService != null
+                ? navigationService.getNavigationEngine() : null;
+        RouteStep nextWaypoint = liveEngine == null ? null : liveEngine.nextWaypoint();
+        if (nextWaypoint != null) {
+            int waypointDistance = liveEngine.distanceToNextWaypointMeters(location);
+            if (waypointDistance >= 0) {
+                int totalMeters = Math.max(1, selectedRoute.distanceMeters);
+                double fraction = Math.max(0.02, Math.min(1.0, waypointDistance / (double) totalMeters));
+                int remainingSeconds = (int) Math.round(selectedRoute.durationSeconds * fraction);
+                long arrivalAt = System.currentTimeMillis() + remainingSeconds * 1000L;
+                routeText.setText("مقصد میانی " + (nextWaypoint.waypointOrdinal + 1) + " • "
+                        + formatDistance(waypointDistance) + " مانده • "
+                        + formatDuration(remainingSeconds) + " دیگر • رسیدن ساعت "
+                        + etaFormat.format(new Date(arrivalAt)));
+                return;
+            }
+        }
         int remainingMeters = estimateRemainingRouteMeters(location);
         if (remainingMeters <= 0) remainingMeters = Math.round(metersToCurrentTarget);
         int totalMeters = Math.max(1, selectedRoute.distanceMeters);
@@ -2407,7 +2437,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     @Override public void onWaypointApproaching(RouteStep step, int ordinal) {
         runOnUiThread(() -> {
-            turnInstructionText.setText("توقف میانی " + (ordinal + 1) + " نزدیک است.");
+            turnInstructionText.setText("مقصد میانی " + (ordinal + 1) + " نزدیک است.");
             turnArrowText.setText("●");
             renderLaneGuidance(null);
         });
@@ -2455,7 +2485,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             // Match by coordinates, not ordinal: see removeReachedWaypoint in MainActivity for why
             // a route-specific ordinal desyncs from routeWaypoints once any stop has been removed.
             removeReachedWaypoint(step);
-            turnInstructionText.setText("به توقف میانی رسیدید؛ مسیر ادامه دارد.");
+            turnInstructionText.setText("به مقصد میانی " + (ordinal + 1) + " رسیدید؛ مسیر به مقصد بعدی ادامه دارد.");
             turnArrowText.setText("●");
             renderLaneGuidance(null);
             if (destination != null) destinationText.setText(waypointLabelSuffix(destination.name));
@@ -2466,7 +2496,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     @Override public void onWaypointSkipped(RouteStep step, int ordinal) {
         runOnUiThread(() -> {
             removeReachedWaypoint(step);
-            turnInstructionText.setText("توقف میانی رد شد؛ مسیر به مقصد بعدی ادامه دارد.");
+            turnInstructionText.setText("مقصد میانی " + (ordinal + 1) + " رد شد؛ مسیر به مقصد بعدی ادامه دارد.");
             turnArrowText.setText("↻");
             renderLaneGuidance(null);
             if (destination != null) destinationText.setText(waypointLabelSuffix(destination.name));

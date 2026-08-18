@@ -3750,24 +3750,21 @@ public class MainActivity extends Activity {
         // stops have already been removed or how many reroutes have happened since.
         removeReachedWaypoint(activeWaypoints, step);
         int humanNumber = ordinal + 1;
-        String fallback = "به توقف میانی " + humanNumber + " رسیدید. مسیر به مقصد ادامه دارد.";
-        speakWaypointFallback(fallback);
+        String fallback = "به مقصد میانی " + humanNumber + " رسیدید. مسیر به مقصد بعدی ادامه دارد.";
         setStatus(fallback);
     }
 
     private void announceWaypointApproaching(RouteStep step, int ordinal) {
         int humanNumber = ordinal + 1;
-        String fallback = "توقف میانی " + humanNumber + " نزدیک است.";
-        speakWaypointFallback(fallback);
+        String fallback = "مقصد میانی " + humanNumber + " نزدیک است.";
         setStatus(fallback);
     }
 
     private void announceWaypointSkipped(RouteStep step, int ordinal) {
         removeReachedWaypoint(activeWaypoints, step);
         int humanNumber = ordinal + 1;
-        String fallback = "توقف میانی " + humanNumber
+        String fallback = "مقصد میانی " + humanNumber
                 + " رد شد و از مسیر حذف شد؛ مسیریابی به مقصد بعدی ادامه دارد.";
-        speakWaypointFallback(fallback);
         setStatus(fallback);
     }
 

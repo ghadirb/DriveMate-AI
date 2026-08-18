@@ -190,6 +190,19 @@ public class NavigationEngine {
         return false;
     }
 
+    /** Returns the next intermediate destination still ahead on the active route. */
+    public RouteStep nextWaypoint() {
+        int index = nextWaypointIndex();
+        return index < 0 || route == null || index >= route.steps.size() ? null : route.steps.get(index);
+    }
+
+    /** Straight-line distance to the next intermediate destination for the live HUD. */
+    public int distanceToNextWaypointMeters(Location location) {
+        RouteStep waypoint = nextWaypoint();
+        if (waypoint == null || location == null) return -1;
+        return Math.round(location.distanceTo(asLocation(waypoint)));
+    }
+
     public int currentStepIndex() { return nextStep; }
 
     /** Last monotonic route segment accepted by RouteProgressTracker. Unlike a global nearest-point
