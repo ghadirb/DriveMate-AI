@@ -192,6 +192,17 @@ public class NavigationEngine {
         return progress == null || !progress.onRoute ? null : progress.snappedPoint;
     }
 
+    /** Index into route.geometry of the segment the engine's own snap currently sits on, or -1 if
+     *  not on-route. Monotonic (see RouteProgressTracker) - unlike a plain unconstrained
+     *  nearest-vertex search, this never jumps backward on GPS noise, so a UI trimming the drawn
+     *  route line to "remaining road ahead" at this index stays in lockstep with the vehicle
+     *  marker (see MapActivity.routePoints/drivingPosition, which both use this same snap) instead
+     *  of the two drifting out of sync with each other. */
+    public int snappedSegmentIndex() {
+        RouteProgressTracker.Snapshot progress = progressTracker.current();
+        return progress == null || !progress.onRoute ? -1 : progress.segmentIndex;
+    }
+
     public float routeHeading() {
         RouteProgressTracker.Snapshot progress = progressTracker.current();
         return progress == null ? 0f : progress.headingDegrees;
@@ -240,6 +251,7 @@ public class NavigationEngine {
             RouteStep waypoint = route.steps.get(nextWaypointIndex);
             float metersToWaypoint = location.distanceTo(asLocation(waypoint));
             if (waypointWasSkipped(location, routeProgress, nextWaypointIndex, metersToWaypoint)) {
+                Log.i(TAG, "waypoint skipped ordinal=" + waypoint.waypointOrdinal + " metersToWaypoint=" + metersToWaypoint);
                 skipWaypoint(nextWaypointIndex, location, waypoint);
                 return;
             }
@@ -248,11 +260,13 @@ public class NavigationEngine {
             if (instructionAnnouncementsEnabled && announcedWaypointIndex != nextWaypointIndex
                     && metersToWaypoint <= waypointAnnounceDistance) {
                 announcedWaypointIndex = nextWaypointIndex;
+                Log.i(TAG, "waypoint approaching ordinal=" + waypoint.waypointOrdinal + " metersToWaypoint=" + metersToWaypoint);
                 listener.onWaypointApproaching(waypoint, waypoint.waypointOrdinal);
             }
             // A shortcut can reach a stop without ever touching all of the provider's maneuver
             // points. Advance directly past that stop so navigation continues to the next one.
             if (accuracyOk(location) && metersToWaypoint <= FINAL_ARRIVAL_RADIUS_METERS) {
+                Log.i(TAG, "waypoint reached ordinal=" + waypoint.waypointOrdinal + " metersToWaypoint=" + metersToWaypoint);
                 advancePastWaypoint(nextWaypointIndex, location, waypoint);
                 return;
             }
@@ -279,6 +293,7 @@ public class NavigationEngine {
             advanceConfirmSamples = 0;
             RouteStep justReached = target;
             if (justReached.waypointOrdinal >= 0) {
+                Log.i(TAG, "waypoint reached (maneuver-endpoint path) ordinal=" + justReached.waypointOrdinal + " meters=" + meters);
                 advancePastWaypoint(nextStep, location, justReached);
                 return;
             }
