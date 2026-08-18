@@ -543,12 +543,30 @@ public class NavigationForegroundService extends Service implements BackgroundNa
             onlineSpeechClient.stopPlayback();
             android.util.Log.i(TAG, "waypoint speech path=online textLength=" + text.length());
             final long generation = waypointSpeechGeneration;
+            final java.util.concurrent.atomic.AtomicBoolean delivered =
+                    new java.util.concurrent.atomic.AtomicBoolean(false);
+            final android.os.Handler fallbackHandler =
+                    new android.os.Handler(android.os.Looper.getMainLooper());
+            final Runnable localFallback = () -> {
+                if (generation != waypointSpeechGeneration
+                        || !delivered.compareAndSet(false, true)) return;
+                // Cancel a slow network response before its audio can arrive after the local
+                // safety cue has already been spoken.
+                onlineSpeechClient.stopPlayback();
+                android.util.Log.w(TAG, "waypoint online TTS watchdog; local fallback");
+                if (voicePlayer != null) voicePlayer.speak(text);
+            };
+            fallbackHandler.postDelayed(localFallback, 1_500L);
             onlineSpeechClient.speak(text, new OnlineSpeechClient.SpeechCallback() {
                 @Override public void onPlayed() {
+                    if (!delivered.compareAndSet(false, true)) return;
+                    fallbackHandler.removeCallbacks(localFallback);
                     android.util.Log.i(TAG, "waypoint TTS provider="
                             + onlineSpeechClient.getLastTtsProvider());
                 }
                 @Override public void onError() {
+                    fallbackHandler.removeCallbacks(localFallback);
+                    if (!delivered.compareAndSet(false, true)) return;
                     android.util.Log.w(TAG, "waypoint online TTS failed; local fallback");
                     if (generation == waypointSpeechGeneration
                             && navigationEngine.isNavigating() && voicePlayer != null) {
