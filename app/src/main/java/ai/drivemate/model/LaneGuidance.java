@@ -1,5 +1,10 @@
 package ai.drivemate.model;
 
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
@@ -32,5 +37,26 @@ public final class LaneGuidance {
             if (Boolean.TRUE.equals(valid)) anyValid = true; else anyInvalid = true;
         }
         return anyValid && anyInvalid;
+    }
+
+    public JSONObject toJson() throws JSONException {
+        JSONObject object = new JSONObject();
+        object.put("indications", new JSONArray(indications));
+        object.put("validForManeuver", new JSONArray(validForManeuver));
+        return object;
+    }
+
+    public static LaneGuidance fromJson(JSONObject object) {
+        List<String> indications = new ArrayList<>();
+        List<Boolean> validForManeuver = new ArrayList<>();
+        JSONArray indicationsArray = object.optJSONArray("indications");
+        if (indicationsArray != null) {
+            for (int i = 0; i < indicationsArray.length(); i++) indications.add(indicationsArray.optString(i));
+        }
+        JSONArray validArray = object.optJSONArray("validForManeuver");
+        if (validArray != null) {
+            for (int i = 0; i < validArray.length(); i++) validForManeuver.add(validArray.optBoolean(i));
+        }
+        return new LaneGuidance(indications, validForManeuver);
     }
 }

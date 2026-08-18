@@ -39,7 +39,7 @@ public class TripStore {
     public TripRecord pendingReport() {
         long lastShown = preferences.getLong(KEY_LAST_SHOWN_REPORT, 0L);
         for (TripRecord record : recent(5)) {
-            if (record.completed && record.startedAt != lastShown) return record;
+            if (record.completed && record.startedAt > lastShown) return record;
         }
         return null;
     }

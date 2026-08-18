@@ -58,6 +58,11 @@ public class MapIrRoutingProvider implements RoutingProvider {
         JSONObject object = RoutingHttp.getJson(url, "x-api-key", apiKey);
         JSONArray rawRoutes = object.optJSONArray("routes");
         if (rawRoutes == null || rawRoutes.length() == 0) throw new IllegalStateException("map.ir returned no route.");
+        JSONObject firstRoute = rawRoutes.optJSONObject(0);
+        JSONArray firstRouteLegs = firstRoute == null ? null : firstRoute.optJSONArray("legs");
+        android.util.Log.i("DriveMateRoute", "map.ir parsed legs="
+                + (firstRouteLegs == null ? 0 : firstRouteLegs.length())
+                + " waypoints=" + (waypoints == null ? 0 : waypoints.size()));
         ArrayList<RouteResult> results = new ArrayList<>();
         for (int i = 0; i < rawRoutes.length() && i < 3; i++) {
             results.add(parseRoute(rawRoutes.getJSONObject(i), originLat, originLng, waypoints, destinationLat, destinationLng));
@@ -95,8 +100,84 @@ public class MapIrRoutingProvider implements RoutingProvider {
             }
         }
         if (steps.isEmpty()) steps.add(new RouteStep(destinationLat, destinationLng, "Arrive at destination", 0));
+        List<RoutePoint> geometry = RouteGeometry.fromRoute(route, steps, originLat, originLng,
+                destinationLat, destinationLng);
+        ensureWaypointSteps(steps, geometry, waypoints);
+        android.util.Log.i("DriveMateRoute", "map.ir route steps=" + steps.size()
+                + " waypointSteps=" + countWaypointSteps(steps)
+                + " geometry=" + geometry.size());
         return new RouteResult(name(), route.optInt("distance"), route.optInt("duration"), route.optString("weight_name"), steps,
-                RouteGeometry.fromRoute(route, steps, originLat, originLng, destinationLat, destinationLng), speedLimits);
+                geometry, speedLimits);
+    }
+
+    /** Some map.ir responses collapse intermediate coordinates into one leg even though the
+     * request contained stops. Preserve every requested stop as an ordered synthetic step so the
+     * navigation engine can announce and advance it instead of silently skipping it. */
+    private void ensureWaypointSteps(List<RouteStep> steps, List<RoutePoint> geometry,
+                                     List<RoutePoint> waypoints) {
+        if (steps == null || waypoints == null || waypoints.isEmpty()) return;
+        for (int ordinal = 0; ordinal < waypoints.size(); ordinal++) {
+            RoutePoint waypoint = waypoints.get(ordinal);
+            if (waypoint == null || hasWaypointOrdinal(steps, ordinal)) continue;
+            int waypointGeometryIndex = nearestGeometryIndex(geometry, waypoint);
+            int insertion = steps.size();
+            for (int index = 0; index < steps.size(); index++) {
+                RouteStep step = steps.get(index);
+                if (nearestGeometryIndex(geometry, new RoutePoint(step.latitude, step.longitude))
+                        > waypointGeometryIndex) {
+                    insertion = index;
+                    break;
+                }
+            }
+            steps.add(insertion, new RouteStep(waypoint.latitude, waypoint.longitude,
+                    "Arrive at stop", 0, null, ordinal));
+        }
+    }
+
+    private boolean hasWaypointOrdinal(List<RouteStep> steps, int ordinal) {
+        for (RouteStep step : steps) {
+            if (step.waypointOrdinal == ordinal) return true;
+        }
+        return false;
+    }
+
+    private int countWaypointSteps(List<RouteStep> steps) {
+        int count = 0;
+        if (steps != null) for (RouteStep step : steps) if (step.waypointOrdinal >= 0) count++;
+        return count;
+    }
+
+    private int nearestGeometryIndex(List<RoutePoint> geometry, RoutePoint point) {
+        if (geometry == null || geometry.isEmpty() || point == null) return Integer.MAX_VALUE;
+        LocationPoint target = new LocationPoint(point.latitude, point.longitude);
+        int nearest = 0;
+        float nearestDistance = Float.MAX_VALUE;
+        for (int index = 0; index < geometry.size(); index++) {
+            RoutePoint candidate = geometry.get(index);
+            float distance = target.distanceTo(new LocationPoint(candidate.latitude, candidate.longitude));
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearest = index;
+            }
+        }
+        return nearest;
+    }
+
+    private static final class LocationPoint {
+        final double latitude;
+        final double longitude;
+
+        LocationPoint(double latitude, double longitude) {
+            this.latitude = latitude;
+            this.longitude = longitude;
+        }
+
+        float distanceTo(LocationPoint other) {
+            float[] result = new float[1];
+            android.location.Location.distanceBetween(latitude, longitude,
+                    other.latitude, other.longitude, result);
+            return result[0];
+        }
     }
 
     /** map.ir is OSRM-style and commonly exposes maneuver type/modifier rather than a complete

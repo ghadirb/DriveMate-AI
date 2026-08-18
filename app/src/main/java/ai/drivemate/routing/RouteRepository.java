@@ -94,7 +94,8 @@ public class RouteRepository {
                     continue;
                 }
                 try {
-                    Log.i("DriveMateRoute", "request provider=" + provider.name());
+                    Log.i("DriveMateRoute", "request provider=" + provider.name()
+                            + " waypoints=" + (waypoints == null ? 0 : waypoints.size()));
                     List<RouteResult> rawRoutes = request.run(provider);
                     List<RouteResult> routes = usableRoutes(rawRoutes);
                     if (routes.isEmpty()) throw new IllegalStateException(provider.name() + " returned no usable routes.");

@@ -1,5 +1,8 @@
 package ai.drivemate.model;
 
+import org.json.JSONException;
+import org.json.JSONObject;
+
 public class RouteStep {
     public final double latitude;
     public final double longitude;
@@ -34,5 +37,29 @@ public class RouteStep {
         this.distanceMeters = distanceMeters;
         this.lanes = lanes;
         this.waypointOrdinal = waypointOrdinal;
+    }
+
+    public JSONObject toJson() throws JSONException {
+        JSONObject object = new JSONObject();
+        object.put("latitude", latitude);
+        object.put("longitude", longitude);
+        object.put("instruction", instruction);
+        object.put("distanceMeters", distanceMeters);
+        object.put("waypointOrdinal", waypointOrdinal);
+        if (lanes != null) object.put("lanes", lanes.toJson());
+        return object;
+    }
+
+    public static RouteStep fromJson(JSONObject object) {
+        LaneGuidance lanes = object.has("lanes") && !object.isNull("lanes")
+                ? LaneGuidance.fromJson(object.optJSONObject("lanes")) : null;
+        return new RouteStep(
+                object.optDouble("latitude"),
+                object.optDouble("longitude"),
+                object.optString("instruction"),
+                object.optInt("distanceMeters"),
+                lanes,
+                object.optInt("waypointOrdinal", -1)
+        );
     }
 }

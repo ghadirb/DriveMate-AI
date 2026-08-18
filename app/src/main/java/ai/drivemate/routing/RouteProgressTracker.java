@@ -49,8 +49,8 @@ public final class RouteProgressTracker {
     private Snapshot snapshot;
     private long lastOnRouteRealtimeMs;
     private final ArrayDeque<Location> recentLocations = new ArrayDeque<>();
-    private static final int LOCATION_HISTORY_SIZE = 4;
-    private static final float MIN_HEADING_DISTANCE_METERS = 12f;
+    private static final int LOCATION_HISTORY_SIZE = 6;
+    private static final float MIN_HEADING_DISTANCE_METERS = 6f;
 
     public synchronized void reset(RouteResult route, Location initialLocation) {
         this.route = route;
@@ -276,7 +276,7 @@ public final class RouteProgressTracker {
     }
 
     private float movementHeading(Location location) {
-        if (location.hasBearing() && location.hasSpeed() && location.getSpeed() >= 2.8f) {
+        if (location.hasBearing() && location.hasSpeed() && location.getSpeed() >= 1.0f) {
             return location.getBearing();
         }
         Location oldest = recentLocations.peekFirst();
@@ -300,7 +300,7 @@ public final class RouteProgressTracker {
     private float headingPenaltyMeters(Location location, float movementHeading) {
         if (Float.isNaN(movementHeading)) return 0f;
         float speedMps = motionSpeedMps(location);
-        if (speedMps < 2.8f) return 0f;
+        if (speedMps < 1.0f) return 0f;
         return Math.min(38f, 12f + speedMps * 2.2f);
     }
 

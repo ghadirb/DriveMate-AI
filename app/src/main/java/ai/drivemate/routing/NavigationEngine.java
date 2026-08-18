@@ -64,6 +64,7 @@ public class NavigationEngine {
      *  first maneuver of a trip (before any real GPS speed sample exists) still gets reasonable
      *  lead time instead of the degenerate 0 m/s a fresh Location often reports. */
     private float lastValidSpeedMps = 8.3f;
+    private Location lastTimingLocation;
     private static final float MIN_TIMING_SPEED_MPS = 2.8f;   // ~10km/h floor: stopped/crawling traffic must not collapse distances to ~0
     private static final float MAX_TIMING_SPEED_MPS = 36f;    // ~130km/h ceiling: guards a GPS speed spike from inflating distances unrealistically
     /** A single bad speed sample (multipath spike, brief loss of fix) must not be trusted outright -
@@ -76,18 +77,15 @@ public class NavigationEngine {
     private double[] stepProgressMeters = new double[0];
     private static final long MIN_MS_BETWEEN_INSTRUCTIONS = 1800L;
     private static final float MAX_ACCURACY_FOR_ADVANCE_METERS = 60f;
-    /** Deliberately looser than the maneuver-advance accuracy gate above: arrival is checked
-     *  against a much larger 55m radius already, and a driver who has actually reached the
-     *  destination but is getting a degraded fix (underground/multi-level parking, dense urban
-     *  canyon, covered driveway - exactly where trips often end) must still be able to arrive
-     *  rather than sit there indefinitely hearing "continue on route" because no fix ever came in
-     *  under the tighter 60m bar used for in-route maneuver advancement. */
+    /** Waypoint arrival can tolerate a place pin inside a parking entrance, but final arrival
+     *  must wait for a substantially better fix so a weak GPS reading cannot end the trip early. */
     private static final float MAX_ACCURACY_FOR_ARRIVAL_METERS = 100f;
+    private static final float MAX_ACCURACY_FOR_FINAL_ARRIVAL_METERS = 60f;
     /** Minimum gap between onOffRoute() callbacks. Time-based rather than a one-shot latch that
      *  only clears on the next maneuver or a fresh start(): a one-shot latch can permanently lock
      *  up if the caller ever declines to act on a callback (e.g. its own reroute throttle), since
      *  nothing would ever clear it again for the rest of the trip. A cooldown always re-arms. */
-    private static final long MIN_MS_BETWEEN_OFFROUTE_CALLBACKS = 10_000L;
+    private static final long MIN_MS_BETWEEN_OFFROUTE_CALLBACKS = 1_500L;
     /** Consecutive confirming fixes required before trusting a maneuver has actually been reached
      *  (see onLocation). */
     private static final int STEP_ADVANCE_CONFIRM_SAMPLES = 2;
@@ -95,15 +93,17 @@ public class NavigationEngine {
     private int passedStepConfirmSamples;
     private int skippedWaypointConfirmSamples;
     private int finalArrivalConfirmSamples;
-    private static final int FINAL_ARRIVAL_CONFIRM_SAMPLES = 2;
-    private static final int WAYPOINT_SKIP_CONFIRM_SAMPLES = 3;
+    private static final int FINAL_ARRIVAL_CONFIRM_SAMPLES = 3;
+    private static final int WAYPOINT_SKIP_CONFIRM_SAMPLES = 2;
     private static final double PASSED_STEP_BUFFER_METERS = 35d;
     private static final double SKIPPED_WAYPOINT_BUFFER_METERS = 180d;
     private static final float GEOGRAPHIC_WAYPOINT_SKIP_ADVANTAGE_METERS = 180f;
-    /** Modestly wider than the maneuver-advance radius: this is a one-shot check (no multi-sample
-     *  confirmation, since a parked/stopped driver may only ever produce one fix inside it), so it
-     *  needs its own buffer against GPS noise rather than sharing the tighter per-maneuver radius. */
-    private static final float FINAL_ARRIVAL_RADIUS_METERS = 100f;
+    /** Intermediate place pins often sit inside a building/parking entrance rather than exactly
+     *  on the routable road. A slightly wider stop radius prevents the engine from passing the
+     *  requested stop without an arrival event while keeping final-destination confirmation
+     *  stricter below. */
+    private static final float FINAL_ARRIVAL_RADIUS_METERS = 110f;
+    private static final float FINAL_ARRIVAL_ROUTE_RADIUS_METERS = 140f;
 
     public void start(RouteResult route, Listener listener) {
         start(route, listener, null);
@@ -140,6 +140,8 @@ public class NavigationEngine {
         this.skippedWaypointConfirmSamples = 0;
         this.finalArrivalConfirmSamples = 0;
         this.lastInstructionAt = 0L;
+        this.lastValidSpeedMps = 8.3f;
+        this.lastTimingLocation = currentLocation == null ? null : new Location(currentLocation);
         this.currentInstructionAnnounced = false;
         this.announceStageReached = 0;
         this.announcedWaypointIndex = -1;
@@ -149,6 +151,7 @@ public class NavigationEngine {
         updateTargetReference(currentLocation);
         if (route != null && !route.steps.isEmpty()) {
             Log.i(TAG, "start step=" + nextStep + " steps=" + route.steps.size()
+                    + " waypointIndex=" + nextWaypointIndex()
                     + " instruction=" + route.steps.get(nextStep).instruction);
         }
     }
@@ -163,6 +166,7 @@ public class NavigationEngine {
         passedStepConfirmSamples = 0;
         skippedWaypointConfirmSamples = 0;
         finalArrivalConfirmSamples = 0;
+        lastTimingLocation = null;
         currentInstructionAnnounced = false;
         announceStageReached = 0;
         announcedWaypointIndex = -1;
@@ -179,11 +183,32 @@ public class NavigationEngine {
         return route.steps.get(Math.min(nextStep, route.steps.size() - 1));
     }
 
+    /** True when the provider supplied at least one synthetic intermediate-stop step. */
+    public boolean hasWaypointSteps() {
+        if (route == null || route.steps == null) return false;
+        for (RouteStep step : route.steps) if (step.waypointOrdinal >= 0) return true;
+        return false;
+    }
+
     public int currentStepIndex() { return nextStep; }
+
+    /** Last monotonic route segment accepted by RouteProgressTracker. Unlike a global nearest-point
+     * search this remains stable on loops, parallel roads and temporary off-route deviations. */
+    public int currentRouteSegmentIndex() {
+        RouteProgressTracker.Snapshot snapshot = progressTracker.current();
+        return snapshot == null ? -1 : snapshot.segmentIndex;
+    }
 
     public int remainingMeters() {
         RouteProgressTracker.Snapshot progress = progressTracker.current();
-        return progress == null ? route == null ? 0 : route.distanceMeters : progress.remainingMeters;
+        if (route == null) return 0;
+        if (progress == null) return route.distanceMeters;
+        int waypointIndex = nextWaypointIndex();
+        if (waypointIndex >= 0 && waypointIndex < stepProgressMeters.length
+                && !Double.isNaN(stepProgressMeters[waypointIndex])) {
+            return (int) Math.round(Math.max(0d, stepProgressMeters[waypointIndex] - progress.progressMeters));
+        }
+        return progress.remainingMeters;
     }
 
     public RoutePoint snappedRoutePosition() {
@@ -215,10 +240,20 @@ public class NavigationEngine {
         RouteStep destinationStep = route.steps.get(route.steps.size() - 1);
         float metersToDestination = location.distanceTo(finalDestination == null
                 ? asLocation(destinationStep) : asLocation(finalDestination));
-        boolean destinationCloseEnough = metersToDestination <= FINAL_ARRIVAL_RADIUS_METERS
+        float metersToRouteEnd = route.geometry == null || route.geometry.isEmpty()
+                ? Float.MAX_VALUE : location.distanceTo(asLocation(route.geometry.get(route.geometry.size() - 1)));
+        // Arrival is a final-state decision: never finish a trip merely because the driver entered a broad destination radius.
+        int pendingWaypointIndex = nextWaypointIndex();
+        boolean destinationCloseEnough = pendingWaypointIndex < 0
+                && ((metersToDestination <= 25f
+                && (routeProgress == null || routeProgress.onRoute))
                 || (routeProgress != null && routeProgress.onRoute
-                && routeProgress.remainingMeters <= 120 && metersToDestination <= 140f);
-        if (accuracyOkFor(location, MAX_ACCURACY_FOR_ARRIVAL_METERS) && destinationCloseEnough) {
+                && routeProgress.remainingMeters <= 15 && metersToDestination <= 40f)
+                || (routeProgress != null && routeProgress.onRoute
+                && routeProgress.remainingMeters <= 10 && metersToRouteEnd <= 25f
+                && metersToDestination <= 50f));
+        if (accuracyOkFor(location, MAX_ACCURACY_FOR_FINAL_ARRIVAL_METERS)
+                && destinationCloseEnough) {
             finalArrivalConfirmSamples++;
         } else {
             // Decay by one rather than a hard reset: GPS accuracy commonly dips right where a
@@ -229,29 +264,40 @@ public class NavigationEngine {
             finalArrivalConfirmSamples = Math.max(0, finalArrivalConfirmSamples - 1);
         }
         if (finalArrivalConfirmSamples >= FINAL_ARRIVAL_CONFIRM_SAMPLES) {
+            Log.i(TAG, "arrival confirmed distance=" + Math.round(metersToDestination)
+                    + " routeRemaining=" + Math.round(routeProgress == null ? -1 : routeProgress.remainingMeters)
+                    + " routeEndDistance=" + Math.round(metersToRouteEnd)
+                    + " accuracy=" + (location.hasAccuracy() ? Math.round(location.getAccuracy()) : -1));
             Listener callback = listener;
             stop();
             callback.onArrived();
             return;
         }
-        int nextWaypointIndex = nextWaypointIndex();
+        int nextWaypointIndex = pendingWaypointIndex;
         if (nextWaypointIndex >= 0) {
             RouteStep waypoint = route.steps.get(nextWaypointIndex);
             float metersToWaypoint = location.distanceTo(asLocation(waypoint));
+            // Announce before the skip test so a delayed/fake GPS jump cannot silently consume the stop.
+            float waypointSpeed = smoothedSpeedMps(location);
+            float waypointLeadSeconds = waypointSpeed >= 22f ? 10f : 8f;
+            float waypointAnnounceDistance = Math.max(120f, Math.min(320f,
+                    Math.max(waypoint.distanceMeters * 0.65f, waypointSpeed * waypointLeadSeconds)));
+            if (announcedWaypointIndex != nextWaypointIndex
+                    && metersToWaypoint <= waypointAnnounceDistance) {
+                announcedWaypointIndex = nextWaypointIndex;
+                Log.i(TAG, "waypoint approaching ordinal=" + waypoint.waypointOrdinal
+                        + " distance=" + Math.round(metersToWaypoint)
+                        + " announceDistance=" + Math.round(waypointAnnounceDistance)
+                        + " speedMps=" + String.format(java.util.Locale.US, "%.1f", waypointSpeed));
+                listener.onWaypointApproaching(waypoint, waypoint.waypointOrdinal);
+            }
             if (waypointWasSkipped(location, routeProgress, nextWaypointIndex, metersToWaypoint)) {
                 skipWaypoint(nextWaypointIndex, location, waypoint);
                 return;
-            }
-            float waypointAnnounceDistance = Math.max(90f, Math.min(260f,
-                    Math.max(120f, waypoint.distanceMeters * 0.65f)));
-            if (instructionAnnouncementsEnabled && announcedWaypointIndex != nextWaypointIndex
-                    && metersToWaypoint <= waypointAnnounceDistance) {
-                announcedWaypointIndex = nextWaypointIndex;
-                listener.onWaypointApproaching(waypoint, waypoint.waypointOrdinal);
-            }
-            // A shortcut can reach a stop without ever touching all of the provider's maneuver
+            }// A shortcut can reach a stop without ever touching all of the provider's maneuver
             // points. Advance directly past that stop so navigation continues to the next one.
-            if (accuracyOk(location) && metersToWaypoint <= FINAL_ARRIVAL_RADIUS_METERS) {
+            if (accuracyOkFor(location, MAX_ACCURACY_FOR_ARRIVAL_METERS)
+                    && metersToWaypoint <= FINAL_ARRIVAL_RADIUS_METERS) {
                 advancePastWaypoint(nextWaypointIndex, location, waypoint);
                 return;
             }
@@ -281,6 +327,18 @@ public class NavigationEngine {
                 advancePastWaypoint(nextStep, location, justReached);
                 return;
             }
+            // For a short maneuver step, reachedDistance (which triggers this advance) can be
+            // numerically closer than finalMeters (which triggers the voice instruction in
+            // evaluateInstructionCascade) - the driver could physically reach/pass the maneuver
+            // before its own announcement threshold was ever crossed, silently skipping the
+            // instruction entirely (e.g. a roundabout with a short entry segment: shown on the
+            // banner because that reads the step directly, but never spoken). This is the last
+            // chance to say it before moving on to the next maneuver.
+            if (instructionAnnouncementsEnabled && !currentInstructionAnnounced && hasActionableCurrentInstruction()) {
+                currentInstructionAnnounced = true;
+                lastInstructionAt = System.currentTimeMillis();
+                listener.onInstruction(justReached);
+            }
             nextStep = Math.min(nextStep + 1, route.steps.size() - 1);
             currentInstructionAnnounced = false;
             announceStageReached = 0;
@@ -295,6 +353,10 @@ public class NavigationEngine {
         if (isReliablyOffRoute(location, meters, routeProgress)
                 && now - lastOffRouteCallbackAt >= MIN_MS_BETWEEN_OFFROUTE_CALLBACKS) {
             lastOffRouteCallbackAt = now;
+            Log.i(TAG, "off-route confirmed routeDistance=" + Math.round(
+                    routeProgress == null ? distanceToRoute(location) : routeProgress.distanceToRouteMeters)
+                    + " targetDistance=" + Math.round(meters) + " accuracy=" + Math.round(location.getAccuracy())
+                    + " samples=" + offRouteSamples);
             listener.onOffRoute();
         }
     }
@@ -313,9 +375,13 @@ public class NavigationEngine {
 
     private static int firstActionableStepIndex(RouteResult route, int startingIndex) {
         if (route == null || route.steps == null) return startingIndex;
+        int firstWaypointIndex = -1;
         for (int index = startingIndex; index < route.steps.size(); index++) {
             RouteStep step = route.steps.get(index);
-            if (step.waypointOrdinal >= 0) continue;
+            if (step.waypointOrdinal >= 0) {
+                if (firstWaypointIndex < 0) firstWaypointIndex = index;
+                continue;
+            }
             String instruction = step.instruction == null ? "" : step.instruction.trim();
             String lower = instruction.toLowerCase(java.util.Locale.ROOT);
             boolean arrival = lower.contains("arriv") || instruction.contains("\u0645\u0642\u0635\u062f")
@@ -323,9 +389,9 @@ public class NavigationEngine {
             boolean genericStart = lower.contains("depart") || lower.contains("continue")
                     || instruction.contains("\u0628\u0647 \u0633\u0645\u062a \u0645\u0642\u0635\u062f \u062d\u0631\u06a9\u062a")
                     || instruction.contains("\u062f\u0631 \u0645\u0633\u06cc\u0631 \u0627\u062f\u0627\u0645\u0647");
-            if (!arrival && !genericStart) return index;
+            if (!arrival && !genericStart) return firstWaypointIndex >= 0 ? firstWaypointIndex : index;
         }
-        return startingIndex;
+        return firstWaypointIndex >= 0 ? firstWaypointIndex : startingIndex;
     }
 
     /** Announces the first actionable provider instruction as soon as a route is ready. */
@@ -364,8 +430,8 @@ public class NavigationEngine {
                 clamp(70f, 180f, speed * reactionSeconds * 0.75f)));
         // "در X متر": the first distant heads-up - this is where speed matters most, since it's the
         // one a fast highway approach most needs pulled earlier.
-        float initialMeters = Math.min(stepLen * 0.95f, Math.max(approachMeters + 40f,
-                clamp(120f, 450f, speed * reactionSeconds * 1.6f)));
+        float initialMeters = Math.min(stepLen * 0.98f, Math.max(approachMeters + 50f,
+                clamp(140f, 600f, speed * reactionSeconds * 2.0f)));
 
         if (announceStageReached < 1 && meters <= initialMeters) {
             announceStageReached = 1;
@@ -388,9 +454,19 @@ public class NavigationEngine {
      *  collapse or balloon every announcement distance for this tick. */
     private float smoothedSpeedMps(Location location) {
         float raw = location.hasSpeed() ? location.getSpeed() : -1f;
-        if (raw >= 0f && (lastValidSpeedMps <= 0f || Math.abs(raw - lastValidSpeedMps) <= MAX_PLAUSIBLE_SPEED_JUMP_MPS)) {
-            lastValidSpeedMps = raw;
+        if (raw < 0f && lastTimingLocation != null) {
+            long elapsedMs = location.getElapsedRealtimeNanos() > 0L && lastTimingLocation.getElapsedRealtimeNanos() > 0L
+                    ? (location.getElapsedRealtimeNanos() - lastTimingLocation.getElapsedRealtimeNanos()) / 1_000_000L
+                    : location.getTime() - lastTimingLocation.getTime();
+            if (elapsedMs > 0L) raw = lastTimingLocation.distanceTo(location) / Math.max(0.5f, elapsedMs / 1000f);
         }
+        if (raw >= 0f && raw <= MAX_TIMING_SPEED_MPS) {
+            // Smooth legitimate acceleration/deceleration instead of rejecting large jumps.
+            // Rejecting them kept the old speed and could make a warning arrive too late.
+            float bounded = Math.max(0f, Math.min(MAX_TIMING_SPEED_MPS, raw));
+            lastValidSpeedMps = lastValidSpeedMps * 0.65f + bounded * 0.35f;
+        }
+        lastTimingLocation = new Location(location);
         return Math.max(MIN_TIMING_SPEED_MPS, Math.min(MAX_TIMING_SPEED_MPS, lastValidSpeedMps));
     }
 
@@ -399,11 +475,11 @@ public class NavigationEngine {
      *  same classification MainActivity's voice layer already uses for these Persian instructions. */
     private static float reactionSecondsFor(RouteStep step, float speedMps) {
         String text = step.instruction == null ? "" : step.instruction;
-        float base = 6f;
+        float base = 7f;
         if (text.contains("دور بزنید")) base = 9f;
-        else if (text.contains("میدان")) base = 8f;
+        else if (text.contains("میدان")) base = 10f;
         else if (text.contains("تند")) base = 7f;
-        if (speedMps >= 22f) base += 3f;
+        if (speedMps >= 22f) base += 4f;
         return base;
     }
 
@@ -413,18 +489,29 @@ public class NavigationEngine {
 
     private boolean isReliablyOffRoute(Location location, float targetDistance,
                                        RouteProgressTracker.Snapshot routeProgress) {
-        if (nextStep >= route.steps.size() - 1 || targetReference == null) return false;
-        if (!location.hasAccuracy() || location.getAccuracy() > 50f) return false;
+        if (targetReference == null) return false;
+        if (!location.hasAccuracy() || location.getAccuracy() > 90f) return false;
 
-        // Route geometry is much more reliable than distance to a maneuver endpoint on city streets.
-        // The corridor scales with the reported GPS accuracy and requires three fixes, preventing
-        // one bad network-location sample from repeatedly re-routing a driver on narrow streets.
-        float routeDistance = routeProgress == null ? distanceToRoute(location) : routeProgress.distanceToRouteMeters;
+        // Off-route detection must also work in the final streets of a trip. The previous
+        // last-step guard disabled rerouting exactly when a driver could turn wrong near the
+        // destination. Use route geometry as the primary signal and confirm with two good fixes.
+        // Use the complete geometry for the off-route signal. The monotonic progress snapshot is
+        // intentionally constrained to a local window for stable drawing, but that same constraint
+        // can hide an immediate deviation when the vehicle is already beside a later street.
+        float routeDistance = distanceToRoute(location);
         float movedFromReference = location.distanceTo(targetReference);
-        float corridorMeters = Math.max(100f, location.getAccuracy() * 3.0f);
-        if (routeDistance > corridorMeters && movedFromReference >= 25f) {
+        float accuracyMeters = location.getAccuracy();
+        float corridorMeters = Math.max(25f, Math.min(75f, accuracyMeters * 2.0f));
+        boolean clearlySeparated = routeDistance > corridorMeters + 12f;
+        boolean movingEnough = movedFromReference >= 15f
+                || (location.hasSpeed() && location.getSpeed() >= 1.2f);
+        if (clearlySeparated && movingEnough) {
             offRouteSamples++;
-            return offRouteSamples >= 3;
+            // A clean fix well outside the route is sufficient; noisy borderline fixes still
+            // require confirmation so a single multipath spike cannot trigger a reroute.
+            int requiredSamples = accuracyMeters > 50f ? 3
+                    : (routeDistance > corridorMeters + 35f ? 1 : 2);
+            return offRouteSamples >= requiredSamples;
         }
         if (routeDistance <= corridorMeters * 0.65f) offRouteSamples = 0;
 
@@ -433,7 +520,7 @@ public class NavigationEngine {
         boolean movingAway = movedFromReference >= 80f
                 && targetDistance > Math.max(180f, targetDistanceAtReference + 100f);
         offRouteSamples = movingAway ? offRouteSamples + 1 : 0;
-        return offRouteSamples >= 3;
+        return offRouteSamples >= 2;
     }
 
     private boolean accuracyOk(Location location) {
@@ -458,6 +545,8 @@ public class NavigationEngine {
         skippedWaypointConfirmSamples = 0;
         announceStageReached = 0;
         updateTargetReference(location);
+        Log.i(TAG, "waypoint reached ordinal=" + waypoint.waypointOrdinal
+                + " distance=" + Math.round(location.distanceTo(asLocation(waypoint))));
         listener.onWaypointReached(waypoint, waypoint.waypointOrdinal);
         RouteStep next = route.steps.get(Math.min(nextStep, route.steps.size() - 1));
         float nextDistance = location.distanceTo(asLocation(next));
@@ -471,6 +560,7 @@ public class NavigationEngine {
         announcedWaypointIndex = -1;
         announceStageReached = 0;
         updateTargetReference(location);
+        Log.i(TAG, "waypoint skipped ordinal=" + waypoint.waypointOrdinal);
         listener.onWaypointSkipped(waypoint, waypoint.waypointOrdinal);
         RouteStep next = route.steps.get(Math.min(nextStep, route.steps.size() - 1));
         float nextDistance = location.distanceTo(asLocation(next));
@@ -479,7 +569,7 @@ public class NavigationEngine {
 
     private boolean waypointWasSkipped(Location location, RouteProgressTracker.Snapshot routeProgress,
                                        int waypointIndex, float metersToWaypoint) {
-        if (!accuracyOk(location) || location.hasAccuracy() && location.getAccuracy() > 40f
+        if (!accuracyOkFor(location, 75f)
                 || waypointIndex >= stepProgressMeters.length
                 || Double.isNaN(stepProgressMeters[waypointIndex])) {
             skippedWaypointConfirmSamples = 0;

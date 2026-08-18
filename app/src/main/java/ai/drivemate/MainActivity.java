@@ -4,6 +4,8 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.ComponentName;
+import android.content.ServiceConnection;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.IntentFilter;
@@ -128,6 +130,9 @@ public class MainActivity extends Activity {
     private BackupManager backupManager;
     private VoiceGuidancePlayer voicePlayer;
     private DeviceLocationTracker locationTracker;
+    private NavigationForegroundService navigationService;
+    private boolean navigationServiceBound;
+    private boolean welcomeSpoken;
     /** True while the "GPS unavailable" status is showing, so repeated onProviderDisabled calls
      *  (GPS and network can each fire independently) don't spam setStatus. */
     private boolean gpsWarningActive;
@@ -149,7 +154,7 @@ public class MainActivity extends Activity {
     private OnlineSpeechClient onlineSpeechClient;
     private LocalSpeechRecognizer localSpeechRecognizer;
     private SmartDriveCompanion smartCompanion;
-    private final NavigationEngine navigationEngine = new NavigationEngine();
+    private NavigationEngine navigationEngine;
     private RouteResult activeRoute;
     /** Ordered intermediate stops for the active trip. Kept through reroutes and map reopening. */
     private List<RoutePoint> activeWaypoints = new ArrayList<>();
@@ -214,7 +219,12 @@ public class MainActivity extends Activity {
     /** Monotonic token for navigation voice work. Any delayed response from an older route or
      * intelligence mode is ignored instead of speaking over the current guidance. */
     private long guidanceEpoch;
+    /** Separates consecutive announcements on the same route. A late AI/TTS callback from the
+     * previous turn must never speak after the next turn has become relevant. */
+    private long drivingAnnouncementGeneration;
     private boolean rerouteInFlight;
+    /** Prevents immediate retriggering from the same stale/off-route GPS fix. */
+    private long lastRerouteStartedAt;
     private SavedPlace pendingSuggestionPlace;
     private PoiCategory pendingSuggestionCategory;
     private final RoutePatternAnalyzer routePatternAnalyzer = new RoutePatternAnalyzer();
@@ -242,15 +252,6 @@ public class MainActivity extends Activity {
      *  is created for the UI. Static so every instance in this process shares one answer to "is a
      *  trip already running, and if so, whose is it". Cleared once that owner's own stopNavigation
      *  or finishTrip actually ends the trip. */
-    private static java.lang.ref.WeakReference<MainActivity> activeSessionOwner;
-    /** Strong owner while a foreground navigation service is active. This deliberately keeps the
-     * authoritative Activity instance alive while navigation is running so GPS/voice callbacks
-     * do not disappear when the task leaves the foreground. Cleared on a real navigation stop. */
-    private static MainActivity backgroundSessionOwner;
-    /** True on a freshly (re)created instance that found activeSessionOwner already driving a
-     *  trip in onCreate: this instance mirrors the destination/route for display and forwards the
-     *  map and stop actions to the real owner instead of running a second, duplicate trip. */
-    private boolean observingBackgroundSession;
 
     @Override
     protected void attachBaseContext(Context newBase) {
@@ -287,8 +288,6 @@ public class MainActivity extends Activity {
         tripStore = new TripStore(this);
         backupManager = new BackupManager(this, placeStore, tripStore);
         writeAutomaticBackup();
-        voicePlayer = new VoiceGuidancePlayer(this);
-        locationTracker = new DeviceLocationTracker(this);
         offlineRoadSafetyProvider = new OfflineRoadSafetyProvider(this);
         neshanRoutingProvider = new NeshanRoutingProvider("");
         mapIrRoutingProvider = new MapIrRoutingProvider("");
@@ -308,66 +307,8 @@ public class MainActivity extends Activity {
         wireButtons();
         requestCorePermissions();
         refreshList();
-        voicePlayer.announce("welcome", "به همراه راننده خوش آمدید.");
         loadRuntimeKeys();
-        promptEnableLocationIfNeeded();
-        locationTracker.setUpdateListener(new DeviceLocationTracker.UpdateListener() {
-            @Override public void onLocationUpdate(Location location) {
-                gpsWarningActive = false;
-                if (pendingNavigationDestination != null) {
-                    SavedPlace destination = pendingNavigationDestination;
-                    List<RoutePoint> waypoints = pendingNavigationWaypoints;
-                    pendingNavigationDestination = null;
-                    pendingNavigationWaypoints = null;
-                    startNavigation(destination, waypoints);
-                }
-                navigationEngine.onLocation(location);
-                smartCompanion.onLocation(location);
-                recordTripLocation(location);
-                updateTripStats(location);
-                maybeSuggestRecurringDestination(location);
-                boolean movingNow = isCurrentlyMoving(location);
-                // The old route is no longer authoritative once off-route recovery begins.
-                // Do not emit a stale hazard, speed or maneuver-derived alert while the new route
-                // is being fetched; the successful replacement repopulates all route-bound data.
-                if (!rerouteInFlight && navigationEngine.isNavigating()) {
-                    checkRouteHazards(location, movingNow);
-                    checkRouteSafetyAlerts(location, movingNow);
-                    checkTrafficIncidentsProximity(location);
-                    checkUpcomingSpeedZone(location);
-                    checkRouteSpeedLimit(location);
-                }
-            }
-
-            @Override public void onLocationAvailabilityChanged(boolean available) {
-                runOnUiThread(() -> {
-                    // Never stop navigationEngine here: it should keep tracking against the last
-                    // known fix so a GPS blip mid-trip doesn't end the trip or drop guidance.
-                    // While this instance is only mirroring a background trip driven by another,
-                    // older MainActivity instance (see resumeBackgroundSessionIfAny), that owner
-                    // instance has its own, separate DeviceLocationTracker and already reports GPS
-                    // loss/recovery for the real trip - reporting it again here from this mirror's
-                    // own, redundant location listener would just duplicate the toast/status for
-                    // the exact same physical GPS event (seen twice, ~16ms apart, in the 2026-08-02
-                    // reopen-during-background-trip test log).
-                    if (observingBackgroundSession) return;
-                    if (!available && !gpsWarningActive) {
-                        gpsWarningActive = true;
-                        setStatus("موقعیت مکانی در دسترس نیست، لطفاً GPS را روشن کنید.");
-                    } else if (available && gpsWarningActive) {
-                        gpsWarningActive = false;
-                        setStatus("موقعیت مکانی دوباره در دسترس است.");
-                    }
-                    if (available && pendingNavigationDestination != null) {
-                        SavedPlace destination = pendingNavigationDestination;
-                        List<RoutePoint> waypoints = pendingNavigationWaypoints;
-                        pendingNavigationDestination = null;
-                        pendingNavigationWaypoints = null;
-                        startNavigation(destination, waypoints);
-                    }
-                });
-            }
-        });
+        bindNavigationService();
         handleSharedIntent(getIntent());
         handlePersonalRouteIntent(getIntent());
         registerNavigationReceiver();
@@ -386,16 +327,94 @@ public class MainActivity extends Activity {
      *  GPS tracking), it mirrors the owner's destination/route for display and forwards "نقشه" and
      *  "توقف" to the real owner. If no background trip is running, this is a no-op and the app
      *  looks exactly as it always has. */
-    private void resumeBackgroundSessionIfAny() {
-        MainActivity owner = activeSessionOwner == null ? null : activeSessionOwner.get();
-        if (owner == null || owner == this || !owner.navigationEngine.isNavigating() || owner.activeDestination == null) return;
-        observingBackgroundSession = true;
-        activeDestination = owner.activeDestination;
-        activeRoute = owner.activeRoute;
-        activeWaypoints = new ArrayList<>(owner.activeWaypoints);
-        setStatus("مسیریابی به " + activeDestination.name + " همچنان در پس‌زمینه در حال اجراست.");
-        refreshList();
+    private void resumeBackgroundSessionIfAny() { syncNavigationStateFromService(); }
+
+    private void syncNavigationStateFromService() {
+        if (!navigationServiceBound || navigationService == null) return;
+        navigationEngine = navigationService.getNavigationEngine();
+        locationTracker = navigationService.getLocationTracker();
+        voicePlayer = navigationService.getVoicePlayer();
+        activeRoute = navigationService.getActiveRoute();
+        activeDestination = navigationService.getActiveDestination();
+        activeWaypoints = navigationService.getActiveWaypoints();
+        tripStartedAt = navigationService.getTripStartedAt();
+        activeTripDistanceMeters = navigationService.getTripDistanceMeters();
     }
+
+    private void startLocationIfBound() {
+        if (navigationServiceBound && locationTracker != null) locationTracker.start();
+    }
+
+    private void bindNavigationService() {
+        if (navigationServiceBound) return;
+        bindService(new Intent(this, NavigationForegroundService.class), navigationServiceConnection, Context.BIND_AUTO_CREATE);
+    }
+
+    private final ServiceConnection navigationServiceConnection = new ServiceConnection() {
+        @Override public void onServiceConnected(ComponentName name, android.os.IBinder service) {
+            navigationService = ((NavigationForegroundService.LocalBinder) service).getService();
+            navigationServiceBound = true;
+            navigationEngine = navigationService.getNavigationEngine();
+            locationTracker = navigationService.getLocationTracker();
+            voicePlayer = navigationService.getVoicePlayer();
+            navigationService.setRuntimeKeys(runtimeKeys);
+            navigationService.addCallback(sessionCallback);
+            startLocationIfBound();
+            syncNavigationStateFromService();
+            promptEnableLocationIfNeeded();
+            if (!welcomeSpoken && !navigationService.isNavigating()) {
+                welcomeSpoken = true;
+                voicePlayer.announce("welcome", "به همراه راننده خوش آمدید.");
+            }
+        }
+        @Override public void onServiceDisconnected(ComponentName name) {
+            navigationServiceBound = false;
+            navigationService = null;
+            navigationEngine = null;
+            locationTracker = null;
+            voicePlayer = null;
+        }
+    };
+
+    private final NavigationForegroundService.SessionCallback sessionCallback = new NavigationForegroundService.SessionCallback() {
+        @Override public void onInstruction(RouteStep step) { runOnUiThread(() -> announceRouteStep(step)); }
+        @Override public void onOffRoute() { runOnUiThread(() -> rerouteFromCurrentLocation()); }
+        @Override public void onArrived(SavedPlace destination, TripRecord report) { runOnUiThread(() -> {
+            if (report != null) showTripCompletionReport(report);
+            activeDestination = null; activeRoute = null; activeWaypoints = new ArrayList<>();
+            setStatus("به " + (destination == null ? "مقصد" : destination.name) + " رسیدید.");
+        }); }
+        @Override public void onWaypointApproaching(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointApproaching(step, ordinal)); }
+        @Override public void onWaypointReached(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointReached(step, ordinal)); }
+        @Override public void onWaypointSkipped(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointSkipped(step, ordinal)); }
+        @Override public void onInstructionStage(RouteStep step, NavigationEngine.AnnouncementStage stage, int metersRemaining) { runOnUiThread(() -> announceInstructionStage(step, stage, metersRemaining)); }
+        @Override public void onRouteReplaced(RouteResult route) { runOnUiThread(() -> activeRoute = route); }
+        @Override public void onLocationUpdate(Location location) { runOnUiThread(() -> {
+            if (location == null) return;
+            if (pendingNavigationDestination != null) {
+                SavedPlace destination = pendingNavigationDestination;
+                List<RoutePoint> waypoints = pendingNavigationWaypoints;
+                pendingNavigationDestination = null;
+                pendingNavigationWaypoints = null;
+                startNavigation(destination, waypoints);
+                return;
+            }
+            smartCompanion.onLocation(location);
+            updateTripStats(location);
+            boolean moving = isCurrentlyMoving(location);
+            if (!rerouteInFlight && navigationEngine != null && navigationEngine.isNavigating()) {
+                checkRouteHazards(location, moving);
+                checkRouteSafetyAlerts(location, moving);
+                checkTrafficIncidentsProximity(location);
+                checkUpcomingSpeedZone(location);
+                checkRouteSpeedLimit(location);
+            }
+        }); }
+        @Override public void onLocationAvailabilityChanged(boolean available) { runOnUiThread(() -> {
+            if (!available && !gpsWarningActive) { gpsWarningActive = true; setStatus("موقعیت مکانی در دسترس نیست، لطفاً GPS را بررسی کنید."); }
+            else if (available && gpsWarningActive) { gpsWarningActive = false; setStatus("موقعیت مکانی دوباره در دسترس است."); }
+        }); }
+    };
 
     @Override
     protected void onResume() {
@@ -448,7 +467,7 @@ public class MainActivity extends Activity {
         if (!permissions.isEmpty()) {
             requestPermissions(permissions.toArray(new String[0]), REQ_PERMISSIONS);
         } else {
-            locationTracker.start();
+            startLocationIfBound();
         }
     }
 
@@ -456,7 +475,7 @@ public class MainActivity extends Activity {
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQ_PERMISSIONS) {
-            locationTracker.start();
+            startLocationIfBound();
         }
     }
 
@@ -519,7 +538,7 @@ public class MainActivity extends Activity {
     }
 
     private void openMap() {
-        if ((navigationEngine.isNavigating() || observingBackgroundSession) && activeDestination != null) {
+        if (navigationService != null && navigationService.isNavigating() && activeDestination != null) {
             openNavigationMap(activeDestination);
             return;
         }
@@ -926,22 +945,29 @@ public class MainActivity extends Activity {
      *  instance - e.g. picking a different destination while "observing" a background session.
      *  Ends the old instance's trip cleanly first so this instance can become the sole owner. */
     private void stopAnyOtherActiveSessionBeforeStartingHere() {
-        MainActivity owner = activeSessionOwner == null ? null : activeSessionOwner.get();
-        if (owner != null && owner != this && owner.navigationEngine.isNavigating()) {
-            owner.stopNavigation("مسیر جدیدی انتخاب شد؛ مسیریابی پیشین متوقف شد.");
-        }
-        observingBackgroundSession = false;
+        // Navigation ownership is now held by NavigationForegroundService; there is no Activity owner to stop.
     }
 
     /** Re-routing keeps the original trip clock and GPS distance so the final report covers the
      *  whole journey rather than only its last recalculated segment. */
     private void startNavigation(SavedPlace destination, List<RoutePoint> waypoints, boolean preserveTripProgress) {
+        if (!navigationServiceBound || navigationService == null || locationTracker == null) {
+            setStatus("سرویس مسیریابی هنوز آماده نیست؛ لطفاً یک لحظه صبر کنید.");
+            bindNavigationService();
+            return;
+        }
         if (!locationTracker.isLocationEnabled()) {
             promptEnableLocationForNavigation(destination, waypoints);
             return;
         }
         pendingNavigationDestination = null;
         pendingNavigationWaypoints = null;
+        if (recordingLocalSpeech) localSpeechRecognizer.cancel();
+        if (recordingOnlineSpeech) {
+            recordingOnlineSpeech = false;
+            voiceHandler.removeCallbacks(automaticStop);
+            onlineSpeechClient.cancelRecording();
+        }
         stopAnyOtherActiveSessionBeforeStartingHere();
         resetGuidance(true);
         final long requestSequence = ++routeRequestSequence;
@@ -982,6 +1008,8 @@ public class MainActivity extends Activity {
                 routes -> runOnUiThread(() -> {
                     if (requestSequence != routeRequestSequence) return;
                     if (routes == null || routes.isEmpty()) {
+                        rerouteInFlight = false;
+                        // Release the reroute gate when the provider returns no route.
                         // This used to just "return" here with no feedback at all: the loading
                         // spinner stayed on screen forever and nothing was ever drawn, which is
                         // exactly the "I go to the map and there's no navigation, nothing happened"
@@ -998,8 +1026,6 @@ public class MainActivity extends Activity {
                             : personalRoute.routeIndex;
                     RouteResult route = routes.get(routeIndex);
                     placeStore.addRecent(destination);
-                    observingBackgroundSession = false;
-                    activeSessionOwner = new java.lang.ref.WeakReference<>(MainActivity.this);
                     activeDestination = destination;
                     activeRoute = route;
                     RouteCache.store(route, destination.latitude, destination.longitude);
@@ -1024,30 +1050,13 @@ public class MainActivity extends Activity {
                     lastTrafficEtaMeasuredAt = System.currentTimeMillis();
                     String firstRouteInstruction = route.steps.isEmpty() ? "<none>" : route.steps.get(0).instruction;
                     android.util.Log.i("DriveMateRoute", "provider=" + route.providerName + " steps=" + route.steps.size()
-                            + " first=" + firstRouteInstruction);
-                    navigationEngine.start(route, new NavigationEngine.Listener() {
-                        @Override public void onInstruction(RouteStep step) {
-                            runOnUiThread(() -> announceRouteStep(step));
-                        }
-                        @Override public void onOffRoute() {
-                            runOnUiThread(() -> rerouteFromCurrentLocation());
-                        }
-                        @Override public void onArrived() {
-                            runOnUiThread(() -> finishTrip(destination));
-                        }
-                        @Override public void onWaypointApproaching(RouteStep step, int ordinal) {
-                            runOnUiThread(() -> announceWaypointApproaching(step, ordinal));
-                        }
-                        @Override public void onWaypointReached(RouteStep step, int ordinal) {
-                            runOnUiThread(() -> announceWaypointReached(step, ordinal));
-                        }
-                        @Override public void onWaypointSkipped(RouteStep step, int ordinal) {
-                            runOnUiThread(() -> announceWaypointSkipped(step, ordinal));
-                        }
-                        @Override public void onInstructionStage(RouteStep step, NavigationEngine.AnnouncementStage stage, int metersRemaining) {
-                            runOnUiThread(() -> announceInstructionStage(step, stage, metersRemaining));
-                        }
-                    }, origin, new RoutePoint(destination.latitude, destination.longitude));
+                            + " waypoints=" + requestedWaypoints.size() + " first=" + firstRouteInstruction);
+                    if (!navigationServiceBound || navigationService == null) {
+                        setStatus("سرویس مسیریابی هنوز آماده نیست؛ دوباره تلاش کنید.");
+                        return;
+                    }
+                    navigationService.startNavigation(route, destination, requestedWaypoints,
+                            readIntelligenceMode().name(), origin, preserveTripProgress);
                     rerouteInFlight = false;
                     navigationEngine.setInstructionAnnouncementsEnabled(false);
                     // A recalculation must resume the next maneuver quickly; otherwise a turn in
@@ -1180,7 +1189,7 @@ public class MainActivity extends Activity {
             previousLocation.setLongitude(previous.longitude);
             if (previousLocation.distanceTo(location) < 20f) return;
         }
-        if (activeTripPath.size() >= 240) compactTripPath();
+        if (activeTripPath.size() >= 1000) compactTripPath();
         activeTripPath.add(new RoutePoint(location.getLatitude(), location.getLongitude()));
     }
 
@@ -1200,10 +1209,12 @@ public class MainActivity extends Activity {
         if (destination == null || activeRoute == null || tripStartedAt == 0L) return null;
         if (activeTripDistanceMeters < MIN_RECORDED_TRIP_DISTANCE_METERS) return null;
         long endedAt = System.currentTimeMillis();
+        List<RoutePoint> recordedPath = navigationServiceBound && navigationService != null
+                ? navigationService.getTripPath() : activeTripPath;
         return new TripRecord(destination.name, activeTripOriginLatitude, activeTripOriginLongitude,
                 destination.latitude, destination.longitude, activeRoute.distanceMeters, activeRoute.durationSeconds,
                 tripStartedAt, endedAt, activeTripDistanceMeters, activeRoute.providerName,
-                activeWaypoints.size(), completed, activeTripPath);
+                activeWaypoints.size(), completed, recordedPath);
     }
 
     private void saveTripRecord(TripRecord record) {
@@ -1251,7 +1262,9 @@ public class MainActivity extends Activity {
                     .setPositiveButton("بستن", null)
                     .setNeutralButton("تاریخچه سفرها", (dialog, which) -> showTripHistory())
                     .show();
-            if (record.completed) tripStore.markReportShown(record.startedAt);
+            // Every displayed report is consumed, including manually stopped trips; otherwise
+            // onResume can show the same pending report repeatedly.
+            tripStore.markReportShown(record.startedAt);
         } catch (RuntimeException e) {
             // Window may already be invalid right at this moment (activity paused/backgrounded,
             // screen off) - leave unmarked so maybeShowPendingTripReport() catches it on whichever
@@ -1524,10 +1537,24 @@ public class MainActivity extends Activity {
     }
 
     private void finishTrip(SavedPlace destination) {
-        finishTrip(destination, true);
+        if (navigationServiceBound && navigationService != null) {
+            TripRecord tripReport = navigationService.finishNavigationSession();
+            resetGuidance(true);
+            activeDestination = null;
+            activeRoute = null;
+            activeWaypoints = new ArrayList<>();
+            if (tripStatsPanel != null) tripStatsPanel.setVisibility(View.GONE);
+            if (tripReport != null) showTripCompletionReport(tripReport);
+            return;
+        }
+        setStatus("سرویس مسیریابی در دسترس نیست.");
     }
 
     private void finishTrip(SavedPlace destination, boolean showCompletionReport) {
+        finishTrip(destination);
+    }
+
+    private void finishTripLegacyUnused(SavedPlace destination) {
         if (activeDestination == null) return;
         resetGuidance(true);
         stopBackgroundNavigation();
@@ -1579,7 +1606,7 @@ public class MainActivity extends Activity {
         stopBackgroundNavigation();
         hideTripAnalysis();
         if (tripStatsPanel != null) tripStatsPanel.setVisibility(View.GONE);
-        if (showCompletionReport) showTripCompletionReport(tripReport);
+        showTripCompletionReport(tripReport);
     }
 
     private void searchAndNavigate(String term) {
@@ -1623,6 +1650,7 @@ public class MainActivity extends Activity {
             runtimeKeys = RuntimeKeys.fetchDefault(BuildConfig.KEYS_DECRYPTION_SECRET);
             aiAssistant.setRuntimeKeys(runtimeKeys);
             onlineSpeechClient.setRuntimeKeys(runtimeKeys);
+            if (navigationService != null) navigationService.setRuntimeKeys(runtimeKeys);
             neshanRoutingProvider.setApiKey(runtimeKeys.get("NESHAN_API_KEY"));
             mapIrRoutingProvider.setApiKey(runtimeKeys.get("MAPIR_API_KEY"));
             tomTomRoutingProvider.setApiKey(runtimeKeys.get("TOMTOM_API_KEY"));
@@ -1692,6 +1720,11 @@ public class MainActivity extends Activity {
      * the actual geometry; the first point is reached from the current GPS fix, intermediate
      * points remain mandatory waypoints, and the last point is the final destination. */
     private void startPersonalRouteNavigation(PersonalRoute personalRoute, SavedPlace destination) {
+        if (!navigationServiceBound || navigationService == null || locationTracker == null) {
+            setStatus("سرویس مسیریابی هنوز آماده نیست؛ لطفاً یک لحظه صبر کنید.");
+            bindNavigationService();
+            return;
+        }
         if (personalRoute == null || personalRoute.points.size() < 2) {
             setStatus("مسیر شخصی نقطه کافی برای مسیریابی ندارد.");
             return;
@@ -1739,8 +1772,6 @@ public class MainActivity extends Activity {
         resetGuidance(true);
         ++routeRequestSequence;
         final long requestSequence = routeRequestSequence;
-        observingBackgroundSession = false;
-        activeSessionOwner = new java.lang.ref.WeakReference<>(MainActivity.this);
         activeDestination = destination;
         activeRoute = personalResult;
         activeWaypoints = new ArrayList<>();
@@ -1758,22 +1789,12 @@ public class MainActivity extends Activity {
         fetchRouteHazards(personalResult);
         fetchRouteSafetyAlerts(personalResult);
         startBackgroundNavigation();
-        navigationEngine.start(personalResult, new NavigationEngine.Listener() {
-            @Override public void onInstruction(RouteStep step) { runOnUiThread(() -> announceRouteStep(step)); }
-            @Override public void onOffRoute() {
-                // A saved route is a user-drawn line, not a provider road graph. Do not replace it
-                // with an online route when the driver temporarily leaves the line; keep following
-                // the chosen personal geometry and let the next GPS fix rejoin it.
-                runOnUiThread(() -> setStatus("از مسیر شخصی فاصله گرفته‌اید؛ مسیر ذخیره‌شده حفظ شد."));
-            }
-            @Override public void onArrived() { runOnUiThread(() -> finishTrip(destination)); }
-            @Override public void onWaypointApproaching(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointApproaching(step, ordinal)); }
-            @Override public void onWaypointReached(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointReached(step, ordinal)); }
-            @Override public void onWaypointSkipped(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointSkipped(step, ordinal)); }
-            @Override public void onInstructionStage(RouteStep step, NavigationEngine.AnnouncementStage stage, int metersRemaining) {
-                runOnUiThread(() -> announceInstructionStage(step, stage, metersRemaining));
-            }
-        }, origin, new RoutePoint(destination.latitude, destination.longitude));
+        if (!navigationServiceBound || navigationService == null) {
+            setStatus("سرویس مسیریابی هنوز آماده نیست؛ دوباره تلاش کنید.");
+            return;
+        }
+        navigationService.startNavigation(personalResult, destination, new ArrayList<>(),
+                readIntelligenceMode().name(), origin, false);
         navigationEngine.setInstructionAnnouncementsEnabled(false);
         initialGuidanceHeldUntil = System.currentTimeMillis() + 500L;
         setStatus("مسیریابی مسیر شخصی «" + personalRoute.name + "» آغاز شد.");
@@ -1909,11 +1930,28 @@ public class MainActivity extends Activity {
         return epoch == guidanceEpoch;
     }
 
+    private boolean isCurrentDrivingAnnouncement(long epoch, long generation) {
+        return isCurrentGuidance(epoch) && generation == drivingAnnouncementGeneration;
+    }
+
     /** Uses the local clip immediately in economy mode; full mode gives online AI/TTS first refusal. */
     private void speakDrivingEvent(DrivingIntelligenceCoordinator.Priority priority, String prompt, String clipName,
                                    String fallback, long expiresInMs) {
+        speakDrivingEvent(priority, prompt, clipName, fallback, expiresInMs, false);
+    }
+
+    /** Same as above, but when immediate=true the online AI paraphrase step is skipped entirely
+     *  (in both economy AND full/smart mode) and the deterministic fallback/clip is spoken right
+     *  away - same "never wait for AI/network" rule SAFETY already follows. Use this for anything
+     *  whose timing is itself the point (a live, distance/speed-computed navigation cue): the
+     *  full-mode AI round trip can take up to ~3.75s (see playDrivingAnnouncement's watchdog),
+     *  which alone can eat most or all of a short maneuver's remaining lead time and make an
+     *  otherwise correctly-timed cue play late, or only once the maneuver (e.g. a tight roundabout
+     *  entry) has already been passed. */
+    private void speakDrivingEvent(DrivingIntelligenceCoordinator.Priority priority, String prompt, String clipName,
+                                   String fallback, long expiresInMs, boolean immediate) {
         DrivingAnnouncement announcement = new DrivingAnnouncement(priority, prompt, clipName, fallback,
-                System.currentTimeMillis() + Math.max(1_000L, expiresInMs));
+                System.currentTimeMillis() + Math.max(1_000L, expiresInMs), immediate);
         if (priority == DrivingIntelligenceCoordinator.Priority.SAFETY) {
             safetyAnnouncementQueue.add(announcement.withMinimumLifetime(45_000L));
             drainSafetyAnnouncements();
@@ -1942,6 +1980,10 @@ public class MainActivity extends Activity {
         }
 
         safetyAnnouncementPlaying = true;
+        // A safety warning preempts every previous turn prompt, including an AI response that is
+        // still in flight. Its callback is ignored even if the network returns while this warning
+        // is playing.
+        drivingAnnouncementGeneration++;
         voicePlayer.interrupt();
         onlineSpeechClient.stopPlayback();
         boolean played = announcement.clipName != null
@@ -1973,37 +2015,41 @@ public class MainActivity extends Activity {
         // The route engine immediately speaks the first real maneuver; avoid a second generic
         // "start moving" prompt that would delay the actionable instruction.
         if ("start_navigation".equals(clipName) && navigationEngine.hasActionableCurrentInstruction()) return;
-        // Always clear whatever is currently playing - local WAV/TTS or an online clip - before
-        // starting a new announcement. Individual playback paths already did this pairwise
-        // (speakShort, playDrivingFallback), but the economy-mode direct path and the full-mode
-        // online-TTS-fallback path each only stopped their own kind, not the other's. Switching
-        // intelligence mode mid-trip could then leave a leftover clip from the old mode overlapping
-        // a fresh one from the new mode, playing simultaneously.
-        if (priority == DrivingIntelligenceCoordinator.Priority.SAFETY) {
-            voicePlayer.interrupt();
-            onlineSpeechClient.stopPlayback();
+        final long generation = ++drivingAnnouncementGeneration;
+        // A newer maneuver supersedes a previous driving announcement. Stop both local and online
+        // paths together so a delayed clip cannot overlap the current instruction.
+        voicePlayer.interrupt();
+        onlineSpeechClient.stopPlayback();
+        // Time-critical navigation cue: the AI paraphrase round trip (up to ~3.75s below) is not
+        // acceptable here regardless of intelligence mode - speak the already-correct deterministic
+        // text right now. See speakDrivingEvent's immediate-flag doc for why.
+        if (announcement.immediate) {
+            boolean played = playDrivingFallback(clipName, fallback);
+            setStatus(played ? "دستور مسیریابی پخش شد." : "دستور مسیریابی آماده شد، ولی صدای دستگاه در دسترس نیست.");
+            return;
         }
         if (isFullIntelligenceMode()) {
             setStatus("\u062f\u0631 \u062d\u0627\u0644 \u0622\u0645\u0627\u062f\u0647 \u06a9\u0631\u062f\u0646 \u067e\u0627\u0633\u062e \u0635\u0648\u062a\u06cc \u0647\u0648\u0634\u0645\u0646\u062f...");
             final AtomicBoolean delivered = new AtomicBoolean(false);
-            final long watchdogDelay = priority == DrivingIntelligenceCoordinator.Priority.SAFETY ? 2_000L : 3_750L;
+            // Keep the UI watchdog aligned with the coordinator's actual AI deadline. A shorter
+            // UI timeout used to discard a valid response while the coordinator still considered
+            // it eligible, which made Full mode appear to fall back unnecessarily.
+            final long watchdogDelay = intelligenceCoordinator.fullModeWaitBudget(priority);
             guidanceHandler.postDelayed(() -> {
-                if (!isCurrentGuidance(epoch) || !delivered.compareAndSet(false, true)) return;
-                playOnlineTtsFallback(clipName, fallback, epoch);
+                if (!isCurrentDrivingAnnouncement(epoch, generation) || !delivered.compareAndSet(false, true)) return;
+                playOnlineTtsFallback(clipName, fallback, epoch, generation);
             }, watchdogDelay);
             intelligenceCoordinator.request(priority, prompt, drivingContext(), fallback, false, expiresInMs,
                     (id, text, online) -> runOnUiThread(() -> {
-                        if (!isCurrentGuidance(epoch) || !delivered.compareAndSet(false, true)) return;
+                        if (!isCurrentDrivingAnnouncement(epoch, generation) || !delivered.compareAndSet(false, true)) return;
                         if (online) {
-                            speakShort(text, clipName, fallback, epoch);
+                            speakShort(text, clipName, fallback, epoch, generation);
                         } else {
-                            playOnlineTtsFallback(clipName, fallback, epoch);
+                            playOnlineTtsFallback(clipName, fallback, epoch, generation);
                         }
                     }));
-        } else if (clipName != null) {
-            voicePlayer.announce(clipName, fallback);
         } else {
-            voicePlayer.speak(fallback);
+            speakMissingClipOnlineFirst(clipName, fallback);
         }
     }
 
@@ -2013,19 +2059,21 @@ public class MainActivity extends Activity {
         final String clipName;
         final String fallback;
         final long expiresAt;
+        final boolean immediate;
 
         DrivingAnnouncement(DrivingIntelligenceCoordinator.Priority priority, String prompt,
-                            String clipName, String fallback, long expiresAt) {
+                            String clipName, String fallback, long expiresAt, boolean immediate) {
             this.priority = priority;
             this.prompt = prompt == null ? "" : prompt;
             this.clipName = clipName;
             this.fallback = fallback == null ? "" : fallback;
             this.expiresAt = expiresAt;
+            this.immediate = immediate;
         }
 
         DrivingAnnouncement withMinimumLifetime(long minimumLifetimeMs) {
             return new DrivingAnnouncement(priority, prompt, clipName, fallback,
-                    Math.max(expiresAt, System.currentTimeMillis() + minimumLifetimeMs));
+                    Math.max(expiresAt, System.currentTimeMillis() + minimumLifetimeMs), immediate);
         }
     }
 
@@ -2041,10 +2089,15 @@ public class MainActivity extends Activity {
     }
 
     private void playOnlineTtsFallback(String clipName, String fallback, long epoch) {
-        if (!isCurrentGuidance(epoch)) return;
+        playOnlineTtsFallback(clipName, fallback, epoch, 0L);
+    }
+
+    private void playOnlineTtsFallback(String clipName, String fallback, long epoch, long generation) {
+        if (!isCurrentGuidance(epoch) || generation != 0L && generation != drivingAnnouncementGeneration) return;
         final AtomicBoolean finished = new AtomicBoolean(false);
         Runnable localFallback = () -> {
-            if (!isCurrentGuidance(epoch) || !finished.compareAndSet(false, true)) return;
+            if (!isCurrentGuidance(epoch) || generation != 0L && generation != drivingAnnouncementGeneration
+                    || !finished.compareAndSet(false, true)) return;
             boolean played = playDrivingFallback(clipName, fallback);
             setStatus(!played ? "صدای آنلاین در دسترس نبود و صدای محلی هم فعال نیست (TTS دستگاه فعال نیست)."
                     : clipName == null
@@ -2052,10 +2105,11 @@ public class MainActivity extends Activity {
                     : "صدای آنلاین در دسترس نبود؛ هشدار WAV پخش شد.");
         };
         setStatus("پاسخ به‌موقع نرسید؛ در حال دریافت صدای آنلاین...");
-        guidanceHandler.postDelayed(localFallback, 2500L);
+        guidanceHandler.postDelayed(localFallback, 1_400L);
         onlineSpeechClient.speak(fallback, new OnlineSpeechClient.SpeechCallback() {
             @Override public void onPlayed() { runOnUiThread(() -> {
-                if (isCurrentGuidance(epoch) && finished.compareAndSet(false, true)) setStatus("راهنمای مسیر با صدای آنلاین پخش شد.");
+                if (isCurrentGuidance(epoch) && (generation == 0L || generation == drivingAnnouncementGeneration)
+                        && finished.compareAndSet(false, true)) setStatus("راهنمای مسیر با صدای آنلاین پخش شد.");
             }); }
             @Override public void onError() { runOnUiThread(localFallback); }
         });
@@ -2305,26 +2359,41 @@ public class MainActivity extends Activity {
     }
 
     private void speakShort(String answer, String fallbackClip, String fallbackText, long epoch) {
-        if (!isCurrentGuidance(epoch)) return;
+        speakShort(answer, fallbackClip, fallbackText, epoch, 0L);
+    }
+
+    private void speakShort(String answer, String fallbackClip, String fallbackText, long epoch, long generation) {
+        if (!isCurrentGuidance(epoch) || generation != 0L && generation != drivingAnnouncementGeneration) return;
         String shortAnswer = answer == null ? "" : answer.trim();
         if (shortAnswer.length() > 190) shortAnswer = shortAnswer.substring(0, 190);
-        setStatus("در حال دریافت صدای آنلاین...");
         final String finalAnswer = shortAnswer;
+        final AtomicBoolean delivered = new AtomicBoolean(false);
         voicePlayer.interrupt();
         onlineSpeechClient.stopPlayback();
+        // A navigation answer has a hard real-time deadline. If online TTS has not started
+        // promptly, prefer the packaged deterministic WAV instead of letting the maneuver pass.
+        if (fallbackClip != null) {
+            guidanceHandler.postDelayed(() -> {
+                if (!isCurrentGuidance(epoch) || generation != 0L && generation != drivingAnnouncementGeneration
+                        || !delivered.compareAndSet(false, true)) return;
+                boolean played = playDrivingFallback(fallbackClip, fallbackText);
+                setStatus(played ? "\u0635\u062f\u0627\u06cc \u0622\u0646\u0644\u0627\u06cc\u0646 \u062f\u06cc\u0631 \u0631\u0633\u06cc\u062f\u061b \u0647\u0634\u062f\u0627\u0631 WAV \u067e\u062e\u0634 \u0634\u062f." : "\u067e\u062e\u0634 \u0647\u0634\u062f\u0627\u0631 \u0645\u0633\u06cc\u0631 \u0645\u0648\u0641\u0642 \u0646\u0628\u0648\u062f.");
+            }, 1_400L);
+        }
         onlineSpeechClient.speak(finalAnswer, new OnlineSpeechClient.SpeechCallback() {
             @Override public void onPlayed() { runOnUiThread(() -> {
-                if (isCurrentGuidance(epoch)) setStatus("پاسخ هوشمند با صدای آنلاین پخش شد.");
+                if (isCurrentGuidance(epoch) && (generation == 0L || generation == drivingAnnouncementGeneration)
+                        && delivered.compareAndSet(false, true)) {
+                    setStatus("\u0647\u0634\u062f\u0627\u0631 \u0622\u0646\u0644\u0627\u06cc\u0646 \u067e\u062e\u0634 \u0634\u062f.");
+                }
             }); }
             @Override public void onError() { runOnUiThread(() -> {
-                if (!isCurrentGuidance(epoch)) return;
-                if (fallbackClip != null) {
-                    voicePlayer.announce(fallbackClip, fallbackText);
-                    setStatus("\u0635\u062f\u0627\u06cc \u0622\u0646\u0644\u0627\u06cc\u0646 \u062f\u0631 \u062f\u0633\u062a\u0631\u0633 \u0646\u06cc\u0633\u062a\u061b \u0647\u0634\u062f\u0627\u0631 WAV \u067e\u062e\u0634 \u0634\u062f.");
-                    return;
-                }
-                voicePlayer.speak(finalAnswer);
-                setStatus("پاسخ صوتی با صدای گوشی پخش شد.");
+                if (!isCurrentGuidance(epoch) || generation != 0L && generation != drivingAnnouncementGeneration
+                        || !delivered.compareAndSet(false, true)) return;
+                boolean played = fallbackClip != null
+                        ? playDrivingFallback(fallbackClip, fallbackText)
+                        : voicePlayer.speak(finalAnswer);
+                setStatus(played ? "\u067e\u0627\u0633\u062e \u0622\u0646\u0644\u0627\u06cc\u0646 \u062f\u0631 \u062f\u0633\u062a\u0631\u0633 \u0646\u0628\u0648\u062f\u061b \u0647\u0634\u062f\u0627\u0631 \u0645\u062d\u0644\u06cc \u067e\u062e\u0634 \u0634\u062f." : "\u067e\u062e\u0634 \u0647\u0634\u062f\u0627\u0631 \u0646\u0627\u0645\u0648\u0641\u0642 \u0628\u0648\u062f.");
             }); }
         });
     }
@@ -2687,19 +2756,13 @@ public class MainActivity extends Activity {
         // Start the location foreground service while the Activity is visible. Android 12+
         // restricts background starts for location FGS, so waiting until onDestroy is too late.
         startBackgroundNavigation();
-        navigationEngine.start(route, new NavigationEngine.Listener() {
-            @Override public void onInstruction(RouteStep step) { runOnUiThread(() -> announceRouteStep(step)); }
-            @Override public void onOffRoute() { runOnUiThread(() -> rerouteFromCurrentLocation()); }
-            @Override public void onArrived() { runOnUiThread(() -> finishTrip(destination)); }
-            @Override public void onWaypointApproaching(RouteStep step, int ordinal) {
-                runOnUiThread(() -> announceWaypointApproaching(step, ordinal));
-            }
-            @Override public void onWaypointReached(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointReached(step, ordinal)); }
-            @Override public void onWaypointSkipped(RouteStep step, int ordinal) { runOnUiThread(() -> announceWaypointSkipped(step, ordinal)); }
-            @Override public void onInstructionStage(RouteStep step, NavigationEngine.AnnouncementStage stage, int metersRemaining) {
-                runOnUiThread(() -> announceInstructionStage(step, stage, metersRemaining));
-            }
-        }, locationTracker.getLastLocation(), new RoutePoint(destination.latitude, destination.longitude));
+        if (!navigationServiceBound || navigationService == null) {
+            rerouteInFlight = false;
+            setStatus("سرویس مسیریابی هنوز آماده نیست؛ مسیر فعلی حفظ شد.");
+            return;
+        }
+        navigationService.startNavigation(route, destination, activeWaypoints,
+                readIntelligenceMode().name(), locationTracker.getLastLocation(), true);
         setStatus("مسیر با ترافیک به‌روزرسانی شد؛ حدود " + Math.max(1, gainSeconds / 60) + " دقیقه سریع‌تر است.");
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
                 "مسیر ترافیک‌محور به " + destination.name + " حدود " + Math.max(1, gainSeconds / 60) + " دقیقه زمان بهتری دارد. یک هشدار صوتی بسیار کوتاه و آرام بگو.",
@@ -2714,12 +2777,26 @@ public class MainActivity extends Activity {
     }
 
     private void rerouteFromCurrentLocation() {
-        if (rerouteInFlight || activeDestination == null || locationTracker.getLastLocation() == null) return;
+        Location rerouteLocation = locationTracker == null ? null : locationTracker.getLastLocation();
+        long now = System.currentTimeMillis();
+        if (rerouteInFlight || activeDestination == null || rerouteLocation == null) {
+            android.util.Log.d("DriveMateRoute", "reroute ignored inFlight=" + rerouteInFlight
+                    + " destination=" + (activeDestination != null)
+                    + " location=" + (rerouteLocation != null));
+            return;
+        }
+        if (now - lastRerouteStartedAt < 1_500L) {
+            android.util.Log.d("DriveMateRoute", "reroute throttled ageMs="
+                    + (now - lastRerouteStartedAt));
+            return;
+        }
+        lastRerouteStartedAt = now;
         rerouteInFlight = true;
-        // A new route gets a new engine state. Keeping the previous engine active until the
-        // network call completes allowed its old progress and turn callbacks to leak into the
-        // new route, producing repeated off-route or wrong-turn guidance.
-        navigationEngine.stop();
+        android.util.Log.i("DriveMateRoute", "reroute requested lat=" + rerouteLocation.getLatitude()
+                + " lng=" + rerouteLocation.getLongitude()
+                + " waypoints=" + activeWaypoints.size());
+        // The service owns the engine. Keep its current step long enough for startNavigation(..., true)
+        // to preserve progress; the service atomically replaces the engine state with the new route.
         initialGuidanceHeldUntil = 0L;
         setStatus("از مسیر خارج شدید؛ در حال محاسبه مسیر جدید...");
         startNavigation(activeDestination, activeWaypoints, true);
@@ -2736,8 +2813,11 @@ public class MainActivity extends Activity {
         boolean enabled = !backgroundNavigationEnabled();
         getSharedPreferences(PREFS_SETTINGS, MODE_PRIVATE).edit().putBoolean("background_navigation", enabled).apply();
         writeAutomaticBackup();
-        if (enabled && navigationEngine.isNavigating()) startBackgroundNavigation();
-        else if (!enabled) stopBackgroundNavigation();
+        if (enabled && navigationService != null && navigationService.isNavigating()) startBackgroundNavigation();
+        // The service owns an active location/navigation session. Disabling the preference must
+        // not tear that session down while the driver is still navigating; Android requires the
+        // active location FGS to remain foreground-visible. The setting takes effect for the next
+        // session/background lifecycle instead.
         refreshNotificationButton();
         setStatus(enabled ? "اعلان و ادامه مسیریابی در پس‌زمینه فعال شد." : "اعلان و ادامه مسیریابی در پس‌زمینه غیرفعال شد.");
     }
@@ -2748,14 +2828,17 @@ public class MainActivity extends Activity {
 
     private void startBackgroundNavigation() {
         if (!backgroundNavigationEnabled()) return;
-        backgroundSessionOwner = this;
         Intent intent = new Intent(this, NavigationForegroundService.class);
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent); else startService(intent);
+        bindNavigationService();
     }
 
     private void stopBackgroundNavigation() {
-        if (backgroundSessionOwner == this) backgroundSessionOwner = null;
-        stopService(new Intent(this, NavigationForegroundService.class));
+        if (navigationServiceBound && navigationService != null) {
+            navigationService.stopNavigationSession();
+        } else {
+            stopService(new Intent(this, NavigationForegroundService.class));
+        }
     }
 
     /** The service broadcasts ACTION_STOP_BROADCAST once, but every live MainActivity instance
@@ -2767,17 +2850,7 @@ public class MainActivity extends Activity {
      *  would build a bogus trip report from stats it never tracked and save a second, garbage trip
      *  record on top of the owner's real one. */
     private void onNavigationStopBroadcastReceived() {
-        String message = "مسیریابی از اعلان متوقف شد.";
-        if (observingBackgroundSession) {
-            observingBackgroundSession = false;
-            activeDestination = null;
-            activeRoute = null;
-            activeWaypoints = new ArrayList<>();
-            setStatus(message);
-            refreshList();
-        } else {
-            stopNavigation(message);
-        }
+        stopNavigation("مسیریابی از اعلان متوقف شد.");
     }
 
     /** Stop requests that originate from this instance's own UI (stop button, the map screen's stop
@@ -2787,74 +2860,26 @@ public class MainActivity extends Activity {
      *  trip report from stats this instance never tracked while leaving the real GPS/voice session
      *  in the owner instance running untouched - so the stop is forwarded to the real owner first. */
     private void requestStopNavigation(String message) {
-        android.util.Log.i("DriveMateSession", "Stop requested: " + message
-                + ", observingBackgroundSession=" + observingBackgroundSession);
-        MainActivity owner = activeSessionOwner == null ? null : activeSessionOwner.get();
-        if (observingBackgroundSession && owner != null && owner != this) {
-            owner.stopNavigation(message);
-            observingBackgroundSession = false;
-            activeDestination = null;
-            activeRoute = null;
-            activeWaypoints = new ArrayList<>();
-            setStatus(message);
-            refreshList();
-        } else {
-            stopNavigation(message);
-        }
+        stopNavigation(message);
     }
 
     private void stopNavigation(String message) {
-        android.util.Log.i("DriveMateSession", "Stopping navigation: " + message
-                + ", destination=" + (activeDestination == null ? "<none>" : activeDestination.name));
-        TripRecord tripReport = buildTripRecord(activeDestination, false);
-        saveTripRecord(tripReport);
+        TripRecord tripReport = navigationServiceBound && navigationService != null
+                ? navigationService.stopNavigationSession() : null;
         resetGuidance(true);
         rerouteInFlight = false;
         ++routeRequestSequence;
-        ++hazardFetchRequestId;
-        ++speedLimitFetchRequestId;
-        ++safetyAlertFetchRequestId;
-        ++weatherCheckRequestId;
-        ++trafficIncidentFetchRequestId;
         activeRouteHazards = new ArrayList<>();
-        activeRouteHazardAnnounced = new boolean[0];
-        activeRouteSpeedLimits = new ArrayList<>();
-        activeSpeedZones = new ArrayList<>();
-        activeSpeedZoneAnnounced = new boolean[0];
-        activeRouteCumulativeDistances = new double[0];
         activeRouteSafetyAlerts = new ArrayList<>();
-        activeRouteSafetyAlertAnnounced = new boolean[0];
         activeRouteTrafficIncidents = new ArrayList<>();
         announcedTrafficIncidentIds.clear();
-        lastSpeedLimitWarningAt = 0L;
-        lastWarnedMappedSpeedLimit = 0;
-        navigationEngine.stop();
-        smartCompanion.stop();
-        intelligenceCoordinator.cancelAll();
-        voiceHandler.removeCallbacks(trafficCheck);
-        voiceHandler.removeCallbacks(weatherCheck);
-        voiceHandler.removeCallbacks(trafficIncidentCheck);
-        voiceHandler.removeCallbacks(tripAnalysisHide);
         activeDestination = null;
-        tripStartedAt = 0L;
-        activeTripDistanceMeters = 0;
-        activeTripPath.clear();
-        activeTripOriginLatitude = Double.NaN;
-        activeTripOriginLongitude = Double.NaN;
-        lastTripLocation = null;
-        lastAlertMovementLocation = null;
-        alertMovingUntil = 0L;
-        initialGuidanceHeldUntil = 0L;
-        hideTripAnalysis();
-        stopBackgroundNavigation();
-        speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
-                "مسیریابی متوقف شده است. یک پیام فارسی کوتاه و طبیعی برای راننده بگو.",
-                "stop_navigation", message, 12_000L);
-        setStatus(message);
         activeRoute = null;
         activeWaypoints = new ArrayList<>();
         if (tripStatsPanel != null) tripStatsPanel.setVisibility(View.GONE);
-        showTripCompletionReport(tripReport);
+        hideTripAnalysis();
+        setStatus(message);
+        if (tripReport != null) showTripCompletionReport(tripReport);
     }
 
     private void registerNavigationReceiver() {
@@ -3553,8 +3578,36 @@ public class MainActivity extends Activity {
             phrase = stage == NavigationEngine.AnnouncementStage.INITIAL
                     ? "در " + distance + "، " + text : "تا " + distance + " دیگر، " + text;
         }
+        String stageClip = instructionStageClip(text, metersRemaining);
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING, phrase,
-                "instruction_stage_custom", phrase, 8_000L);
+                stageClip, phrase, 8_000L);
+    }
+
+    /** Maps early turn stages to the packaged distance-aware clips so Economy never needs network
+     *  TTS for the core navigation cue. Full/Smart still tries online first and uses the same clip
+     *  as its hard-deadline fallback. */
+    private String instructionStageClip(String text, int metersRemaining) {
+        String lower = text == null ? "" : text.toLowerCase(Locale.ROOT);
+        boolean left = lower.contains("left") || text.contains("\u0686\u067e");
+        boolean right = lower.contains("right") || text.contains("\u0631\u0627\u0633\u062a");
+        boolean uturn = lower.contains("uturn") || lower.contains("u-turn") || text.contains("\u062f\u0648\u0631\u0628\u0631\u06af\u0631\u062f\u0627\u0646");
+        if (lower.contains("roundabout") || lower.contains("rotary") || text.contains("\u0645\u06cc\u062f\u0627\u0646")) {
+            int exit = extractExitNumber(text);
+            if (exit >= 1 && exit <= 3) return "roundabout_exit_" + exit;
+        }
+        if (uturn) return metersRemaining >= 250 ? "u_turn_300m" : "u_turn_100m";
+        if (left) {
+            if (metersRemaining >= 400) return "turn_left_500m";
+            if (metersRemaining >= 150) return "turn_left_200m";
+            return "turn_left_100m";
+        }
+        if (right) {
+            if (metersRemaining >= 400) return "turn_right_500m";
+            if (metersRemaining >= 250) return "turn_right_300m";
+            if (metersRemaining >= 150) return "turn_right_200m";
+            return "turn_right_100m";
+        }
+        return null;
     }
 
     /** Rounds to the nearest 10m under 100m, nearest 50m beyond - a live GPS-derived distance read
@@ -3609,6 +3662,11 @@ public class MainActivity extends Activity {
                 + (laneClause.isEmpty() ? "" : " راهنمای خط عبور از داده مسیر: " + laneClause)
                 + " آن را در یک جمله فارسی کوتاه، طبیعی و مناسب رانندگی بیان کن"
                 + (laneClause.isEmpty() ? "." : "؛ راهنمای خط عبور را هم در همان جمله بگنجان.");
+        // This fires exactly at the maneuver (either from the cascade's finalMeters threshold, or -
+        // for a short step like a tight roundabout entry - as NavigationEngine's last-chance
+        // force-announce right before advancing past it). There is no lead time left to spend on an
+        // AI paraphrase round trip here; waiting for one is how a roundabout ends up announced only
+        // after the driver has already passed it. Speak the real instruction immediately instead.
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING, stepPrompt,
                 lastInstruction, fallbackWithLane, 10_000L);
         setStatus(text);
@@ -3638,6 +3696,52 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void speakWaypointFallback(String text) {
+        if (text == null || text.trim().isEmpty()) return;
+        if (onlineSpeechClient != null && onlineSpeechClient.canUseOnlineTts()) {
+            if (voicePlayer != null) voicePlayer.interrupt();
+            onlineSpeechClient.stopPlayback();
+            android.util.Log.i("DriveMateVoice", "waypoint speech path=online textLength=" + text.length());
+            final long epoch = guidanceEpoch;
+            onlineSpeechClient.speak(text, new OnlineSpeechClient.SpeechCallback() {
+                @Override public void onPlayed() {
+                    android.util.Log.i("DriveMateVoice", "waypoint TTS provider="
+                            + onlineSpeechClient.getLastTtsProvider());
+                }
+                @Override public void onError() {
+                    android.util.Log.w("DriveMateVoice", "waypoint online TTS failed; local fallback");
+                    if (epoch == guidanceEpoch && voicePlayer != null) voicePlayer.speak(text);
+                }
+            });
+            return;
+        }
+        android.util.Log.i("DriveMateVoice", "waypoint speech path=local textLength=" + text.length());
+        if (voicePlayer != null) voicePlayer.speak(text);
+    }
+
+    /** Speaks a navigation warning with packaged WAV first, and online TTS only when the clip is
+     * unavailable. Device TTS remains the final offline fallback. */
+    private boolean speakMissingClipOnlineFirst(String clipName, String text) {
+        if (text == null || text.trim().isEmpty()) return false;
+        if (voicePlayer != null && clipName != null && voicePlayer.hasClip(clipName)) {
+            return voicePlayer.announce(clipName, text);
+        }
+        if (onlineSpeechClient != null && onlineSpeechClient.canUseOnlineTts()) {
+            final long epoch = guidanceEpoch;
+            onlineSpeechClient.speak(text, new OnlineSpeechClient.SpeechCallback() {
+                @Override public void onPlayed() {
+                    android.util.Log.i("DriveMateVoice", "missing WAV TTS provider="
+                            + onlineSpeechClient.getLastTtsProvider());
+                }
+                @Override public void onError() {
+                    if (epoch == guidanceEpoch && voicePlayer != null) voicePlayer.speak(text);
+                }
+            });
+            return true;
+        }
+        return voicePlayer != null && voicePlayer.speak(text);
+    }
+
     private void announceWaypointReached(RouteStep step, int ordinal) {
         // Match by coordinates, not ordinal: waypointOrdinal is fixed to the waypoints list as it
         // was at the time THIS route was computed, but activeWaypoints shrinks with every stop
@@ -3647,20 +3751,14 @@ public class MainActivity extends Activity {
         removeReachedWaypoint(activeWaypoints, step);
         int humanNumber = ordinal + 1;
         String fallback = "به توقف میانی " + humanNumber + " رسیدید. مسیر به مقصد ادامه دارد.";
-        speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
-                "راننده به توقف میانی شماره " + humanNumber
-                        + " رسیده است. یک پیام فارسی کوتاه و طبیعی بگو که مسیر تا مقصد نهایی ادامه دارد.",
-                "continue_route", fallback, 12_000L);
+        speakWaypointFallback(fallback);
         setStatus(fallback);
     }
 
     private void announceWaypointApproaching(RouteStep step, int ordinal) {
         int humanNumber = ordinal + 1;
         String fallback = "توقف میانی " + humanNumber + " نزدیک است.";
-        speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
-                "راننده در حال نزدیک شدن به توقف میانی شماره " + humanNumber
-                        + " است. یک هشدار فارسی بسیار کوتاه و مناسب رانندگی بگو.",
-                "continue_route", fallback, 10_000L);
+        speakWaypointFallback(fallback);
         setStatus(fallback);
     }
 
@@ -3669,10 +3767,7 @@ public class MainActivity extends Activity {
         int humanNumber = ordinal + 1;
         String fallback = "توقف میانی " + humanNumber
                 + " رد شد و از مسیر حذف شد؛ مسیریابی به مقصد بعدی ادامه دارد.";
-        speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
-                "راننده با چند نمونه دقیق GPS از توقف میانی شماره " + humanNumber
-                        + " عبور کرده و آن را نرفته است. یک پیام فارسی کوتاه بگو که توقف حذف شده و مسیر ادامه دارد.",
-                "continue_route", fallback, 12_000L);
+        speakWaypointFallback(fallback);
         setStatus(fallback);
     }
 
@@ -3710,32 +3805,15 @@ public class MainActivity extends Activity {
      *  manifest). The driver's own "توقف" tap in the notification - or the in-app stop button -
      *  is what actually calls stopNavigation() and performs the full teardown below. */
     @Override protected void onDestroy() {
-        boolean keepRunningInBackground = navigationEngine.isNavigating() && backgroundNavigationEnabled();
-        // A mirroring instance (observingBackgroundSession) never calls navigationEngine.start()
-        // itself, so its own navigationEngine.isNavigating() above is always false - even while a
-        // DIFFERENT, still-alive MainActivity instance (activeSessionOwner) is genuinely driving a
-        // background trip and owns the shared NavigationForegroundService/notification. Without
-        // this check, closing this mirror (e.g. the app's second close while a background trip is
-        // running - see 2026-08-02 report) fell into the teardown branch below and called
-        // stopBackgroundNavigation(), silently killing the real owner's notification even though
-        // navigation itself kept running fine under the owner instance.
-        MainActivity owner = activeSessionOwner == null ? null : activeSessionOwner.get();
-        boolean anotherInstanceOwnsBackgroundSession = observingBackgroundSession
-                && owner != null && owner != this && owner.navigationEngine.isNavigating();
         voiceHandler.removeCallbacks(automaticStop);
         onlineSpeechClient.cancelRecording();
         localSpeechRecognizer.destroy();
-        if (!keepRunningInBackground) {
-            voiceHandler.removeCallbacks(trafficCheck);
-            voiceHandler.removeCallbacks(weatherCheck);
-            intelligenceCoordinator.shutdown();
-            smartCompanion.stop();
-            voicePlayer.shutdown();
-            unregisterReceiver(navigationStopReceiver);
-            navigationEngine.stop();
-            if (!anotherInstanceOwnsBackgroundSession) stopBackgroundNavigation();
-            locationTracker.stop();
+        if (navigationServiceBound && navigationService != null) {
+            navigationService.removeCallback(sessionCallback);
+            unbindService(navigationServiceConnection);
+            navigationServiceBound = false;
         }
+        try { unregisterReceiver(navigationStopReceiver); } catch (Exception ignored) { }
         super.onDestroy();
     }
 }

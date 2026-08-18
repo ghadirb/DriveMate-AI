@@ -4,6 +4,9 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.Manifest;
 import android.content.Context;
+import android.content.ComponentName;
+import android.content.ServiceConnection;
+import android.os.IBinder;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
@@ -158,6 +161,82 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private PlaceStore placeStore;
     private TripStore tripStore;
     private LocationManager locationManager;
+    /** MainActivity/NavigationForegroundService own the single real NavigationEngine and its
+     *  arrival/instruction detection (see the class javadoc). This activity used to have (and
+     *  still implements NavigationEngine.Listener from, below) its own full copy of that reactive
+     *  UI-update logic, but nothing was ever wiring it to that engine anymore after that move - it
+     *  was never actually invoked, which is why this screen could stay showing an active
+     *  route/turn banner forever after the driver had actually arrived (no arrival ever fired
+     *  here) until the driver switched screens and back. Binding to the service and registering as
+     *  a NavigationForegroundService.SessionCallback while this screen is visible reconnects the
+     *  exact same UI-update methods to the real, single source of truth. */
+    private NavigationForegroundService navigationService;
+    private boolean navigationServiceBound;
+    private final ServiceConnection navigationServiceConnection = new ServiceConnection() {
+        @Override public void onServiceConnected(ComponentName name, IBinder service) {
+            navigationService = ((NavigationForegroundService.LocalBinder) service).getService();
+            navigationServiceBound = true;
+            navigationService.addCallback(navigationSessionCallback, false);
+        }
+        @Override public void onServiceDisconnected(ComponentName name) {
+            navigationServiceBound = false;
+            navigationService = null;
+        }
+    };
+
+    private final NavigationForegroundService.SessionCallback navigationSessionCallback =
+            new NavigationForegroundService.SessionCallback() {
+        @Override public void onInstruction(RouteStep step) { MapActivity.this.onInstruction(step); }
+        @Override public void onOffRoute() { MapActivity.this.onOffRoute(); }
+        @Override public void onArrived(SavedPlace arrivedDestination, TripRecord tripReport) { MapActivity.this.onArrived(); }
+        @Override public void onWaypointApproaching(RouteStep step, int waypointOrdinal) {
+            MapActivity.this.onWaypointApproaching(step, waypointOrdinal);
+        }
+        @Override public void onWaypointReached(RouteStep step, int waypointOrdinal) {
+            MapActivity.this.onWaypointReached(step, waypointOrdinal);
+        }
+        @Override public void onWaypointSkipped(RouteStep step, int waypointOrdinal) {
+            MapActivity.this.onWaypointSkipped(step, waypointOrdinal);
+        }
+        @Override public void onInstructionStage(RouteStep step, NavigationEngine.AnnouncementStage stage, int metersRemaining) { }
+        @Override public void onRouteReplaced(RouteResult route) {
+            runOnUiThread(() -> {
+                if (!navigationMode || route == null) return;
+                // Remove the old route before committing the new geometry so the map never
+                // visually connects stale and fresh routes during a reroute.
+                clearNavigationRouteLines();
+                // Prevent GPS redraw from resurrecting the stale route during reroute.
+                routeOptions = new ArrayList<>();
+                selectedRoute = null;
+                routeNeedsRefreshFromCurrentLocation = false;
+                lastRouteRenderLocation = null;
+                lastRouteRenderAt = 0L;
+                routeOptions = new ArrayList<>();
+                routeOptions.add(route);
+                selectedRoute = route;
+                routeNeedsRefreshFromCurrentLocation = false;
+                showRoutePreview(route);
+                startTurnByTurn(route);
+            });
+        }
+        // This activity gets its own location fixes directly from LocationManager (see
+        // onLocationChanged below) - it already existed before this binding and drives its own
+        // GPS-quality filtering, vehicle marker, and route-line rendering, none of which this
+        // service-level callback needs to duplicate.
+        @Override public void onLocationUpdate(Location location) {
+            // NavigationForegroundService is the authoritative GPS owner. Feed its already-filtered
+            // fixes into the map UI as well, so the arrow/polyline cannot stall when MapActivity's
+            // independent LocationManager stream is paused or dropped.
+            if (location == null) return;
+            runOnUiThread(() -> {
+                if (!isFinishing() && !isDestroyed() && navigationMode) {
+                    authoritativeLocationPending = true;
+                    onLocationChanged(new Location(location));
+                }
+            });
+        }
+        @Override public void onLocationAvailabilityChanged(boolean available) { }
+    };
     private boolean navigationMode;
     private boolean followVehicle = true;
     /** Tracks the "کاربر زد موقعیت من ولی GPS خاموش بود" flow end-to-end so returning from
@@ -182,6 +261,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private static final long FOLLOW_VEHICLE_RESUME_DELAY_MS = 8_000L;
     private float lastBearing;
     private boolean hasHeading;
+    private long lastHeadingAt;
     private boolean navigationCameraEnabled;
     private int navigationRouteIndex;
     /** Current turn/step index used only by the map UI renderer. */
@@ -218,13 +298,19 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
      * fix here too; otherwise a weak network fix can visibly jump the vehicle/route in alleys. */
     private Location lastAcceptedMapLocation;
     private final LocationQualityFilter mapLocationFilter = new LocationQualityFilter();
-    private boolean routeNeedsRefreshFromCurrentLocation;
-    private boolean routeRefreshInFlight;
+    /** True only for a service-owned fix already filtered by the authoritative navigation tracker. */
+    private boolean authoritativeLocationPending;
+    private volatile boolean routeNeedsRefreshFromCurrentLocation;
+    private volatile boolean routeRefreshInFlight;
     private long lastRouteRefreshAttemptAt;
-    private static final long ROUTE_REFRESH_RETRY_MS = 15_000L;
+    /** A failed/off-route redraw must recover quickly; ordinary GPS refreshes still share this
+     *  gate so they cannot hammer the public routing providers. */
+    private static final long ROUTE_REFRESH_RETRY_MS = 2_500L;
     private Location lastRouteRenderLocation;
     private long lastRouteRenderAt;
-    private static final long NAVIGATION_ROUTE_REDRAW_INTERVAL_MS = 2_500L;
+    private static final long NAVIGATION_ROUTE_REDRAW_INTERVAL_MS = 700L;
+    private RouteResult routeGeometryProgressOwner;
+    private int lastRenderedRouteGeometryIndex = -1;
     private PoiCategory activeNearbyCategory;
     private final List<Marker> nearbyMarkers = new ArrayList<>();
     private final EnumSet<PoiCategory> enabledPoiLayers = EnumSet.noneOf(PoiCategory.class);
@@ -344,6 +430,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         wireControls();
         restorePoiLayerPreferences();
         initializeMap();
+        drawWaypointMarkers();
         loadRemoteRoutingConfig();
         if (map != null && !enabledPoiLayers.isEmpty()) refreshPoiLayers();
         if (map != null && isSpeedLimitLayerEnabled() && !navigationMode) loadNearbySpeedLimits();
@@ -1685,6 +1772,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     private void showRoutePreview(RouteResult route) {
+        if (route != routeGeometryProgressOwner) {
+            routeGeometryProgressOwner = route;
+            lastRenderedRouteGeometryIndex = -1;
+        }
         int minutes = Math.max(1, (int) Math.ceil(route.durationSeconds / 60.0));
         routeText.setText("مسیر پیشنهادی | " + minutes + " دقیقه | "
                 + String.format(Locale.US, "%.1f", route.distanceMeters / 1000.0) + " کیلومتر");
@@ -1750,19 +1841,16 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         int firstPoint = 0;
         if (navigationMode && route == selectedRoute && !route.geometry.isEmpty()) {
             Location current = currentMapLocation();
-            int nearestIndex = closestRouteGeometryIndex(route.geometry, current);
+            int nearestIndex = -1;
+            // MapActivity can fetch a fresh route independently of the service-owned route. Its
+            // geometry can therefore have a different vertex count and segment indexing; never
+            // apply the service route's segment index to this geometry.
+            if (nearestIndex < 0) nearestIndex = closestRouteGeometryIndex(route.geometry, current);
+            if (route == routeGeometryProgressOwner && lastRenderedRouteGeometryIndex >= 0) {
+                nearestIndex = Math.max(nearestIndex, lastRenderedRouteGeometryIndex);
+            }
             if (nearestIndex >= 0) {
-                RoutePoint nearestPoint = route.geometry.get(nearestIndex);
-                Location nearestLocation = new Location("route");
-                nearestLocation.setLatitude(nearestPoint.latitude);
-                nearestLocation.setLongitude(nearestPoint.longitude);
-                // Only draw the connector from the live position when it is close enough to
-                // plausibly be the same street - a large gap (deviated from the suggested route,
-                // or a GPS jump) drawn as a direct line looked like a real, precise route segment
-                // rather than what it actually was: a straight jump across unrelated streets.
-                if (current.distanceTo(nearestLocation) <= 150f) {
-                    points.add(new LatLng(current.getLatitude(), current.getLongitude()));
-                }
+                if (route == routeGeometryProgressOwner) lastRenderedRouteGeometryIndex = nearestIndex;
                 firstPoint = nearestIndex;
             }
         }
@@ -1805,7 +1893,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             lastRouteRenderAt = now;
             return true;
         }
-        if (lastRouteRenderLocation.distanceTo(location) < 8f) return false;
+        if (lastRouteRenderLocation.distanceTo(location) < 3f) return false;
         lastRouteRenderLocation = new Location(location);
         lastRouteRenderAt = now;
         return true;
@@ -1859,17 +1947,26 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
      *  GPS samples. */
     private void updateTurnBanner(Location location) {
         if (selectedRoute == null || selectedRoute.steps == null || selectedRoute.steps.isEmpty()) return;
-        if (displayedStepIndex < 0) displayedStepIndex = 0;
-        if (displayedStepIndex >= selectedRoute.steps.size()) displayedStepIndex = selectedRoute.steps.size() - 1;
-        while (displayedStepIndex < selectedRoute.steps.size() - 1) {
-            RouteStep currentStep = selectedRoute.steps.get(displayedStepIndex);
-            Location currentTarget = new Location("route");
-            currentTarget.setLatitude(currentStep.latitude);
-            currentTarget.setLongitude(currentStep.longitude);
-            if (location.distanceTo(currentTarget) > 30f) break;
-            displayedStepIndex++;
+        // The foreground service is authoritative: keep the banner on the exact same maneuver as voice guidance.
+        RouteStep step = null;
+        if (navigationServiceBound && navigationService != null) {
+            step = navigationService.getNavigationEngine().currentStep();
+            int authoritativeIndex = navigationService.getNavigationEngine().currentStepIndex();
+            if (authoritativeIndex >= 0 && authoritativeIndex < selectedRoute.steps.size()) displayedStepIndex = authoritativeIndex;
         }
-        RouteStep step = selectedRoute.steps.get(displayedStepIndex);
+        if (step == null) {
+            if (displayedStepIndex < 0) displayedStepIndex = 0;
+            if (displayedStepIndex >= selectedRoute.steps.size()) displayedStepIndex = selectedRoute.steps.size() - 1;
+            while (displayedStepIndex < selectedRoute.steps.size() - 1) {
+                RouteStep currentStep = selectedRoute.steps.get(displayedStepIndex);
+                Location currentTarget = new Location("route");
+                currentTarget.setLatitude(currentStep.latitude);
+                currentTarget.setLongitude(currentStep.longitude);
+                if (location.distanceTo(currentTarget) > 30f) break;
+                displayedStepIndex++;
+            }
+            step = selectedRoute.steps.get(displayedStepIndex);
+        }
         Location target = new Location("route");
         target.setLatitude(step.latitude);
         target.setLongitude(step.longitude);
@@ -1884,6 +1981,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
      *  it moves with the car instead of freezing at the numbers shown when the route was chosen. */
     private int estimateRemainingRouteMeters(Location location) {
         if (selectedRoute == null || selectedRoute.steps == null || selectedRoute.steps.isEmpty()) return 0;
+        if (navigationServiceBound && navigationService != null
+                && navigationService.getNavigationEngine().isNavigating()) {
+            return navigationService.getNavigationEngine().remainingMeters();
+        }
         int start = Math.max(0, Math.min(displayedStepIndex, selectedRoute.steps.size() - 1));
         Location previous = location;
         double total = 0d;
@@ -2204,6 +2305,16 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
      *  already left behind. Must include routeWaypoints - a plain origin-to-destination fetch here
      *  would silently drop every remaining intermediate stop from the recomputed route, so a
      *  waypoint reached after any reroute would never be detected or announced again. */
+    private void clearNavigationRouteLines() {
+        if (map == null) return;
+        for (Polyline polyline : alternateRoutePolylines) map.removePolyline(polyline);
+        alternateRoutePolylines.clear();
+        if (routePolyline != null) {
+            map.removePolyline(routePolyline);
+            routePolyline = null;
+        }
+    }
+
     private void recalculateActiveRoute() {
         Location current = currentMapLocation();
         if (destination == null || current == null) return;
@@ -2218,6 +2329,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         lastRouteRefreshAttemptAt = now;
         final double latitude = current.getLatitude();
         final double longitude = current.getLongitude();
+        Log.i("DriveMateMapRoute", "refresh requested force=" + force
+                + " lat=" + latitude + " lng=" + longitude
+                + " waypoints=" + routeWaypoints.size());
         routeRepository.getRoute(latitude, longitude, waypointCoordinates(),
                 destination.latitude, destination.longitude,
                 route -> runOnUiThread(() -> {
@@ -2227,12 +2341,15 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                     routeOptions.add(route);
                     selectedRoute = route;
                     routeNeedsRefreshFromCurrentLocation = false;
+                    Log.i("DriveMateMapRoute", "refresh succeeded provider=" + route.providerName
+                            + " geometry=" + route.geometry.size());
                     showRoutePreview(route);
                     startTurnByTurn(route);
                 }),
                 error -> runOnUiThread(() -> {
                     routeRefreshInFlight = false;
                     routeNeedsRefreshFromCurrentLocation = true;
+                    Log.w("DriveMateMapRoute", "refresh failed force=" + force + " error=" + error);
                     if (turnInstructionText != null && force) {
                         turnInstructionText.setText("بازیابی مسیر انجام نشد: " + error);
                     }
@@ -2308,12 +2425,29 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     @Override public void onOffRoute() {
+        // Mark the map stale even when MainActivity currently owns the network request. Its
+        // service callback normally replaces the line; the flag is a bounded fallback if that
+        // Activity is paused/destroyed or its request fails before a replacement reaches the map.
+        routeNeedsRefreshFromCurrentLocation = true;
         runOnUiThread(() -> {
+            // Hide stale geometry immediately; the replacement route is drawn only after the
+            // routing provider returns real street geometry.
+            clearNavigationRouteLines();
             turnInstructionText.setText("در حال محاسبه مجدد مسیر...");
             turnArrowText.setText("↻");
             renderLaneGuidance(null);
         });
-        recalculateActiveRoute();
+        // MainActivity is the authoritative route-fetching UI while it is alive. If it is bound,
+        // do not launch a second concurrent reroute request from MapActivity; two responses can
+        // otherwise race and make the displayed line jump between different routes. MapActivity
+        // remains the fallback rerouter only when no voice-capable Activity is bound.
+        if (navigationServiceBound && navigationService != null && !navigationService.hasVoiceCapableCallback()) {
+            recalculateActiveRoute();
+        } else if (!navigationServiceBound || navigationService == null) {
+            // There is no service callback left to request a replacement. Force one map-owned
+            // request rather than waiting for the ordinary GPS throttle.
+            refreshNavigationRouteFrom(currentMapLocation(), true);
+        }
     }
 
     @Override public void onWaypointReached(RouteStep step, int ordinal) {
@@ -2394,7 +2528,9 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         double fromLongitude = Double.isNaN(tripOriginLongitude) ? originLongitude : tripOriginLongitude;
         tripStore.add(new TripRecord(destination.name, fromLatitude, fromLongitude,
                 destination.latitude, destination.longitude, distanceMeters, durationSeconds,
-                startedAt, System.currentTimeMillis(), distanceMeters, provider, routeWaypoints.size(), true));
+                startedAt, System.currentTimeMillis(), distanceMeters, provider, routeWaypoints.size(), true,
+                navigationServiceBound && navigationService != null
+                        ? navigationService.getTripPath() : java.util.Collections.emptyList()));
     }
 
     /** Clears the per-trip tracking fields once a trip has been fully handled (report shown or
@@ -2592,7 +2728,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private void showCurrentMarker() {
         if (map == null) return;
         if (navigationMode) {
-            showVehicleMarker(lastBearing);
+            showVehicleMarker(navigationHeading());
             return;
         }
         if (currentMarker != null) map.removeMarker(currentMarker);
@@ -2603,13 +2739,22 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     private void showVehicleMarker(float bearing) {
         if (map == null) return;
         if (vehicleMarker != null) map.removeMarker(vehicleMarker);
-        vehicleMarker = new Marker(drivingPosition(), vehicleMarkerStyle(navigationCameraEnabled ? 0f : bearing));
+        // The map view itself rotates to keep travel direction up. The bitmap must retain its
+        // world bearing; passing zero here made the arrow rotate with the map in the opposite
+        // direction and appear reversed immediately after a turn/off-route event.
+        vehicleMarker = new Marker(drivingPosition(), vehicleMarkerStyle(bearing));
         map.addMarker(vehicleMarker);
     }
 
     private LatLng drivingPosition() {
         if (selectedRoute == null || selectedRoute.geometry.isEmpty()) {
             return new LatLng(originLatitude, originLongitude);
+        }
+        // Prefer the same monotonic map-matched point used by the live engine. This prevents the
+        // vehicle arrow from snapping to an earlier loop/parallel-road vertex on noisy GPS fixes.
+        if (navigationServiceBound && navigationService != null) {
+            RoutePoint snapped = navigationService.getNavigationEngine().snappedRoutePosition();
+            if (snapped != null) { return new LatLng(snapped.latitude, snapped.longitude); }
         }
         RoutePoint nearest = null;
         float nearestMeters = Float.MAX_VALUE;
@@ -2657,13 +2802,34 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         float heading = navigationHeading();
         LatLng vehiclePosition = drivingPosition();
         LatLng cameraTarget = pointAhead(vehiclePosition, heading, 68d);
-        // Neshan applies this as map rotation; invert the travel heading so the road ahead is up.
-        applyMapOrientation(-heading, 58f, 0.28f);
+        // Keep the OSM canvas north-up. The vehicle bitmap already carries the real world
+        // bearing; rotating both the canvas and bitmap made the arrow appear sideways/opposite
+        // on osmdroid builds where overlays follow the MapView transform.
+        // Keep the canvas north-up so the vehicle bitmap remains aligned with the real
+        // travel bearing, but restore the tilted driving perspective used by navigation.
+        applyMapOrientation(0f, 48f, 0f);
         map.moveCamera(cameraTarget, 0.28f);
         map.setZoom(17.25f, 0.28f);
     }
 
     private float navigationHeading() {
+        // Prefer the driver's measured travel direction. Route geometry is only a fallback: on
+        // loops, parallel roads, or immediately after leaving the route its forward bearing can
+        // legitimately be opposite to the direction the vehicle is actually moving.
+        if (hasHeading && lastAcceptedMapLocation != null) {
+            boolean moving = !lastAcceptedMapLocation.hasSpeed()
+                    || lastAcceptedMapLocation.getSpeed() >= 1.0f;
+            if (moving || System.currentTimeMillis() - lastHeadingAt < 3_000L) return lastBearing;
+        }
+        if (navigationServiceBound && navigationService != null) {
+            ai.drivemate.routing.NavigationEngine engine = navigationService.getNavigationEngine();
+            if (engine.snappedRoutePosition() != null) {
+                float engineHeading = engine.routeHeading();
+                if (!Float.isNaN(engineHeading) && engineHeading >= 0f && engineHeading <= 360f) {
+                    return engineHeading;
+                }
+            }
+        }
         LatLng position = drivingPosition();
         if (selectedRoute != null) {
             int nearestIndex = -1;
@@ -2915,6 +3081,11 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     @Override protected void onResume() {
         super.onResume();
+        if (!navigationServiceBound) {
+            bindService(new Intent(this, NavigationForegroundService.class), navigationServiceConnection, Context.BIND_AUTO_CREATE);
+        } else if (navigationService != null) {
+            navigationService.addCallback(navigationSessionCallback, false);
+        }
         maybeShowPendingTripReport();
         if (NightModeManager.refreshIfChanged(this)) return;
         NightModeManager.applyWindowBrightness(this);
@@ -2987,6 +3158,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             }
         }
         if (map != null) map.onPause();
+        if (navigationService != null) navigationService.removeCallback(navigationSessionCallback);
         super.onPause();
     }
 
@@ -3006,10 +3178,23 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             gpsWarningActive = false;
             Toast.makeText(this, "موقعیت مکانی دوباره در دسترس است.", Toast.LENGTH_SHORT).show();
         }
-        if (routeNeedsRefreshFromCurrentLocation) refreshNavigationRouteFrom(currentMapLocation(), false);
+        boolean serviceOwnsReroute = navigationServiceBound && navigationService != null
+                && navigationService.hasVoiceCapableCallback();
+        if (routeNeedsRefreshFromCurrentLocation && !serviceOwnsReroute) {
+            refreshNavigationRouteFrom(currentMapLocation(), false);
+        }
     }
 
     @Override protected void onDestroy() {
+        if (navigationServiceBound) {
+            if (navigationService != null) navigationService.removeCallback(navigationSessionCallback);
+            try {
+                unbindService(navigationServiceConnection);
+            } catch (IllegalArgumentException ignored) {
+                // Not actually bound (e.g. the service died and never reconnected) - nothing to undo.
+            }
+            navigationServiceBound = false;
+        }
         poiExpansionHandler.removeCallbacksAndMessages(null);
         trafficIncidentHandler.removeCallbacksAndMessages(null);
         searchHandler.removeCallbacksAndMessages(null);
@@ -3028,15 +3213,34 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     @Override public void onLocationChanged(Location location) {
         if (isFinishing() || isDestroyed()) return;
-        Location accepted = mapLocationFilter.filter(location);
+        boolean authoritative = authoritativeLocationPending;
+        authoritativeLocationPending = false;
+        Location accepted = authoritative ? location : mapLocationFilter.filter(location);
         if (accepted == null) return;
+        Location previous = lastAcceptedMapLocation == null
+                ? null : new Location(lastAcceptedMapLocation);
         gpsWarningActive = false;
         lastAcceptedMapLocation = new Location(accepted);
         originLatitude = accepted.getLatitude();
         originLongitude = accepted.getLongitude();
-        if (accepted.hasBearing()) {
+        if (previous != null && previous.distanceTo(accepted) >= 5f
+                && (!accepted.hasAccuracy() || accepted.getAccuracy() <= 50f)) {
+            // Some fake-GPS and budget devices omit Location.bearing entirely. Deriving bearing
+            // from two accepted fixes gives the marker/camera a useful direction on the very
+            // first movement instead of trusting a stale zero bearing from the provider.
+            float measured = previous.bearingTo(accepted);
+            if (!hasHeading) {
+                lastBearing = measured;
+            } else {
+                float delta = ((measured - lastBearing + 540f) % 360f) - 180f;
+                lastBearing = (lastBearing + delta * 0.6f + 360f) % 360f;
+            }
+            hasHeading = true;
+            lastHeadingAt = System.currentTimeMillis();
+        } else if (accepted.hasBearing() && (!accepted.hasSpeed() || accepted.getSpeed() >= 1.0f)) {
             lastBearing = accepted.getBearing();
             hasHeading = true;
+            lastHeadingAt = System.currentTimeMillis();
         }
         if (navigationMode && destination != null) {
             if (lastTripAccumLocation != null) tripTraveledDistanceMeters += lastTripAccumLocation.distanceTo(accepted);
@@ -3047,10 +3251,17 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
             showCurrentMarker();
             if (selectedRoute != null) updateRoadSpeedLimit(accepted.getLatitude(), accepted.getLongitude());
             if (navigationMode && destination != null) {
-                        if (navigationMode && destination != null) {
-                    updateTurnBanner(accepted);
-                    if (routeNeedsRefreshFromCurrentLocation) refreshNavigationRouteFrom(accepted, false);
-                    if (shouldRedrawNavigationRoute(accepted)) drawAllRoutes();
+                updateTurnBanner(accepted);
+                boolean serviceOwnsReroute = navigationServiceBound && navigationService != null
+                        && navigationService.hasVoiceCapableCallback();
+                if (routeNeedsRefreshFromCurrentLocation && !serviceOwnsReroute) {
+                    refreshNavigationRouteFrom(accepted, false);
+                }
+                // selectedRoute still points to the previous route until the authoritative
+                // service callback arrives. Do not redraw it while a replacement is pending.
+                if (!routeNeedsRefreshFromCurrentLocation && !routeRefreshInFlight
+                        && shouldRedrawNavigationRoute(accepted)) {
+                    drawAllRoutes();
                 }
             }
             if (navigationMode && followVehicle && navigationCameraEnabled) {
