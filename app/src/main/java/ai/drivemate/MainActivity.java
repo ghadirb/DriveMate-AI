@@ -3623,20 +3623,25 @@ public class MainActivity extends Activity {
         removeReachedWaypoint(activeWaypoints, step);
         int humanNumber = ordinal + 1;
         String fallback = "به توقف میانی " + humanNumber + " رسیدید. مسیر به مقصد ادامه دارد.";
+        // immediate=true: the AI paraphrase step has been seen to drop the "میانی" qualifier and
+        // say a generic "به مقصد رسیدید" instead - indistinguishable from actually finishing the
+        // trip. Which stop this is is the entire point of the announcement, so speak the
+        // deterministic wording that is guaranteed to say it correctly rather than risk that.
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
                 "راننده به توقف میانی شماره " + humanNumber
                         + " رسیده است. یک پیام فارسی کوتاه و طبیعی بگو که مسیر تا مقصد نهایی ادامه دارد.",
-                "continue_route", fallback, 12_000L);
+                "continue_route", fallback, 12_000L, true);
         setStatus(fallback);
     }
 
     private void announceWaypointApproaching(RouteStep step, int ordinal) {
         int humanNumber = ordinal + 1;
         String fallback = "توقف میانی " + humanNumber + " نزدیک است.";
+        // immediate=true - see announceWaypointReached's note; same wording risk applies here.
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
                 "راننده در حال نزدیک شدن به توقف میانی شماره " + humanNumber
                         + " است. یک هشدار فارسی بسیار کوتاه و مناسب رانندگی بگو.",
-                "continue_route", fallback, 10_000L);
+                "continue_route", fallback, 10_000L, true);
         setStatus(fallback);
     }
 
@@ -3645,12 +3650,14 @@ public class MainActivity extends Activity {
         int humanNumber = ordinal + 1;
         String fallback = "توقف میانی " + humanNumber
                 + " رد شد و از مسیر حذف شد؛ مسیریابی به مقصد بعدی ادامه دارد.";
+        // immediate=true - see announceWaypointReached's note; same wording risk applies here.
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.DRIVING,
                 "راننده با چند نمونه دقیق GPS از توقف میانی شماره " + humanNumber
                         + " عبور کرده و آن را نرفته است. یک پیام فارسی کوتاه بگو که توقف حذف شده و مسیر ادامه دارد.",
-                "continue_route", fallback, 12_000L);
+                "continue_route", fallback, 12_000L, true);
         setStatus(fallback);
     }
+
 
     /** Removes the waypoint nearest the reached step's coordinates (within a generous tolerance
      *  for provider snapping) rather than trusting a route-specific ordinal against a list that
