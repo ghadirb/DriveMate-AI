@@ -400,6 +400,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         restorePoiLayerPreferences();
         initializeMap();
         loadRemoteRoutingConfig();
+        // restoreNavigationWaypoints() (above, before the map existed) only populates routeWaypoints
+        // - unlike addWaypoint()'s own callers, it never actually draws the markers, so a navigation
+        // session started with intermediate stops showed no marker for any of them on the map.
+        if (map != null && !routeWaypoints.isEmpty()) drawWaypointMarkers();
         if (map != null && !enabledPoiLayers.isEmpty()) refreshPoiLayers();
         if (map != null && isSpeedLimitLayerEnabled() && !navigationMode) loadNearbySpeedLimits();
         if (navigationMode) {
@@ -1867,15 +1871,15 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     /** Starts real turn-by-turn tracking for the active route: shows the first maneuver right
-     *  away and keeps the banner in sync with this activity's own location stream. This engine
-     *  instance is independent from MainActivity's (which drives voice guidance), so opening or
-     *  closing the map never disturbs the background voice session. */
+     *  away and keeps the banner in sync with this activity's own location stream. The single live
+     *  NavigationEngine is owned by NavigationForegroundService; MapActivity renders the route and
+     *  mirrors engine events via its SessionCallback (see sharedEngine()), so opening or closing the
+     *  map never disturbs the background voice session. */
     private void startTurnByTurn(RouteResult route) {
         Location current = new Location("gps");
         current.setLatitude(originLatitude);
         current.setLongitude(originLongitude);
         current.setBearing(lastBearing);
-        // MainActivity owns the single live NavigationEngine; MapActivity only renders the route.
         displayedStepIndex = 0;
         // Guarded: refreshNavigationRouteFrom/recalculateActiveRoute also call this on every
         // reroute, which must not reset the true trip start time/origin/distance-so-far - only a
@@ -1916,7 +1920,24 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         if (selectedRoute == null || selectedRoute.steps == null || selectedRoute.steps.isEmpty()) return;
         if (displayedStepIndex < 0) displayedStepIndex = 0;
         if (displayedStepIndex >= selectedRoute.steps.size()) displayedStepIndex = selectedRoute.steps.size() - 1;
-        while (displayedStepIndex < selectedRoute.steps.size() - 1) {
+        // Cap advancement at the real, service-owned engine's own step index when one is available.
+        // This walker used to run purely on "GPS fix within 30m of the current step's point", fully
+        // independent of the actual NavigationEngine driving onInstruction/onWaypointApproaching.
+        // At an intermediate waypoint the provider emits an arrive step immediately followed by a
+        // depart step at (near) the same coordinate, so a single fix within 30m of the arrive point
+        // is also within 30m of the depart point - satisfying this loop's advance condition twice in
+        // one pass and landing past the waypoint's own step before the engine had actually confirmed
+        // reaching it (which requires two confirming fixes - see NavigationEngine.STEP_ADVANCE_CONFIRM_SAMPLES).
+        // The result: turnInstructionText (set from the engine's real onWaypointApproaching event)
+        // still correctly read "توقف میانی ۱ نزدیک است", but turnDistanceText/updateDrivingHud - both
+        // driven by this independently-advanced displayedStepIndex - had already moved on to a later
+        // step, showing a distance that had nothing to do with the waypoint just announced. Capping
+        // at the engine's real index keeps this walker from ever disagreeing with what was announced.
+        NavigationEngine engine = sharedEngine();
+        int engineCap = (engine != null && engine.isNavigating())
+                ? Math.max(0, Math.min(engine.currentStepIndex(), selectedRoute.steps.size() - 1))
+                : selectedRoute.steps.size() - 1;
+        while (displayedStepIndex < Math.min(engineCap, selectedRoute.steps.size() - 1)) {
             RouteStep currentStep = selectedRoute.steps.get(displayedStepIndex);
             Location currentTarget = new Location("route");
             currentTarget.setLatitude(currentStep.latitude);
@@ -2623,7 +2644,29 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         map.addMarker(vehicleMarker);
     }
 
+    /** The engine's own progress tracker does proper point-on-segment projection, constrained to
+     *  never jump backward from previously accepted progress (see RouteProgressTracker's class
+     *  doc) - unlike the plain nearest-*vertex* search below, which has no such guard. That
+     *  distinction barely shows on a dense city alley (vertices every few meters, so "nearest
+     *  vertex" and "nearest point on the line" are almost the same point) but is very visible on a
+     *  long straight main-road segment (vertices tens/hundreds of meters apart): nearest-vertex
+     *  snapping there visibly hops from vertex to vertex instead of sliding smoothly, and can even
+     *  snap to a vertex slightly behind the driver's real progress on GPS noise, showing as the
+     *  route line/vehicle marker lagging or jumping ahead of the actual position - especially right
+     *  after a reroute on a main road, where the fresh geometry briefly has few points near the
+     *  vehicle. Use the shared engine's snap whenever navigation is actually running; only fall
+     *  back to the cruder nearest-vertex search when no engine snap is available (engine not
+     *  bound/reachable yet, or the driver is genuinely off the route entirely, e.g. a shortcut). */
+    private NavigationEngine sharedEngine() {
+        return navigationServiceBound && navigationService != null ? navigationService.getNavigationEngine() : null;
+    }
+
     private LatLng drivingPosition() {
+        NavigationEngine engine = sharedEngine();
+        if (engine != null && engine.isNavigating()) {
+            RoutePoint snapped = engine.snappedRoutePosition();
+            if (snapped != null) return new LatLng(snapped.latitude, snapped.longitude);
+        }
         if (selectedRoute == null || selectedRoute.geometry.isEmpty()) {
             return new LatLng(originLatitude, originLongitude);
         }
@@ -2680,6 +2723,10 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
     }
 
     private float navigationHeading() {
+        NavigationEngine engine = sharedEngine();
+        if (engine != null && engine.isNavigating() && engine.snappedRoutePosition() != null) {
+            return engine.routeHeading();
+        }
         LatLng position = drivingPosition();
         if (selectedRoute != null) {
             int nearestIndex = -1;
