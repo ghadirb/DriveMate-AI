@@ -770,7 +770,11 @@ public class MainActivity extends Activity {
             }); }
             @Override public void onError(String message) { runOnUiThread(() -> {
                 restoreVoiceButton();
-                setStatus("پردازش صدا انجام نشد. لطفاً اتصال اینترنت را بررسی کنید.");
+                // Show the specific reason (e.g. "recording too short" / "no speech detected")
+                // when we have one; only fall back to the generic connectivity hint otherwise.
+                setStatus(message == null || message.trim().isEmpty()
+                        ? "پردازش صدا انجام نشد. لطفاً اتصال اینترنت را بررسی کنید."
+                        : message);
             }); }
         });
     }

@@ -30,6 +30,13 @@ public class OnlineSpeechClient {
     private String buildKey;
     private MediaRecorder recorder;
     private File recording;
+    /** An accidental double-tap or button glitch can start/stop recording almost instantly. Whisper
+     *  does not say "I heard nothing" - fed a clip with little or no real speech it hallucinates a
+     *  plausible-looking transcript (often steered toward the saved-place-name hint below), which
+     *  then fails destination search with a confusing "location not found" instead of the real
+     *  "I didn't catch that" cause. Below this duration we skip the network call entirely. */
+    private static final long MIN_RECORDING_MS = 700L;
+    private volatile long recordingStartedAt;
     private MediaPlayer player;
     private volatile String lastTtsProvider = "";
     private volatile String transcriptionHint = "";
@@ -72,6 +79,7 @@ public class OnlineSpeechClient {
             recorder.setOutputFile(recording.getAbsolutePath());
             recorder.prepare();
             recorder.start();
+            recordingStartedAt = System.currentTimeMillis();
             return true;
         } catch (Exception error) {
             Log.e(TAG, "Could not start microphone recording", error);
@@ -82,16 +90,34 @@ public class OnlineSpeechClient {
 
     public void stopAndTranscribe(TextCallback callback) {
         if (recorder == null || recording == null) { callback.onError("ضبط صدا شروع نشده است."); return; }
+        long elapsedMs = System.currentTimeMillis() - recordingStartedAt;
         try { recorder.stop(); } catch (RuntimeException ignored) { }
         releaseRecorder();
+        if (elapsedMs < MIN_RECORDING_MS) {
+            Log.w(TAG, "STT recording too short (" + elapsedMs + "ms); skipping transcription to avoid hallucination");
+            callback.onError("ضبط خیلی کوتاه بود؛ لطفاً پس از لمس دکمه واضح صحبت کنید.");
+            return;
+        }
         File audio = recording;
         new Thread(() -> {
             try { callback.onResult(transcribeWithFallback(audio)); }
+            catch (NoSpeechDetectedException noSpeech) {
+                Log.w(TAG, "STT judged the recording as silence/noise: " + noSpeech.getMessage());
+                callback.onError(noSpeech.getMessage());
+            }
             catch (Exception error) {
                 Log.e(TAG, "Online speech recognition failed", error);
                 callback.onError("تبدیل گفتار آنلاین انجام نشد: " + safeMessage(error));
             }
         }).start();
+    }
+
+    /** Thrown instead of returning Whisper's hallucinated text when the model's own per-segment
+     *  no_speech_prob shows the clip was mostly silence/noise (see isLikelySilence). Kept distinct
+     *  from a plain transport/API failure so the UI can tell the driver "I didn't hear you" rather
+     *  than a generic connectivity error. */
+    private static final class NoSpeechDetectedException extends Exception {
+        NoSpeechDetectedException(String message) { super(message); }
     }
 
     public void speak(String text) {
@@ -314,6 +340,9 @@ public class OnlineSpeechClient {
         connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
         try (OutputStream out = connection.getOutputStream()) {
             writeField(out, boundary, "model", model);
+            // verbose_json exposes per-segment no_speech_prob, which is how we tell a genuine (if
+            // imperfect) transcript apart from a hallucinated one - see isLikelySilence below.
+            writeField(out, boundary, "response_format", "verbose_json");
             if (includeRecognitionHints) {
                 writeField(out, boundary, "language", "fa");
                 if (!transcriptionHint.isEmpty()) writeField(out, boundary, "prompt", transcriptionHint);
@@ -326,12 +355,36 @@ public class OnlineSpeechClient {
             int code = connection.getResponseCode();
             String response = readResponse(connection, code);
             if (code >= 300) throw new IllegalStateException("GapGPT HTTP " + code);
-            String text = new JSONObject(response).optString("text").trim();
+            JSONObject json = new JSONObject(response);
+            String text = json.optString("text").trim();
             if (text.isEmpty()) throw new IllegalStateException("GapGPT پاسخ خالی داد");
+            if (isLikelySilence(json)) {
+                throw new NoSpeechDetectedException("صدایی شنیده نشد یا گفتار واضح نبود؛ دوباره تلاش کنید.");
+            }
             Log.i(TAG, "STT provider=GapGPT model=" + model + " hints=" + includeRecognitionHints
                     + " textLength=" + text.length());
             return text;
         } finally { connection.disconnect(); }
+    }
+
+    /** Whisper's own verbose_json output carries a no_speech_prob per segment; a duration-weighted
+     *  average close to 1 means the model considered most of the clip non-speech (silence, wind,
+     *  engine noise), so its "text" field is a hallucinated guess - commonly steered toward the
+     *  saved-place-name recognition hint - rather than a real transcript. 0.6 is a deliberately
+     *  conservative threshold: it only rejects clips the model itself was fairly confident about,
+     *  so a genuine but heavily-accented or noisy utterance still gets through to place search. */
+    private boolean isLikelySilence(JSONObject response) {
+        org.json.JSONArray segments = response.optJSONArray("segments");
+        if (segments == null || segments.length() == 0) return false;
+        double weightedNoSpeech = 0d, totalDuration = 0d;
+        for (int index = 0; index < segments.length(); index++) {
+            JSONObject segment = segments.optJSONObject(index);
+            if (segment == null) continue;
+            double duration = Math.max(0d, segment.optDouble("end", 0d) - segment.optDouble("start", 0d));
+            weightedNoSpeech += segment.optDouble("no_speech_prob", 0d) * duration;
+            totalDuration += duration;
+        }
+        return totalDuration > 0d && (weightedNoSpeech / totalDuration) >= 0.6d;
     }
 
     private String transcribeLiara(File audio) throws Exception {
