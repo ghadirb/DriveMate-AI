@@ -66,7 +66,6 @@ public class NavigationForegroundService extends Service implements BackgroundNa
     // notification drawer; the user can still change the channel's behavior in system settings.
     private static final String CHANNEL_ID = "navigation_active_v2";
     private static final int NOTIFICATION_ID = 410;
-    private static final int MIN_RECORDED_TRIP_DISTANCE_METERS = 100;
 
     /** Implemented by a bound Activity to receive every live navigation-engine/location event
      *  while it is on screen, so it can keep driving its own UI and its richer, AI-enhanced voice
