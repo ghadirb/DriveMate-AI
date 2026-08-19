@@ -58,6 +58,7 @@ import ai.drivemate.voice.VoiceGuidancePlayer;
  */
 public class NavigationForegroundService extends Service implements BackgroundNavigationMonitor.Host {
     private static final String TAG = "DriveMateNavService";
+    private static final int MIN_RECORDED_TRIP_DISTANCE_METERS = 100;
     public static final String ACTION_STOP = "ai.drivemate.action.STOP_NAVIGATION";
     public static final String ACTION_STOP_BROADCAST = "ai.drivemate.action.STOP_NAVIGATION_BROADCAST";
     // v2 intentionally avoids inheriting an old user/channel choice made for the previous LOW
@@ -632,8 +633,13 @@ public class NavigationForegroundService extends Service implements BackgroundNa
 
     private TripRecord buildTripRecord(SavedPlace destination, boolean completed) {
         if (destination == null || activeRoute == null || tripStartedAt == 0L) return null;
-        // Explicit driver stop is a valid trip-end action; do not discard its report just because
-        // the service-side distance accumulator missed samples (for example synthetic/fake GPS).
+        if (activeTripDistanceMeters < MIN_RECORDED_TRIP_DISTANCE_METERS) {
+            android.util.Log.i(TAG, "trip report skipped: distance below minimum="
+                    + activeTripDistanceMeters + "m");
+            return null;
+        }
+        // Explicit driver stop is a valid trip-end action after the minimum real movement; do not
+        // discard a report merely because the trip ended before reaching its planned destination.
         long endedAt = System.currentTimeMillis();
         android.util.Log.i(TAG, "trip report pathPoints=" + activeTripPath.size()
                 + " distance=" + activeTripDistanceMeters);

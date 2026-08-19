@@ -2524,7 +2524,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
      *  completion - stopping moments after selecting a destination (or right where you already
      *  are) should not be treated as "arrived", regardless of how close that happens to be to the
      *  destination. */
-    private static final float MIN_REPORTABLE_TRIP_METERS = 80f;
+    private static final float MIN_REPORTABLE_TRIP_METERS = 100f;
 
     private boolean tripIsReportable() {
         return tripTraveledDistanceMeters >= MIN_REPORTABLE_TRIP_METERS;
