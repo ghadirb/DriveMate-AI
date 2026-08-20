@@ -401,13 +401,25 @@ public class NavigationForegroundService extends Service implements BackgroundNa
             if (d[0] < nearestDistance) { nearestDistance = d[0]; nearest = point; }
         }
         if (nearest == null || nearestDistance > 100f || nearest.kilometersPerHour <= 0) { overspeedSamples = 0; overspeedWarningActive = false; return; }
+        // Estimated (law-inferred, not OSM-tagged) limits only trigger a spoken warning when the
+        // driver has opted in via "تنظیمات نقشه" - see MapActivity.showMapLayersDialog. They still
+        // count for the on-map marker regardless of this preference.
+        if (nearest.estimated && !getSharedPreferences("map_layers", MODE_PRIVATE)
+                .getBoolean("speed_limit_estimated_voice", false)) { overspeedSamples = 0; overspeedWarningActive = false; return; }
         float speedKmh = location.getSpeed() * 3.6f;
-        if (speedKmh >= nearest.kilometersPerHour + 5f) overspeedSamples++;
-        else if (speedKmh <= nearest.kilometersPerHour + 2f) { overspeedSamples = 0; overspeedWarningActive = false; }
+        // Estimated limits are a legal default, not a value observed on this exact road, so we ask
+        // for a clearer margin (+15) before warning than for a tagged value (+5) to keep the false-
+        // positive rate low.
+        float overThreshold = nearest.estimated ? 15f : 5f;
+        float clearThreshold = nearest.estimated ? 10f : 2f;
+        if (speedKmh >= nearest.kilometersPerHour + overThreshold) overspeedSamples++;
+        else if (speedKmh <= nearest.kilometersPerHour + clearThreshold) { overspeedSamples = 0; overspeedWarningActive = false; }
         if (overspeedSamples >= 2 && !overspeedWarningActive && System.currentTimeMillis() - lastOverspeedWarningAt >= 60000L) {
             overspeedWarningActive = true;
             lastOverspeedWarningAt = System.currentTimeMillis();
-            voicePlayer.announce("speed_limit_attention", "هشدار سرعت: سرعت مجاز این مسیر " + nearest.kilometersPerHour + " کیلومتر بر ساعت است؛ سرعت خود را کاهش دهید.");
+            String prefix = nearest.estimated ? "هشدار سرعت (تخمینی طبق قانون): سرعت مجاز این مسیر حدود "
+                    : "هشدار سرعت: سرعت مجاز این مسیر ";
+            voicePlayer.announce("speed_limit_attention", prefix + nearest.kilometersPerHour + " کیلومتر بر ساعت است؛ سرعت خود را کاهش دهید.");
         }
     }
 

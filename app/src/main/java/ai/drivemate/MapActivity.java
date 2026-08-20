@@ -734,9 +734,13 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
 
     /** Settings only exposes layers that this renderer can actually apply. */
     private void showMapLayersDialog() {
+        boolean voiceForEstimated = getSharedPreferences("map_layers", MODE_PRIVATE)
+                .getBoolean("speed_limit_estimated_voice", false);
         String[] items = {
                 "مکان‌های اطراف روی نقشه",
                 isSpeedLimitLayerEnabled() ? "نمایش محدودیت سرعت OSM: روشن" : "نمایش محدودیت سرعت OSM: خاموش",
+                voiceForEstimated ? "هشدار صوتی محدودیت‌های تخمینی (قانون ایران): روشن"
+                        : "هشدار صوتی محدودیت‌های تخمینی (قانون ایران): خاموش",
                 "پاک‌کردن همهٔ لایه‌های مکان"
         };
         new AlertDialog.Builder(this)
@@ -760,6 +764,14 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
                         Toast.makeText(this, enabled
                                 ? "نمایش و هشدار محدودیت‌های ثبت‌شدهٔ OSM فعال شد."
                                 : "نمایش و هشدار محدودیت‌های ثبت‌شدهٔ OSM غیرفعال شد.", Toast.LENGTH_LONG).show();
+                    } else if (which == 2) {
+                        boolean enabled = !voiceForEstimated;
+                        getSharedPreferences("map_layers", MODE_PRIVATE).edit()
+                                .putBoolean("speed_limit_estimated_voice", enabled).apply();
+                        Toast.makeText(this, enabled
+                                ? "هشدار صوتی برای محدودیت‌های تخمینی (بر اساس قانون، نه تابلوی جاده) فعال شد."
+                                : "هشدار صوتی برای محدودیت‌های تخمینی خاموش شد؛ روی نقشه با دایرهٔ نقطه‌چین کهربایی همچنان دیده می‌شوند.",
+                                Toast.LENGTH_LONG).show();
                     } else clearPoiLayers();
                 })
                 .show();
@@ -2133,20 +2145,29 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         clearSpeedLimitMarkers();
         if (map == null || !isSpeedLimitLayerEnabled() || routeSpeedLimits.isEmpty()) return;
         for (SpeedLimitPoint point : routeSpeedLimits) {
-            Marker marker = new Marker(new LatLng(point.latitude, point.longitude), speedLimitMarkerStyle(point.kilometersPerHour));
+            Marker marker = new Marker(new LatLng(point.latitude, point.longitude), speedLimitMarkerStyle(point.kilometersPerHour, point.estimated));
             map.addMarker(marker);
             speedLimitMarkers.add(marker);
         }
     }
 
     /** European-style speed-limit sign (red ring, white face, black number) so it reads instantly
-     *  as a speed limit rather than a generic colored pin. */
-    private MarkerStyle speedLimitMarkerStyle(int kilometersPerHour) {
+     *  as a speed limit rather than a generic colored pin. Estimated (law-inferred, not OSM-tagged)
+     *  values get a dashed amber ring instead of a solid red one and a leading "~" on the number,
+     *  so the driver can tell at a glance this wasn't read off an actual sign/tag. */
+    private MarkerStyle speedLimitMarkerStyle(int kilometersPerHour, boolean estimated) {
         Bitmap bitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
         Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
-        ring.setColor(0xffe53935);
-        canvas.drawCircle(32f, 32f, 30f, ring);
+        ring.setColor(estimated ? 0xfffb8c00 : 0xffe53935);
+        if (estimated) {
+            ring.setStyle(Paint.Style.STROKE);
+            ring.setStrokeWidth(6f);
+            ring.setPathEffect(new android.graphics.DashPathEffect(new float[]{6f, 5f}, 0f));
+            canvas.drawCircle(32f, 32f, 27f, ring);
+        } else {
+            canvas.drawCircle(32f, 32f, 30f, ring);
+        }
         Paint face = new Paint(Paint.ANTI_ALIAS_FLAG);
         face.setColor(0xffffffff);
         canvas.drawCircle(32f, 32f, 24f, face);
@@ -2154,10 +2175,11 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         text.setColor(0xff000000);
         text.setTextAlign(Paint.Align.CENTER);
         text.setTypeface(Typeface.DEFAULT_BOLD);
-        text.setTextSize(kilometersPerHour >= 100 ? 20f : 24f);
+        String label = (estimated ? "~" : "") + kilometersPerHour;
+        text.setTextSize(kilometersPerHour >= 100 ? (estimated ? 17f : 20f) : (estimated ? 20f : 24f));
         Paint.FontMetrics metrics = text.getFontMetrics();
         float y = 32f - (metrics.ascent + metrics.descent) / 2f;
-        canvas.drawText(String.valueOf(kilometersPerHour), 32f, y, text);
+        canvas.drawText(label, 32f, y, text);
         return new MarkerStyle(bitmap);
     }
 
@@ -2293,6 +2315,8 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         }
         if (closest == null || closestMeters > 110d) {
             roadSpeedLimitText.setText("محدودیت: نامشخص (دادهٔ OSM)");
+        } else if (closest.estimated) {
+            roadSpeedLimitText.setText("محدودیت تخمینی: ~" + closest.kilometersPerHour + " کیلومتر/ساعت (" + closest.source + ")");
         } else {
             roadSpeedLimitText.setText("محدودیت ثبت‌شده: " + closest.kilometersPerHour + " کیلومتر/ساعت (" + closest.source + ")");
         }

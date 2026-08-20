@@ -3177,7 +3177,7 @@ public class MainActivity extends Activity {
                 float meters = target.distanceTo(candidate);
                 if (meters < nearestMeters) { nearestMeters = meters; nearestIndex = index; }
             }
-            zones.add(new RouteSpeedZone(cumulative[nearestIndex], limit.kilometersPerHour, limit.latitude, limit.longitude, limit.source));
+            zones.add(new RouteSpeedZone(cumulative[nearestIndex], limit.kilometersPerHour, limit.latitude, limit.longitude, limit.source, limit.estimated));
         }
         zones.sort(Comparator.comparingDouble(zone -> zone.distanceMeters));
         return zones;
@@ -3197,18 +3197,28 @@ public class MainActivity extends Activity {
             if (meters < closestMeters) { closestMeters = meters; closest = limit; }
         }
         if (closest == null || closestMeters > 110f) return;
+        // Estimated (law-inferred, not OSM-tagged) limits only speak up when the driver has opted
+        // in via "تنظیمات نقشه"; they still render on the map either way.
+        if (closest.estimated && !getSharedPreferences("map_layers", MODE_PRIVATE)
+                .getBoolean("speed_limit_estimated_voice", false)) return;
         float currentKph = location.getSpeed() * 3.6f;
         // GPS speed has normal variance; avoid warning close to the mapped value or repeating it.
-        if (currentKph < closest.kilometersPerHour + 7f) return;
+        // Estimated limits are a legal default rather than a value observed on this exact road, so
+        // they need a clearer margin (+15) than a tagged one (+7) before we speak up.
+        float margin = closest.estimated ? 15f : 7f;
+        if (currentKph < closest.kilometersPerHour + margin) return;
         long now = System.currentTimeMillis();
         if (now - lastSpeedLimitWarningAt < 90_000L && lastWarnedMappedSpeedLimit == closest.kilometersPerHour) return;
         lastSpeedLimitWarningAt = now;
         lastWarnedMappedSpeedLimit = closest.kilometersPerHour;
-        String fallback = "سرعت شما از محدودیت ثبت‌شدهٔ این مسیر، " + closest.kilometersPerHour + " کیلومتر بر ساعت، بالاتر است.";
+        String fallback = "سرعت شما از محدودیت " + (closest.estimated ? "تخمینیِ " : "ثبت‌شدهٔ ") + "این مسیر، "
+                + closest.kilometersPerHour + " کیلومتر بر ساعت، بالاتر است.";
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
-                "محدودیت سرعت ثبت‌شده از " + closest.source + " برای مسیر " + closest.kilometersPerHour
+                "محدودیت سرعت " + (closest.estimated ? "تخمینی (بر اساس قانون، نه تابلوی این جاده) " : "ثبت‌شده ") + "از "
+                        + closest.source + " برای مسیر " + closest.kilometersPerHour
                         + " کیلومتر بر ساعت است و سرعت GPS کاربر حدود " + Math.round(currentKph)
-                        + " است. فقط یک هشدار فارسی بسیار کوتاه، آرام و ایمن بگو؛ ادعای تخلف قانونی نکن.",
+                        + " است. فقط یک هشدار فارسی بسیار کوتاه، آرام و ایمن بگو؛ ادعای تخلف قانونی نکن"
+                        + (closest.estimated ? "؛ و چون تخمینی است با لحن محتاطانه‌تر بگو." : "."),
                 "speed_limit_osm", fallback, 12_000L);
     }
 
@@ -3246,6 +3256,8 @@ public class MainActivity extends Activity {
         for (int index = 0; index < activeSpeedZones.size(); index++) {
             if (index >= activeSpeedZoneAnnounced.length || activeSpeedZoneAnnounced[index]) continue;
             RouteSpeedZone zone = activeSpeedZones.get(index);
+            if (zone.estimated && !getSharedPreferences("map_layers", MODE_PRIVATE)
+                    .getBoolean("speed_limit_estimated_voice", false)) continue;
             double aheadMeters = zone.distanceMeters - currentProgress;
             if (aheadMeters < 30d || aheadMeters > 450d) continue;
             if (zone.kilometersPerHour >= currentLimit - 9) continue;
@@ -3255,11 +3267,13 @@ public class MainActivity extends Activity {
     }
 
     private void announceUpcomingSpeedZone(RouteSpeedZone zone, int metersAhead) {
-        String fallback = "حدود " + metersAhead + " متر دیگر محدودیت سرعت ثبت‌شده به " + zone.kilometersPerHour + " کیلومتر بر ساعت کاهش می‌یابد.";
+        String fallback = "حدود " + metersAhead + " متر دیگر محدودیت سرعت "
+                + (zone.estimated ? "تخمینی " : "ثبت‌شده ") + "به " + zone.kilometersPerHour + " کیلومتر بر ساعت کاهش می‌یابد.";
         speakDrivingEvent(DrivingIntelligenceCoordinator.Priority.SAFETY,
                 "بر اساس داده " + zone.source + "، حدود " + metersAhead
-                        + " متر جلوتر محدودیت سرعت ثبت‌شده مسیر به " + zone.kilometersPerHour
-                        + " کیلومتر بر ساعت کاهش پیدا می‌کند. یک هشدار فارسی بسیار کوتاه، طبیعی و آرام برای آماده شدن جهت کاهش سرعت بگو.",
+                        + " متر جلوتر محدودیت سرعت " + (zone.estimated ? "تخمینی (بر اساس قانون) " : "ثبت‌شده ") + "مسیر به " + zone.kilometersPerHour
+                        + " کیلومتر بر ساعت کاهش پیدا می‌کند. یک هشدار فارسی بسیار کوتاه، طبیعی و آرام برای آماده شدن جهت کاهش سرعت بگو"
+                        + (zone.estimated ? "؛ و چون تخمینی است با لحن محتاطانه‌تر بگو." : "."),
                 null, fallback, 10_000L);
     }
 

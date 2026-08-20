@@ -106,6 +106,17 @@ public final class OverpassPoiProvider {
         minLat -= pad; maxLat += pad; minLon -= pad; maxLon += pad;
         if ((maxLat - minLat) > 3d || (maxLon - minLon) > 3d) return Collections.emptyList();
         String bbox = minLat + "," + minLon + "," + maxLat + "," + maxLon;
+        List<SpeedLimitPoint> limits = taggedSpeedLimits(bbox, geometry);
+        List<SpeedLimitPoint> estimated = estimatedIranSpeedLimits(bbox, geometry, limits);
+        if (!estimated.isEmpty()) {
+            ArrayList<SpeedLimitPoint> combined = new ArrayList<>(limits);
+            combined.addAll(estimated);
+            return combined;
+        }
+        return limits;
+    }
+
+    private List<SpeedLimitPoint> taggedSpeedLimits(String bbox, List<RoutePoint> geometry) throws Exception {
         JSONObject body = request("[out:json][timeout:18];way[\"highway\"][\"maxspeed\"](" + bbox
                 + ");out tags geom 500;");
         JSONArray items = body.optJSONArray("elements");
@@ -138,6 +149,72 @@ public final class OverpassPoiProvider {
         }
         return limits;
     }
+
+    /** Iran's official (day, car/pickup) legal maximums for the small set of {@code highway}
+     *  classes that map cleanly to a single road type regardless of whether they sit inside or
+     *  outside a city - see the آیین‌نامه راهنمایی و رانندگی table. Deliberately excludes
+     *  primary/secondary/tertiary: OSM alone cannot tell whether one of those is an inter-city
+     *  main road (95) or an ordinary urban arterial (60), and guessing wrong there is exactly the
+     *  false-warning risk this feature must avoid. */
+    private static int iranLegalDefaultKmh(String highway) {
+        if (highway == null) return 0;
+        switch (highway) {
+            case "motorway": return 120; // آزادراه
+            case "trunk": return 110;    // بزرگراه با خطوط جدا
+            case "residential": return 30; // خیابان/کوچهٔ محله‌ای؛ عدد محافظه‌کارانه و قابل تنظیم
+            default: return 0;
+        }
+    }
+
+    /** Fills gaps left by {@link #taggedSpeedLimits} using {@link #iranLegalDefaultKmh}, only for
+     *  ways whose {@code highway} class is in that safe-to-infer set and which carry no
+     *  {@code maxspeed} tag at all. Skips any point that already has a tagged value nearby, so an
+     *  estimate never overrides or duplicates a real, road-specific number. Each result is marked
+     *  {@code estimated=true} so callers can render/announce it differently (see SpeedLimitPoint).
+     */
+    private List<SpeedLimitPoint> estimatedIranSpeedLimits(String bbox, List<RoutePoint> geometry,
+            List<SpeedLimitPoint> tagged) throws Exception {
+        JSONObject body = request("[out:json][timeout:18];way[\"highway\"~\"^(motorway|trunk|residential)$\"]"
+                + "[!\"maxspeed\"](" + bbox + ");out tags geom 500;");
+        JSONArray items = body.optJSONArray("elements");
+        ArrayList<SpeedLimitPoint> estimates = new ArrayList<>();
+        if (items == null) return estimates;
+        for (int index = 0; index < items.length(); index++) {
+            JSONObject item = items.optJSONObject(index);
+            JSONObject tags = item == null ? null : item.optJSONObject("tags");
+            int limit = iranLegalDefaultKmh(tags == null ? null : tags.optString("highway", ""));
+            if (limit <= 0) continue;
+            JSONArray points = item.optJSONArray("geometry");
+            if (points == null) continue;
+            double closestLat = Double.NaN, closestLon = Double.NaN, closestDistance = Double.MAX_VALUE;
+            for (int pointIndex = 0; pointIndex < points.length(); pointIndex++) {
+                JSONObject point = points.optJSONObject(pointIndex);
+                if (point == null) continue;
+                double lat = point.optDouble("lat", Double.NaN);
+                double lon = point.optDouble("lon", Double.NaN);
+                if (Double.isNaN(lat) || Double.isNaN(lon) || !isInIran(lat, lon)) continue;
+                for (RoutePoint routePoint : geometry) {
+                    double distance = distanceMeters(routePoint.latitude, routePoint.longitude, lat, lon);
+                    if (distance < closestDistance) {
+                        closestDistance = distance;
+                        closestLat = lat;
+                        closestLon = lon;
+                    }
+                }
+            }
+            if (closestDistance > 90d) continue;
+            boolean nearTagged = false;
+            for (SpeedLimitPoint existing : tagged) {
+                if (distanceMeters(existing.latitude, existing.longitude, closestLat, closestLon) <= 60d) {
+                    nearTagged = true;
+                    break;
+                }
+            }
+            if (!nearTagged) estimates.add(new SpeedLimitPoint(closestLat, closestLon, limit, "قانون ایران (تخمینی)", true));
+        }
+        return estimates;
+    }
+
 
     /**
      * Best-effort railway level crossings, school zones (the caller decides whether "now" is an
