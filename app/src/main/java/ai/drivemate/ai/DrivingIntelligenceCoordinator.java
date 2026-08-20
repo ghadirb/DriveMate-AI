@@ -72,6 +72,11 @@ public class DrivingIntelligenceCoordinator {
             startDrainLocked();
             if (mode == Mode.FULL && fallback != null && !fallback.trim().isEmpty()) {
                 long budget = waitBudget(request.priority);
+                // budget is 0 for SAFETY by design (see waitBudget): a SAFETY request must never
+                // wait on the model/network, so it is resolved to the offline fallback immediately,
+                // right here, in both app modes. MainActivity's own SAFETY paths already short-circuit
+                // before ever calling request(), so this branch mainly guards any other/future caller
+                // that submits a SAFETY (or zero-budget DRIVING) request through this coordinator.
                 if (budget <= 0L && (request.priority == Priority.SAFETY || request.priority == Priority.DRIVING)) {
                     request.state = State.FALLBACK;
                     dispatch(request, fallback, false);
