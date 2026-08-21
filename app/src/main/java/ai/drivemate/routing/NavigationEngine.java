@@ -95,6 +95,20 @@ public class NavigationEngine {
     private int finalArrivalConfirmSamples;
     private static final int FINAL_ARRIVAL_CONFIRM_SAMPLES = 3;
     private static final int WAYPOINT_SKIP_CONFIRM_SAMPLES = 2;
+    /** Fast, independent off-route signal for a genuine turn: if the driver is right at the
+     *  maneuver point but moving in a direction that clearly does not match the turn the route
+     *  expects there, that is a strong signal on its own and does not need to wait for the
+     *  larger lateral-distance corridor below to accumulate. Deliberately narrow so it can only
+     *  ever make detection faster, never slower or less reliable: it only evaluates real turns
+     *  (see MISSED_MANEUVER_MIN_TURN_ANGLE_DEGREES), only within a short radius of the maneuver,
+     *  only at meaningful driving speed, and still requires two confirming fixes. It has its own
+     *  sample counter so it cannot interact with the existing offRouteSamples state at all. */
+    private static final float MISSED_MANEUVER_RADIUS_METERS = 70f;
+    private static final float MISSED_MANEUVER_MIN_TURN_ANGLE_DEGREES = 35f;
+    private static final float MISSED_MANEUVER_HEADING_DIFF_DEGREES = 65f;
+    private static final float MISSED_MANEUVER_MIN_SPEED_MPS = 2.5f;
+    private static final int MISSED_MANEUVER_CONFIRM_SAMPLES = 2;
+    private int missedManeuverSamples;
     private static final double PASSED_STEP_BUFFER_METERS = 35d;
     private static final double SKIPPED_WAYPOINT_BUFFER_METERS = 180d;
     private static final float GEOGRAPHIC_WAYPOINT_SKIP_ADVANTAGE_METERS = 180f;
@@ -135,6 +149,7 @@ public class NavigationEngine {
         }
         this.lastOffRouteCallbackAt = 0L;
         this.offRouteSamples = 0;
+        this.missedManeuverSamples = 0;
         this.advanceConfirmSamples = 0;
         this.passedStepConfirmSamples = 0;
         this.skippedWaypointConfirmSamples = 0;
@@ -162,6 +177,7 @@ public class NavigationEngine {
         finalDestination = null;
         targetReference = null;
         offRouteSamples = 0;
+        missedManeuverSamples = 0;
         advanceConfirmSamples = 0;
         passedStepConfirmSamples = 0;
         skippedWaypointConfirmSamples = 0;
@@ -528,12 +544,65 @@ public class NavigationEngine {
         }
         if (routeDistance <= corridorMeters * 0.65f) offRouteSamples = 0;
 
+        // Independent fast path: the lateral-distance corridor above can take 50-90m to confirm
+        // in a dense street grid with short blocks, because it waits for the fix to end up that
+        // far from the polyline. A driver who goes straight through an intersection instead of
+        // making the required turn is detectably off much sooner: right at that intersection,
+        // moving in a direction the route never expected there. This never overrides or delays
+        // the checks above - it only adds an earlier "yes" for this specific, narrow case.
+        if (missedManeuverSuspected(location, targetDistance)) {
+            missedManeuverSamples++;
+            if (missedManeuverSamples >= MISSED_MANEUVER_CONFIRM_SAMPLES) return true;
+        } else {
+            missedManeuverSamples = 0;
+        }
+
         // Without a route polyline, a far maneuver end point cannot be used for off-route detection.
         if (targetDistanceAtReference > 160f) return false;
         boolean movingAway = movedFromReference >= 80f
                 && targetDistance > Math.max(180f, targetDistanceAtReference + 100f);
         offRouteSamples = movingAway ? offRouteSamples + 1 : 0;
         return offRouteSamples >= 2;
+    }
+
+    /** True when the driver is right at the current maneuver point but heading in a direction
+     *  that clearly does not match the turn the route expects there. Deliberately conservative:
+     *  skipped entirely unless every one of the guards below holds, so it can only fire for the
+     *  specific "drove straight through the intersection instead of turning" case, never for a
+     *  driver still approaching, stopped, or on a step that is not a real turn. */
+    private boolean missedManeuverSuspected(Location location, float targetDistance) {
+        if (targetDistance > MISSED_MANEUVER_RADIUS_METERS) return false;
+        if (!location.hasBearing() || !location.hasSpeed()
+                || location.getSpeed() < MISSED_MANEUVER_MIN_SPEED_MPS) return false;
+        Float expectedHeading = expectedTurnHeadingAfterCurrentStep();
+        if (expectedHeading == null) return false;
+        return headingDifferenceDegrees(location.getBearing(), expectedHeading)
+                > MISSED_MANEUVER_HEADING_DIFF_DEGREES;
+    }
+
+    /** Heading the route expects right after the current maneuver, or null when this step is not
+     *  a genuine turn (or sits at the very start/end of the step list, where a neighbouring point
+     *  on each side is not available) - in which case the fast path above never applies at all. */
+    private Float expectedTurnHeadingAfterCurrentStep() {
+        if (route == null || route.steps == null) return null;
+        int index = Math.min(nextStep, route.steps.size() - 1);
+        if (index <= 0 || index >= route.steps.size() - 1) return null;
+        RouteStep before = route.steps.get(index - 1);
+        RouteStep current = route.steps.get(index);
+        RouteStep after = route.steps.get(index + 1);
+        if (before.waypointOrdinal >= 0 || current.waypointOrdinal >= 0) return null;
+        float headingIn = asLocation(before).bearingTo(asLocation(current));
+        float headingOut = asLocation(current).bearingTo(asLocation(after));
+        if (headingDifferenceDegrees(headingIn, headingOut) < MISSED_MANEUVER_MIN_TURN_ANGLE_DEGREES) {
+            return null;
+        }
+        return headingOut;
+    }
+
+    /** Smallest angle between two compass headings, in the 0-180 degree range. */
+    private static float headingDifferenceDegrees(float a, float b) {
+        float diff = Math.abs(a - b) % 360f;
+        return diff > 180f ? 360f - diff : diff;
     }
 
     private boolean accuracyOk(Location location) {
@@ -686,6 +755,7 @@ public class NavigationEngine {
 
     private void updateTargetReference(Location location) {
         offRouteSamples = 0;
+        missedManeuverSamples = 0;
         if (location == null || route == null || route.steps.isEmpty()) {
             targetReference = null;
             targetDistanceAtReference = Float.MAX_VALUE;
