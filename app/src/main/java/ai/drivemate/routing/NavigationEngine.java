@@ -308,7 +308,10 @@ public class NavigationEngine {
             float metersToWaypoint = location.distanceTo(asLocation(waypoint));
             // Announce before the skip test so a delayed/fake GPS jump cannot silently consume the stop.
             float waypointSpeed = smoothedSpeedMps(location);
-            float waypointLeadSeconds = waypointSpeed >= 22f ? 10f : 8f;
+            // Continuous speed scale (was a hard 8s/10s step at one cutoff): a driver going faster
+            // gets a genuinely longer reaction window, not just a proportionally larger distance at
+            // the same fixed number of seconds, so there is real extra time to plan the stop.
+            float waypointLeadSeconds = clamp(6f, 12f, 6f + waypointSpeed * 0.22f);
             float waypointAnnounceDistance = Math.max(120f, Math.min(320f,
                     Math.max(waypoint.distanceMeters * 0.65f, waypointSpeed * waypointLeadSeconds)));
             if (announcedWaypointIndex != nextWaypointIndex

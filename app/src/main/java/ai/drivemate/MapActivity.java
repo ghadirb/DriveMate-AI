@@ -2800,6 +2800,15 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         map.addMarker(vehicleMarker);
     }
 
+    /** How far the live GPS fix may drift from the progress tracker's snapped point before the
+     *  arrow prefers the raw fix instead. Deliberately smaller than that tracker's own on-route
+     *  corridor (45-130m, see RouteProgressTracker) - that wider corridor is right for progress
+     *  percentage and remaining distance, which should not jitter on every GPS wobble, but it lets
+     *  the arrow stay pinned to the old line for a few seconds after a real turn, looking frozen.
+     *  This constant only changes where the arrow is drawn; it does not affect onRoute, progress,
+     *  off-route detection, or rerouting, all of which keep using the tracker's own point. */
+    private static final float VEHICLE_MARKER_MAX_SNAP_DRIFT_METERS = 35f;
+
     private LatLng drivingPosition() {
         if (selectedRoute == null || selectedRoute.geometry.isEmpty()) {
             return new LatLng(originLatitude, originLongitude);
@@ -2808,7 +2817,19 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         // vehicle arrow from snapping to an earlier loop/parallel-road vertex on noisy GPS fixes.
         if (navigationServiceBound && navigationService != null) {
             RoutePoint snapped = navigationService.getNavigationEngine().snappedRoutePosition();
-            if (snapped != null) { return new LatLng(snapped.latitude, snapped.longitude); }
+            if (snapped != null) {
+                Location current = new Location("gps");
+                current.setLatitude(originLatitude);
+                current.setLongitude(originLongitude);
+                Location snappedLocation = new Location("route");
+                snappedLocation.setLatitude(snapped.latitude);
+                snappedLocation.setLongitude(snapped.longitude);
+                if (current.distanceTo(snappedLocation) <= VEHICLE_MARKER_MAX_SNAP_DRIFT_METERS) {
+                    return new LatLng(snapped.latitude, snapped.longitude);
+                }
+                // Drifted too far from the snapped point for the arrow to look right there - fall
+                // through to the raw-fix search below instead of returning the stale snapped point.
+            }
         }
         RoutePoint nearest = null;
         float nearestMeters = Float.MAX_VALUE;
