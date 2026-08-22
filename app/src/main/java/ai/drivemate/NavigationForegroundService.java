@@ -559,33 +559,40 @@ public class NavigationForegroundService extends Service implements BackgroundNa
                     new java.util.concurrent.atomic.AtomicBoolean(false);
             final android.os.Handler fallbackHandler =
                     new android.os.Handler(android.os.Looper.getMainLooper());
+            final long requestedAt = System.currentTimeMillis();
             final Runnable localFallback = () -> {
                 if (generation != waypointSpeechGeneration
                         || !delivered.compareAndSet(false, true)) return;
                 // Cancel a slow network response before its audio can arrive after the local
                 // safety cue has already been spoken.
                 onlineSpeechClient.stopPlayback();
-                android.util.Log.w(TAG, "waypoint online TTS watchdog; local fallback");
+                android.util.Log.w(TAG, "waypoint online TTS watchdog after "
+                        + (System.currentTimeMillis() - requestedAt) + "ms; local fallback");
                 if (voicePlayer != null) voicePlayer.speak(text);
             };
-            // GapGPT's real round trip for this endpoint has been observed at ~1.8-1.9s in the
-            // field, so a 1.5s watchdog lost the race almost every time even when the network was
-            // healthy - the online voice was actually working, it just consistently arrived a few
-            // hundred ms after the local fallback had already spoken. 2.6s gives enough headroom
-            // above that observed latency while still being short enough that a genuinely stalled
-            // request doesn't leave the driver waiting.
-            fallbackHandler.postDelayed(localFallback, 2_600L);
+            // GapGPT's round trip for this endpoint varies more than expected: one field sample
+            // needed ~1.87s, but a later one needed longer than the 2.6s watchdog that was sized
+            // for that first sample. Widened further with real margin, and the callbacks below now
+            // always log how long the request actually took - even when it lost the race to the
+            // watchdog - so the next round of field testing shows the true distribution instead of
+            // just "too slow" with no number attached.
+            fallbackHandler.postDelayed(localFallback, 3_800L);
             onlineSpeechClient.speak(text, new OnlineSpeechClient.SpeechCallback() {
                 @Override public void onPlayed() {
-                    if (!delivered.compareAndSet(false, true)) return;
+                    long elapsedMs = System.currentTimeMillis() - requestedAt;
+                    boolean wasFirst = delivered.compareAndSet(false, true);
+                    android.util.Log.i(TAG, "waypoint online TTS finished in " + elapsedMs
+                            + "ms provider=" + onlineSpeechClient.getLastTtsProvider()
+                            + " used=" + wasFirst);
+                    if (!wasFirst) return;
                     fallbackHandler.removeCallbacks(localFallback);
-                    android.util.Log.i(TAG, "waypoint TTS provider="
-                            + onlineSpeechClient.getLastTtsProvider());
                 }
                 @Override public void onError() {
+                    long elapsedMs = System.currentTimeMillis() - requestedAt;
                     fallbackHandler.removeCallbacks(localFallback);
                     if (!delivered.compareAndSet(false, true)) return;
-                    android.util.Log.w(TAG, "waypoint online TTS failed; local fallback");
+                    android.util.Log.w(TAG, "waypoint online TTS failed after " + elapsedMs
+                            + "ms; local fallback");
                     if (generation == waypointSpeechGeneration
                             && navigationEngine.isNavigating() && voicePlayer != null) {
                         voicePlayer.speak(text);
