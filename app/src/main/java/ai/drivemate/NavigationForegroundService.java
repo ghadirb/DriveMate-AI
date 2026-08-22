@@ -568,7 +568,13 @@ public class NavigationForegroundService extends Service implements BackgroundNa
                 android.util.Log.w(TAG, "waypoint online TTS watchdog; local fallback");
                 if (voicePlayer != null) voicePlayer.speak(text);
             };
-            fallbackHandler.postDelayed(localFallback, 1_500L);
+            // GapGPT's real round trip for this endpoint has been observed at ~1.8-1.9s in the
+            // field, so a 1.5s watchdog lost the race almost every time even when the network was
+            // healthy - the online voice was actually working, it just consistently arrived a few
+            // hundred ms after the local fallback had already spoken. 2.6s gives enough headroom
+            // above that observed latency while still being short enough that a genuinely stalled
+            // request doesn't leave the driver waiting.
+            fallbackHandler.postDelayed(localFallback, 2_600L);
             onlineSpeechClient.speak(text, new OnlineSpeechClient.SpeechCallback() {
                 @Override public void onPlayed() {
                     if (!delivered.compareAndSet(false, true)) return;
