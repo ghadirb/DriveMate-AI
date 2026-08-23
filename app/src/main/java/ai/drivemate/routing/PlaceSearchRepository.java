@@ -22,12 +22,15 @@ public class PlaceSearchRepository {
     public interface ErrorCallback { void onError(String message); }
 
     private final NeshanRoutingProvider neshan;
+    private final MapIrSearchProvider mapir;
     private final TomTomPoiProvider tomtom;
     private final OverpassPoiProvider overpass;
     private final NominatimSearchProvider nominatim;
 
-    public PlaceSearchRepository(NeshanRoutingProvider neshan, String tomtomApiKey) {
+    public PlaceSearchRepository(NeshanRoutingProvider neshan, MapIrRoutingProvider mapIrRoutingProvider,
+                                  String tomtomApiKey) {
         this.neshan = neshan;
+        this.mapir = new MapIrSearchProvider(mapIrRoutingProvider);
         this.tomtom = new TomTomPoiProvider(tomtomApiKey);
         this.overpass = new OverpassPoiProvider();
         this.nominatim = new NominatimSearchProvider();
@@ -64,6 +67,13 @@ public class PlaceSearchRepository {
             if (results.size() < 5) {
                 try { addUnique(results, overpass.searchNearby(term, latitude, longitude)); }
                 catch (Exception exception) { failures.add("OpenStreetMap nearby: " + messageOf(exception)); }
+            }
+            // map.ir next: it already runs on the routing key you're paying for regardless, so
+            // this costs nothing extra beyond what's already being spent on navigation - it's
+            // tried before Neshan/TomTom, which are separate paid keys with their own quotas.
+            if (results.size() < 3 && mapir.isConfigured()) {
+                try { addUnique(results, mapir.search(term, latitude, longitude)); }
+                catch (Exception exception) { failures.add("map.ir search: " + messageOf(exception)); }
             }
             if (results.size() < 3) {
                 try { addUnique(results, searchNeshanGeocoding(term)); }
@@ -114,6 +124,10 @@ public class PlaceSearchRepository {
         mergeOutcome(results, failures, overpassOutcome, "OpenStreetMap nearby");
         mergeOutcome(results, failures, nominatimOutcome, "OpenStreetMap (Nominatim) nearby");
 
+        if (results.size() < OSM_SUFFICIENT_RESULT_COUNT && mapir.isConfigured()) {
+            try { addUnique(results, mapir.search(term, latitude, longitude)); }
+            catch (Exception exception) { failures.add("map.ir nearby: " + messageOf(exception)); }
+        }
         if (results.size() < OSM_SUFFICIENT_RESULT_COUNT) {
             try { addUnique(results, searchNeshan(term, latitude, longitude)); }
             catch (Exception exception) { failures.add("Neshan nearby: " + messageOf(exception)); }

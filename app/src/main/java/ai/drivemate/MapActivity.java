@@ -399,7 +399,7 @@ public class MapActivity extends Activity implements LocationListener, Navigatio
         mapIrRoutingProvider = new MapIrRoutingProvider(mapIrKey);
         tomTomRoutingProvider = new TomTomRoutingProvider(tomtomKey);
         openRouteServiceRoutingProvider = new OpenRouteServiceRoutingProvider(openRouteServiceKey);
-        placeSearchRepository = new PlaceSearchRepository(neshanRoutingProvider, tomtomKey);
+        placeSearchRepository = new PlaceSearchRepository(neshanRoutingProvider, mapIrRoutingProvider, tomtomKey);
         trafficIncidentProvider = new TrafficIncidentProvider(tomtomKey);
         trafficIncidentProvider.setEnabled(false);
         routeRepository = new RouteRepository(mapIrRoutingProvider, neshanRoutingProvider,

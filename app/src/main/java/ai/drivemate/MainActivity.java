@@ -295,7 +295,7 @@ public class MainActivity extends Activity {
         tomTomRoutingProvider = new TomTomRoutingProvider("");
         routeRepository = new RouteRepository(mapIrRoutingProvider, neshanRoutingProvider,
                 openRouteServiceRoutingProvider, tomTomRoutingProvider);
-        placeSearchRepository = new PlaceSearchRepository(neshanRoutingProvider, "");
+        placeSearchRepository = new PlaceSearchRepository(neshanRoutingProvider, mapIrRoutingProvider, "");
         commandParser = new VoiceCommandParser();
         aiAssistant = new AiAssistant(BuildConfig.AI_API_KEY);
         intelligenceCoordinator = new DrivingIntelligenceCoordinator(aiAssistant);
