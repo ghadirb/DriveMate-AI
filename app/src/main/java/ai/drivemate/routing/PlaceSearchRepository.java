@@ -39,6 +39,13 @@ public class PlaceSearchRepository {
     public void setTomTomApiKey(String apiKey) { tomtom.setApiKey(apiKey); }
     public void setTomTomEnabled(boolean enabled) { tomtom.setEnabled(enabled); }
 
+    /** Logs the running result count right after each provider stage runs, so a logcat capture
+     *  shows exactly which provider(s) actually contributed to a given search - log-only, does
+     *  not affect the search result itself. */
+    private void logStage(String stage, int runningCount) {
+        android.util.Log.i("DriveMateSearch", "stage=" + stage + " runningResultCount=" + runningCount);
+    }
+
     public void search(String term, double latitude, double longitude, SuccessCallback success, ErrorCallback error) {
         searchAll(term, latitude, longitude, places -> success.onSuccess(places.get(0)), error);
     }
@@ -64,9 +71,11 @@ public class PlaceSearchRepository {
             // Free nationwide search is first; paid providers are reserved for sparse OSM results.
             try { addUnique(results, nominatim.search(term, latitude, longitude)); }
             catch (Exception exception) { failures.add("OpenStreetMap (Nominatim) search: " + messageOf(exception)); }
+            logStage("nominatim", results.size());
             if (results.size() < 5) {
                 try { addUnique(results, overpass.searchNearby(term, latitude, longitude)); }
                 catch (Exception exception) { failures.add("OpenStreetMap nearby: " + messageOf(exception)); }
+                logStage("overpass", results.size());
             }
             // map.ir next: it already runs on the routing key you're paying for regardless, so
             // this costs nothing extra beyond what's already being spent on navigation - it's
@@ -74,22 +83,30 @@ public class PlaceSearchRepository {
             if (results.size() < 3 && mapir.isConfigured()) {
                 try { addUnique(results, mapir.search(term, latitude, longitude)); }
                 catch (Exception exception) { failures.add("map.ir search: " + messageOf(exception)); }
+                logStage("mapir", results.size());
             }
             if (results.size() < 3) {
                 try { addUnique(results, searchNeshanGeocoding(term)); }
                 catch (Exception exception) { failures.add("Neshan geocoding: " + messageOf(exception)); }
+                logStage("neshan_geocoding", results.size());
                 if (results.size() < 3) {
                     try { addUnique(results, searchNeshan(term, latitude, longitude)); }
                     catch (Exception exception) { failures.add("Neshan search: " + messageOf(exception)); }
+                    logStage("neshan_nearby", results.size());
                 }
                 if (results.size() < 3) {
                     try { addUnique(results, searchNeshan(term, 32.4279d, 53.6880d)); }
                     catch (Exception exception) { failures.add("Neshan Iran-wide search: " + messageOf(exception)); }
+                    logStage("neshan_iran_wide", results.size());
                 }
             }
             if (results.size() < 5 && tomtom.isConfigured()) {
                 try { addUnique(results, tomtom.searchNearby(term, latitude, longitude)); }
                 catch (Exception exception) { failures.add("TomTom nearby: " + messageOf(exception)); }
+                logStage("tomtom", results.size());
+            }
+            if (!failures.isEmpty()) {
+                android.util.Log.w("DriveMateSearch", "provider failures: " + join(failures));
             }
             rank(results, term, latitude, longitude);
             results = keepBestMatchTier(results, term);
@@ -123,14 +140,17 @@ public class PlaceSearchRepository {
         joinQuietly(nominatimThread);
         mergeOutcome(results, failures, overpassOutcome, "OpenStreetMap nearby");
         mergeOutcome(results, failures, nominatimOutcome, "OpenStreetMap (Nominatim) nearby");
+        logStage("nearby_osm", results.size());
 
         if (results.size() < OSM_SUFFICIENT_RESULT_COUNT && mapir.isConfigured()) {
             try { addUnique(results, mapir.search(term, latitude, longitude)); }
             catch (Exception exception) { failures.add("map.ir nearby: " + messageOf(exception)); }
+            logStage("nearby_mapir", results.size());
         }
         if (results.size() < OSM_SUFFICIENT_RESULT_COUNT) {
             try { addUnique(results, searchNeshan(term, latitude, longitude)); }
             catch (Exception exception) { failures.add("Neshan nearby: " + messageOf(exception)); }
+            logStage("nearby_neshan", results.size());
         }
         // TomTom is optional and only needed if the combined result set is still thin; kept
         // sequential and last since it is the least-often-needed provider (isConfigured() is
