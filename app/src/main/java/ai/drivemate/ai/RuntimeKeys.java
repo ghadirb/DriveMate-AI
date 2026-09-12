@@ -21,7 +21,9 @@ import javax.crypto.spec.SecretKeySpec;
 public class RuntimeKeys {
     public static final String[] DEFAULT_URLS = new String[]{
             "https://abrehamrahi.ir/o/public/eUFcsXOX",
-            "https://gist.githubusercontent.com/ghadirb/626a804df3009e49045a2948dad89fe5/raw/c93c06d1b2f38c65ee30f092c134a89998326d12/keys.txt"
+            // Do not pin a Gist revision here: runtime configuration changes (such as a proxy URL)
+            // must be visible without rebuilding and reinstalling the APK.
+            "https://gist.githubusercontent.com/ghadirb/626a804df3009e49045a2948dad89fe5/raw/keys.txt"
     };
     private final Map<String, String> values = new LinkedHashMap<>();
 
