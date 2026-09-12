@@ -40,6 +40,7 @@
             android:name=".MapActivity"
             android:exported="false"
             android:screenOrientation="portrait" />
+        <activity android:name=".CarDiagnosisActivity" android:exported="false" android:screenOrientation="portrait" />
         <service
             android:name=".NavigationForegroundService"
             android:exported="false"

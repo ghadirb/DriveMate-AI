@@ -147,6 +147,13 @@
             android:textColor="@color/white"
             android:textSize="20sp" />
 
+        <Button
+            android:id="@+id/carDiagnosisButton"
+            style="@style/HomeActionButton"
+            android:layout_width="match_parent"
+            android:layout_marginTop="10dp"
+            android:text="عیب‌یابی هوشمند خودرو" />
+
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"

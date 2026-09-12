@@ -433,6 +433,12 @@ public class MainActivity extends Activity {
         findViewById(R.id.favoritesButton).setOnClickListener(v -> showPlaces(true));
         findViewById(R.id.recentButton).setOnClickListener(v -> showRecent());
         findViewById(R.id.settingsButton).setOnClickListener(v -> showSettingsMenu());
+        findViewById(R.id.carDiagnosisButton).setOnClickListener(v -> {
+            Intent intent = new Intent(this, CarDiagnosisActivity.class);
+            intent.putExtra(CarDiagnosisActivity.EXTRA_PROXY_URL,
+                    runtimeKeys == null ? "" : runtimeKeys.get("CAR_DIAGNOSIS_PROXY_URL"));
+            startActivity(intent);
+        });
         intelligenceButton.setOnClickListener(v -> showIntelligenceModeDialog());
         findViewById(R.id.stopButton).setOnClickListener(v -> requestStopNavigation("مسیریابی متوقف شد."));
         notificationButton.setOnClickListener(v -> toggleBackgroundNavigation());
