@@ -44,6 +44,15 @@ public class RuntimeKeys {
         return getBoolean(normalized + "_ENABLED", defaultValue);
     }
 
+    private boolean hasUsableConfiguration() {
+        for (String name : values.keySet()) {
+            String normalized = name == null ? "" : name.trim().toUpperCase();
+            if (normalized.endsWith("_API_KEY") || normalized.endsWith("_BASE_URL")
+                    || normalized.endsWith("_PROXY_URL") || normalized.endsWith("_ENABLED")) return true;
+        }
+        return false;
+    }
+
     public static RuntimeKeys fetchDefault(String decryptSecret) {
         return fetch(DEFAULT_URLS, decryptSecret);
     }
@@ -55,7 +64,10 @@ public class RuntimeKeys {
                 String body = getText(url);
                 String decoded = decodePayload(body, decryptSecret);
                 parse(decoded, keys);
-                if (!keys.values.isEmpty()) return keys;
+                // A dead endpoint can return JSON such as {"detail":"Not found"}. It is valid
+                // JSON but not a configuration payload; do not let it suppress the next source.
+                if (keys.hasUsableConfiguration()) return keys;
+                keys = new RuntimeKeys();
             } catch (Exception ignored) { }
         }
         return keys;
