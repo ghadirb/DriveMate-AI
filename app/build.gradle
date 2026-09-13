@@ -47,7 +47,7 @@ android {
         minSdk 26
         targetSdk 35
         versionCode 1
-        versionName "0.1.0"
+        versionName "1.0.0"
 
         buildConfigField "String", "AI_API_KEY", "\"${aiApiKey}\""
         buildConfigField "String", "OPENWEATHERMAP_API_KEY", "\"${openWeatherMapApiKey}\""
@@ -76,5 +76,12 @@ gradle.taskGraph.whenReady { graph ->
     boolean releaseRequested = graph.allTasks.any { task -> task.name.toLowerCase(Locale.ROOT).contains("release") }
     if (releaseRequested && !releaseSigningReady) {
         throw new GradleException("Release signing is not configured. Set RELEASE_STORE_FILE, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, and ANDROID_KEY_PASSWORD.")
+    }
+    // "12345" is only ever a local/debug fallback. A release build inherits it silently whenever
+    // the CI secret was misnamed, missing from the environment group, or simply never set - and
+    // the resulting APK would then decrypt the shared API-key payload with a password anyone can
+    // guess from this very file, defeating the point of encrypting it at all.
+    if (releaseRequested && keysDecryptSecret == "12345") {
+        throw new GradleException("KEYS_DECRYPTION_SECRET is still the insecure default (\"12345\") for a release build. Set the real secret as an environment variable (or in local.properties for a local release build) before building for release.")
     }
 }
