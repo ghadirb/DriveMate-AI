@@ -108,12 +108,23 @@ public class CarDiagnosisActivity extends android.app.Activity {
             try {
                 JSONObject body = new JSONObject(); body.put("type", mode); body.put("vehicle", value(vehicle)); body.put("year", value(year)); body.put("mileage", value(mileage)); body.put("engineState", value(engineState)); body.put("drivingState", value(drivingState)); body.put("throttleChange", value(throttleChange)); body.put("description", value(description));
                 if (mediaUri != null) { String mime = mediaMime == null ? "application/octet-stream" : mediaMime; body.put("mimeType", mime); body.put("mediaBase64", readBase64(mediaUri, limitFor(mode))); }
-                CarDiagnosisClient.analyze(proxyUrl.trim(), body, new CarDiagnosisClient.Callback() { public void onSuccess(String answer) { runOnUiThread(() -> { status.setText("تحلیل دریافت شد."); result.setText(answer); analyzeButton.setEnabled(true); }); } public void onFailure(String message) { runOnUiThread(() -> { status.setText("خطا در تحلیل: " + message); analyzeButton.setEnabled(true); }); } });
+                CarDiagnosisClient.analyze(proxyUrl.trim(), body, new CarDiagnosisClient.Callback() { public void onSuccess(String answer) { runOnUiThread(() -> { status.setText("تحلیل دریافت شد."); result.setText(formatAnalysis(answer)); analyzeButton.setEnabled(true); }); } public void onFailure(String message) { runOnUiThread(() -> { status.setText("خطا در تحلیل: " + message); analyzeButton.setEnabled(true); }); } });
             } catch (Exception error) { runOnUiThread(() -> { status.setText("فایل قابل ارسال نیست: " + error.getMessage()); analyzeButton.setEnabled(true); }); }
         }).start();
     }
     private long limitFor(String type) { return "audio".equals(type) ? MAX_AUDIO_BYTES : "video".equals(type) ? MAX_VIDEO_BYTES : MAX_IMAGE_BYTES; }
     private String readBase64(Uri uri, long limit) throws Exception { ByteArrayOutputStream output = new ByteArrayOutputStream(); byte[] block = new byte[8192]; int total = 0, count; try (InputStream input = getContentResolver().openInputStream(uri)) { if (input == null) throw new IllegalStateException("فایل باز نشد."); while ((count = input.read(block)) != -1) { total += count; if (total > limit) throw new IllegalStateException("حجم فایل از حد مجاز بیشتر است."); output.write(block, 0, count); } } return Base64.getEncoder().encodeToString(output.toByteArray()); }
     private String value(EditText input) { return input.getText().toString().trim(); }
+    private String formatAnalysis(String raw) {
+        String value = raw == null ? "" : raw.trim();
+        if (value.startsWith("```")) { int first = value.indexOf('\n'); int last = value.lastIndexOf("```"); if (first > 0 && last > first) value = value.substring(first + 1, last).trim(); }
+        try {
+            JSONObject json = new JSONObject(value); StringBuilder out = new StringBuilder();
+            appendJson(out, json, "summary", "خلاصه"); appendJson(out, json, "observations", "مشاهدات");
+            if (json.has("probableCauses")) { out.append("\nعلت‌های احتمالی:\n"); org.json.JSONArray causes = json.optJSONArray("probableCauses"); if (causes != null) for (int i = 0; i < causes.length(); i++) { JSONObject cause = causes.optJSONObject(i); if (cause != null) out.append("• ").append(cause.optString("cause", "نامشخص")).append(" (اطمینان ").append(cause.optString("confidence", "نامشخص")).append(")\n"); } }
+            appendJson(out, json, "checks", "بررسی‌های پیشنهادی"); appendJson(out, json, "urgency", "فوریت"); appendJson(out, json, "safetyWarning", "هشدار ایمنی"); return out.toString().trim();
+        } catch (Exception ignored) { return value; }
+    }
+    private void appendJson(StringBuilder out, JSONObject json, String key, String label) { if (!json.has(key)) return; String value = json.optString(key, ""); if (!value.isEmpty()) out.append(label).append(": ").append(value).append("\n"); }
     @Override protected void onDestroy() { if (recording) stopRecording(); releaseRecorder(); super.onDestroy(); }
 }

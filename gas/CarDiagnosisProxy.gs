@@ -11,19 +11,45 @@ function doPost(e) {
     const model = properties.getProperty('CAR_DIAGNOSIS_MODEL') || 'gemini-2.5-pro';
     const baseUrl = (properties.getProperty('AVALAI_BASE_URL') || 'https://api.avalai.ir').replace(/\/$/, '');
     if (!apiKey) throw new Error('تنظیم AVALAI_API_KEY در Script Properties انجام نشده است.');
-    const parts = [{text: diagnosisPrompt_(request)}];
-    if (request.mediaBase64) parts.push({inlineData: {mimeType: request.mimeType, data: request.mediaBase64}});
-    const payload = {contents: [{role: 'user', parts: parts}], generationConfig: {temperature: 0.2, responseMimeType: 'application/json'}};
-    const response = UrlFetchApp.fetch(baseUrl + '/v1beta/models/' + encodeURIComponent(model) + ':generateContent', {
-      method: 'post', contentType: 'application/json', payload: JSON.stringify(payload), headers: {'x-goog-api-key': apiKey}, muteHttpExceptions: true
+    let endpoint, payload, headers = {};
+    if (request.type === 'audio') {
+      // AvalAI's documented OpenAI-compatible audio contract uses input_audio. The
+      // native Gemini inlineData shape can otherwise be accepted but ignored by some
+      // OpenAI-routed Gemini deployments.
+      const format = audioFormat_(request.mimeType);
+      endpoint = baseUrl + '/v1/chat/completions';
+      payload = {model: model, messages: [{role: 'user', content: [
+        {type: 'text', text: diagnosisPrompt_(request)},
+        {type: 'input_audio', input_audio: {data: request.mediaBase64, format: format}}
+      ]}], max_tokens: 1200, temperature: 0.2, reasoning_effort: 'low'};
+      headers.Authorization = 'Bearer ' + apiKey;
+    } else {
+      const parts = [{text: diagnosisPrompt_(request)}];
+      if (request.mediaBase64) parts.push({inlineData: {mimeType: request.mimeType, data: request.mediaBase64}});
+      payload = {contents: [{role: 'user', parts: parts}], generationConfig: {temperature: 0.2, maxOutputTokens: 1200, responseMimeType: 'application/json', thinkingConfig: {thinkingBudget: 0}}};
+      endpoint = baseUrl + '/v1beta/models/' + encodeURIComponent(model) + ':generateContent';
+      headers['x-goog-api-key'] = apiKey;
+    }
+    const response = UrlFetchApp.fetch(endpoint, {
+      method: 'post', contentType: 'application/json', payload: JSON.stringify(payload), headers: headers, muteHttpExceptions: true
     });
     if (response.getResponseCode() >= 300) throw new Error('AvalAI HTTP ' + response.getResponseCode() + ': ' + response.getContentText().slice(0, 500));
     const provider = JSON.parse(response.getContentText());
-    const partsOut = (((provider.candidates || [])[0] || {}).content || {}).parts || [];
-    const analysis = partsOut.map(p => p.text || '').join('\n').trim();
+    let analysis = '';
+    if (request.type === 'audio') analysis = (((provider.choices || [])[0] || {}).message || {}).content || '';
+    else {
+      const partsOut = (((provider.candidates || [])[0] || {}).content || {}).parts || [];
+      analysis = partsOut.map(p => p.text || '').join('\n');
+    }
+    analysis = String(analysis).trim();
     if (!analysis) throw new Error('پاسخ تحلیلی از مدل دریافت نشد.');
     return json_({ok: true, analysis: analysis});
   } catch (error) { return json_({ok: false, error: String(error.message || error)}); }
+}
+
+/** Lets an owner verify that the deployed URL is alive in a browser. Analysis itself is POST-only. */
+function doGet() {
+  return json_({ok: true, service: 'car-diagnosis-proxy', message: 'برای تحلیل، درخواست POST از برنامه ارسال می‌شود.'});
 }
 
 function validateRequest_(r) {
@@ -35,6 +61,15 @@ function validateRequest_(r) {
 function diagnosisPrompt_(r) {
   const context = ['خودرو: ' + (r.vehicle || 'نامشخص'), 'سال: ' + (r.year || 'نامشخص'), 'کارکرد: ' + (r.mileage || 'نامشخص'), 'موتور: ' + (r.engineState || 'نامشخص'), 'وضعیت حرکت: ' + (r.drivingState || 'نامشخص'), 'تغییر با گاز: ' + (r.throttleChange || 'نامشخص'), 'شرح کاربر: ' + (r.description || 'ندارد')].join('\n');
   return `تو دستیار عیب‌یابی اولیهٔ خودرو هستی. ورودی ${r.type} را واقعاً تحلیل کن؛ برای ویدیو هم تصویر و هم صدای ویدیو را بررسی کن و فقط تبدیل گفتار به متن انجام نده.\n${context}\nپاسخ را فقط به فارسی و به JSON معتبر با کلیدهای summary، observations، probableCauses (آرایه با cause و confidence)، checks، urgency و safetyWarning بده. علت‌ها را احتمالی و از محتمل‌تر به کم‌محتمل‌تر مرتب کن. هرگز خرابی قطعی را ادعا نکن. urgency فقط یکی از عادی، نیازمند بررسی، بررسی سریع، خطر/توقف استفاده باشد. اگر نشانهٔ خطر مثل صدای شدید موتور، دود، نشتی شدید، داغی، چراغ روغن/دما، ترمز یا فرمان دیدی، هشدار صریح توقف ایمن و مراجعه فوری بده.`;
+}
+
+function audioFormat_(mimeType) {
+  const subtype = String(mimeType || 'audio/wav').toLowerCase().split(';')[0].split('/')[1] || 'wav';
+  if (subtype === 'mpeg' || subtype === 'mpga') return 'mp3';
+  // Android MediaRecorder creates an AAC stream in an MPEG-4 container; its common
+  // interchange name is m4a, not "mp4" video.
+  if (subtype === 'mp4' || subtype === 'x-m4a') return 'm4a';
+  return subtype;
 }
 
 function json_(value) { return ContentService.createTextOutput(JSON.stringify(value)).setMimeType(ContentService.MimeType.JSON); }

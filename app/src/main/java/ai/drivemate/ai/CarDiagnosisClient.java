@@ -19,7 +19,7 @@ public final class CarDiagnosisClient {
         new Thread(() -> {
             try {
                 HttpURLConnection c = (HttpURLConnection) new URL(proxyUrl).openConnection();
-                c.setRequestMethod("POST"); c.setConnectTimeout(15_000); c.setReadTimeout(90_000); c.setDoOutput(true);
+                c.setRequestMethod("POST"); c.setConnectTimeout(15_000); c.setReadTimeout(180_000); c.setDoOutput(true);
                 c.setRequestProperty("Content-Type", "application/json; charset=utf-8");
                 try (OutputStream out = c.getOutputStream()) { out.write(payload.toString().getBytes(StandardCharsets.UTF_8)); }
                 int code = c.getResponseCode();
@@ -32,7 +32,7 @@ public final class CarDiagnosisClient {
                 callback.onSuccess(analysis);
             } catch (Exception error) {
                 String message = error.getMessage() == null ? "خطای نامشخص در ارتباط با سرویس" : error.getMessage();
-                if (message.contains("timed out")) message = "زمان پاسخ سرویس تمام شد؛ اتصال را بررسی و دوباره تلاش کنید.";
+                if (message.contains("timed out")) message = "زمان پاسخ سرویس تمام شد. فایل کوتاه‌تر یا مدل سریع‌تر را امتحان کنید.";
                 callback.onFailure(message.length() > 500 ? message.substring(0, 500) : message);
             }
         }).start();
