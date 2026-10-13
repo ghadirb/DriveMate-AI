@@ -42,6 +42,7 @@ jobs:
         with:
           name: DriveMate-AI-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+          retention-days: 1
 
   release:
     if: github.event_name != 'pull_request'
@@ -90,9 +91,11 @@ jobs:
         with:
           name: DriveMate-AI-release-apk
           path: app/build/outputs/apk/release/*.apk
+          retention-days: 1
 
       - name: Upload signed Release AAB
         uses: actions/upload-artifact@v4
         with:
           name: DriveMate-AI-release-aab
           path: app/build/outputs/bundle/release/*.aab
+          retention-days: 1
